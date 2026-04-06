@@ -303,11 +303,18 @@ bool Conductor::CreatePeerConnection() {
 
   webrtc::PeerConnectionInterface::RTCConfiguration config;
   config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-  webrtc::PeerConnectionInterface::IceServer server;
-  server.uri = GetPeerConnectionString();
-  server.username = GetTurnUserName();
-  server.password = GetTurnPassword();
-  config.servers.push_back(server);
+
+  // 第一步：配置 STUN 服务器（一级方案 - P2P 直连）
+  webrtc::PeerConnectionInterface::IceServer stun_server;
+  stun_server.uri = GetSTUNServer();
+  config.servers.push_back(stun_server);
+
+  // 第二步：配置 TURN 服务器（保底方案 - 中继转发）
+  webrtc::PeerConnectionInterface::IceServer turn_server;
+  turn_server.uri = GetTURNServer();
+  turn_server.username = GetTurnUserName();
+  turn_server.password = GetTurnPassword();
+  config.servers.push_back(turn_server);
 
   webrtc::PeerConnectionDependencies pc_dependencies(this);
   auto error_or_peer_connection =

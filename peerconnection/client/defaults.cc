@@ -39,8 +39,12 @@ std::string GetEnvVarOrDefault(const char* env_var_name,
   return value;
 }
 
-std::string GetPeerConnectionString() {
-  return GetEnvVarOrDefault("WEBRTC_CONNECT", "stun:stun.l.google.com:19302");
+std::string GetSTUNServer() {
+  return GetEnvVarOrDefault("WEBRTC_STUN", "stun:stun.l.google.com:19302");
+}
+
+std::string GetTURNServer() {
+  return GetEnvVarOrDefault("WEBRTC_TURN_SERVER", "turn:120.79.210.6:3478");
 }
 
 std::string GetDefaultServerName() {
@@ -48,11 +52,11 @@ std::string GetDefaultServerName() {
 }
 
 std::string GetTurnUserName() {
-  return GetEnvVarOrDefault("WEBRTC_TURN_USER", "");
+  return GetEnvVarOrDefault("WEBRTC_TURN_USER", "test");
 }
 
 std::string GetTurnPassword() {
-  return GetEnvVarOrDefault("WEBRTC_TURN_PASSWORD", "");
+  return GetEnvVarOrDefault("WEBRTC_TURN_PASSWORD", "123");
 }
 
 std::string GetPeerName() {

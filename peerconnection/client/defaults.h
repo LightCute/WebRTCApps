@@ -22,7 +22,8 @@ extern const uint16_t kDefaultServerPort;
 
 std::string GetEnvVarOrDefault(const char* env_var_name,
                                const char* default_value);
-std::string GetPeerConnectionString();
+std::string GetSTUNServer();
+std::string GetTURNServer();
 std::string GetDefaultServerName();
 std::string GetPeerName();
 
