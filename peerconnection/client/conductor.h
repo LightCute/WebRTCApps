@@ -38,7 +38,9 @@ class VideoCaptureModule;
 class Conductor : public webrtc::PeerConnectionObserver,
                   public webrtc::CreateSessionDescriptionObserver,
                   public PeerConnectionClientObserver,
-                  public MainWndCallback {
+                  public MainWndCallback,
+                  public webrtc::DataChannelObserver
+                  {
  public:
   enum CallbackID {
     MEDIA_CHANNELS_INITIALIZED = 1,
@@ -46,6 +48,10 @@ class Conductor : public webrtc::PeerConnectionObserver,
     SEND_MESSAGE_TO_PEER,
     NEW_TRACK_ADDED,
     TRACK_REMOVED,
+    DATA_CHANNEL_CREATED,
+    DATA_CHANNEL_OPENED,
+    DATA_CHANNEL_CLOSED,
+    DATA_CHANNEL_MESSAGE,
   };
 
   Conductor(const webrtc::Environment& env,
@@ -64,6 +70,7 @@ class Conductor : public webrtc::PeerConnectionObserver,
   void DeletePeerConnection();
   void EnsureStreamingUI();
   void AddTracks();
+  void AddDataChannel();
 
   //
   // PeerConnectionObserver implementation.
@@ -78,7 +85,7 @@ class Conductor : public webrtc::PeerConnectionObserver,
   void OnRemoveTrack(
       webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) override;
   void OnDataChannel(
-      webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override {}
+      webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override;
   void OnRenegotiationNeeded() override {}
   void OnIceConnectionChange(
       webrtc::PeerConnectionInterface::IceConnectionState new_state) override {}
@@ -87,6 +94,16 @@ class Conductor : public webrtc::PeerConnectionObserver,
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
   void OnIceConnectionReceivingChange(bool receiving) override {}
   void OnIceCandidateRemoved(const webrtc::IceCandidate* candidate) override {}
+
+  //
+  // DataChannelObserver implementation.
+  //
+
+  void OnStateChange() override;
+  void OnMessage(const webrtc::DataBuffer& buffer) override;
+  void OnBufferedAmountChange(uint64_t /* buffered_amount */) override {}
+  bool IsOkToCallOnTheNetworkThread() override { return false; }
+
 
   //
   // PeerConnectionClientObserver implementation.
@@ -127,6 +144,8 @@ class Conductor : public webrtc::PeerConnectionObserver,
  protected:
   // Send a message to the remote peer.
   void SendMessage(const std::string& json_object);
+  // Send test data through DataChannel
+  void SendTestData();
 
   int peer_id_;
   bool loopback_;
@@ -147,6 +166,8 @@ class Conductor : public webrtc::PeerConnectionObserver,
   // have been torn down. This helps ensure the capturer is destroyed on the
   // same thread it was created on when DeletePeerConnection() runs.
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
+  // DataChannel reference for text communication
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_CONDUCTOR_H_

@@ -272,7 +272,7 @@ bool Conductor::InitializePeerConnection() {
   }
 
   AddTracks();
-
+  AddDataChannel();
   return peer_connection_ != nullptr;
 }
 
@@ -329,6 +329,11 @@ bool Conductor::CreatePeerConnection() {
 void Conductor::DeletePeerConnection() {
   main_wnd_->StopLocalRenderer();
   main_wnd_->StopRemoteRenderer();
+  if (data_channel_) {
+    data_channel_->UnregisterObserver();
+    data_channel_->Close();
+    data_channel_ = nullptr;
+  }
   peer_connection_ = nullptr;
   peer_connection_factory_ = nullptr;
   local_video_source_ = nullptr;
@@ -381,6 +386,39 @@ void Conductor::OnIceCandidate(const webrtc::IceCandidate* candidate) {
   Json::StreamWriterBuilder factory;
   SendMessage(Json::writeString(factory, jmessage));
 }
+
+
+void Conductor::OnDataChannel(
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc) {
+  RTC_LOG(LS_INFO) << "OnDataChannel called"
+                   << " - label: " << dc->label()
+                   << " - id: " << dc->id()
+                   << " - state: " << dc->state();
+
+  if (!dc) {
+    RTC_LOG(LS_ERROR) << "OnDataChannel: Received null DataChannel";
+    return;
+  }
+
+  if (dc->label() != "chat") {
+    RTC_LOG(LS_WARNING) << "OnDataChannel: Unexpected label: " << dc->label();
+    return;
+  }
+
+  if (data_channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannel already exists, replacing...";
+  }
+
+  data_channel_ = dc;
+
+  // Register as observer
+  data_channel_->RegisterObserver(this);
+
+  RTC_LOG(LS_INFO) << "DataChannel received and observer registered"
+                   << " - label: " << data_channel_->label();
+}
+
+
 
 //
 // PeerConnectionClientObserver implementation.
@@ -548,6 +586,45 @@ void Conductor::StartLogin(const std::string& server, int port) {
   client_->Connect(server, port, GetPeerName());
 }
 
+
+void Conductor::AddDataChannel() {
+  RTC_DCHECK(peer_connection_);
+
+  if (data_channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannel already exists";
+    return;
+  }
+
+  // Configure DataChannel
+  webrtc::DataChannelInit config;
+  config.ordered = true;
+  config.negotiated = true;  // ← Changed to true to ensure SDP includes m=application
+  config.id = 0;             // ← Fixed ID for both sides to agree
+
+  RTC_LOG(LS_INFO) << "Creating DataChannel with label: chat (negotiated=true, id=0)";
+
+  // Create DataChannel
+  auto dc_or_error = peer_connection_->CreateDataChannelOrError("chat", &config);
+
+  // Error handling
+  if (!dc_or_error.ok()) {
+    RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
+                      << dc_or_error.error().message();
+    return;
+  }
+
+  // Store reference
+  data_channel_ = std::move(dc_or_error.value());
+
+  // Register as observer
+  data_channel_->RegisterObserver(this);
+
+  RTC_LOG(LS_INFO) << "DataChannel created successfully"
+                   << " - label: " << data_channel_->label()
+                   << " - state: " << data_channel_->state();
+}
+
+
 void Conductor::DisconnectFromServer() {
   if (client_->is_connected())
     client_->SignOut();
@@ -683,6 +760,28 @@ void Conductor::UIThreadCallback(int msg_id, void* data) {
       break;
     }
 
+
+    case DATA_CHANNEL_OPENED:
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_OPENED";
+      // Enable chat UI
+      break;
+
+    case DATA_CHANNEL_CLOSED:
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_CLOSED";
+      // Disable chat UI
+      break;
+
+    case DATA_CHANNEL_MESSAGE: {
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_MESSAGE";
+      std::string* msg = reinterpret_cast<std::string*>(data);
+      if (msg) {
+        RTC_LOG(LS_INFO) << "Message from peer: " << *msg;
+        delete msg;
+      }
+      break;
+    }
+
+
     default:
       RTC_DCHECK_NOTREACHED();
       break;
@@ -723,4 +822,101 @@ void Conductor::OnFailure(webrtc::RTCError error) {
 void Conductor::SendMessage(const std::string& json_object) {
   std::string* msg = new std::string(json_object);
   main_wnd_->QueueUIThreadCallback(SEND_MESSAGE_TO_PEER, msg);
+}
+
+
+//
+// DataChannelObserver implementation.
+//
+
+void Conductor::OnStateChange() {
+  if (!data_channel_) {
+    RTC_LOG(LS_ERROR) << "OnStateChange: data_channel_ is null";
+    return;
+  }
+
+  auto state = data_channel_->state();
+  RTC_LOG(LS_INFO) << "DataChannel state changed: " 
+                   << webrtc::DataChannelInterface::DataStateString(state);
+
+  switch (state) {
+    case webrtc::DataChannelInterface::kConnecting:
+      RTC_LOG(LS_INFO) << "DataChannel is CONNECTING";
+      break;
+
+    case webrtc::DataChannelInterface::kOpen:
+      RTC_LOG(LS_INFO) << "DataChannel is OPEN ★★★";
+      main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_OPENED, nullptr);
+      // Send test data when channel opens
+      SendTestData();
+      break;
+
+    case webrtc::DataChannelInterface::kClosing:
+      RTC_LOG(LS_INFO) << "DataChannel is CLOSING";
+      break;
+
+    case webrtc::DataChannelInterface::kClosed:
+      RTC_LOG(LS_INFO) << "DataChannel is CLOSED";
+      main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_CLOSED, nullptr);
+      break;
+
+    default:
+      RTC_LOG(LS_WARNING) << "Unknown DataChannel state: " << state;
+  }
+}
+
+void Conductor::OnMessage(const webrtc::DataBuffer& buffer) {
+  RTC_LOG(LS_INFO) << "=== DataChannel::OnMessage START ===";
+
+  if (buffer.data.empty()) {
+    RTC_LOG(LS_WARNING) << "Received empty message";
+    return;
+  }
+
+  // Extract message content
+  std::string message(reinterpret_cast<const char*>(buffer.data.data()),
+                      buffer.data.size());
+
+  // Log the received message
+  RTC_LOG(LS_INFO) << "✓ Message received from remote peer"
+                   << " - content: [" << message << "]"
+                   << " - length: " << buffer.data.size()
+                   << " - binary: " << (buffer.binary ? "yes" : "no");
+
+  // Queue message to UI thread
+  std::string* msg = new std::string(message);
+  main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_MESSAGE, msg);
+
+  RTC_LOG(LS_INFO) << "=== DataChannel::OnMessage END ===";
+}
+
+void Conductor::SendTestData() {
+  RTC_LOG(LS_INFO) << "=== SendTestData START ===";
+
+  if (!data_channel_) {
+    RTC_LOG(LS_ERROR) << "DataChannel not available";
+    return;
+  }
+
+  if (data_channel_->state() != webrtc::DataChannelInterface::kOpen) {
+    RTC_LOG(LS_ERROR) << "DataChannel not open, state: "
+                      << data_channel_->state();
+    return;
+  }
+
+  // Construct test message
+  std::string test_message = "Test Data from Conductor";
+
+  RTC_LOG(LS_INFO) << "Sending test message: " << test_message;
+
+  // Send data
+  webrtc::DataBuffer buffer(test_message);
+
+  if (!data_channel_->Send(buffer)) {
+    RTC_LOG(LS_ERROR) << "✗ Failed to send test data";
+    return;
+  }
+
+  RTC_LOG(LS_INFO) << "✓ Test data sent successfully";
+  RTC_LOG(LS_INFO) << "=== SendTestData END ===";
 }
