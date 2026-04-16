@@ -160,24 +160,6 @@ Conductor::Conductor(const webrtc::Environment& env,
 
 Conductor::~Conductor() {
   RTC_DCHECK(!peer_connection_);
-
-  if (worker_thread_ && audio_device_module_) {
-    auto audio_device_module = std::move(audio_device_module_);
-    worker_thread_->BlockingCall(
-        [audio_device_module = std::move(audio_device_module)]() mutable {
-          audio_device_module = nullptr;
-        });
-  }
-
-  if (signaling_thread_) {
-    signaling_thread_->Stop();
-  }
-  if (worker_thread_) {
-    worker_thread_->Stop();
-  }
-  if (network_thread_) {
-    network_thread_->Stop();
-  }
 }
 
 bool Conductor::connection_active() const {
@@ -193,86 +175,29 @@ bool Conductor::InitializePeerConnection() {
   RTC_DCHECK(!peer_connection_factory_);
   RTC_DCHECK(!peer_connection_);
 
-  if (!network_thread_) {
-    network_thread_ = webrtc::Thread::CreateWithSocketServer();
-    network_thread_->SetName("app_pc_network_thread", nullptr);
-    if (!network_thread_->Start()) {
-      main_wnd_->MessageBox("Error", "Failed to start network thread", true);
-      return false;
-    }
-  }
-
-  if (!worker_thread_) {
-    worker_thread_ = webrtc::Thread::Create();
-    worker_thread_->SetName("app_pc_worker_thread", nullptr);
-    if (!worker_thread_->Start()) {
-      main_wnd_->MessageBox("Error", "Failed to start worker thread", true);
-      return false;
-    }
-  }
-
+  // 1. 仅创建 signaling_thread（唯一需要手动创建的线程）
   if (!signaling_thread_) {
-    signaling_thread_ = webrtc::Thread::Create();
-    signaling_thread_->SetName("app_pc_signaling_thread", nullptr);
-    if (!signaling_thread_->Start()) {
-      main_wnd_->MessageBox("Error", "Failed to start signaling thread", true);
-      return false;
-    }
+    signaling_thread_ = webrtc::Thread::CreateWithSocketServer();
+    signaling_thread_->Start();
   }
 
-  if (!audio_device_module_) {
-    // Pulse/ALSA ADM has thread-affinity checks, so create it on the same
-    // worker thread that will later initialize and drive it.
-    audio_device_module_ = worker_thread_->BlockingCall([this] {
-      return webrtc::CreateAudioDeviceModule(
-          env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
-    });
-
-    if (!audio_device_module_) {
-      main_wnd_->MessageBox("Error", "Failed to create AudioDeviceModule",
-                            true);
-      return false;
-    }
-  }
-
+  // 2. 配置依赖（无手动线程、无手动ADM）
   webrtc::PeerConnectionFactoryDependencies deps;
-  deps.network_thread = network_thread_.get();
-  deps.worker_thread = worker_thread_.get();
   deps.signaling_thread = signaling_thread_.get();
   deps.env = env_;
-  deps.adm = audio_device_module_;
   deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
   deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  deps.video_encoder_factory =
-      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
-          webrtc::LibvpxVp8EncoderTemplateAdapter,
-          webrtc::LibvpxVp9EncoderTemplateAdapter,
-          webrtc::OpenH264EncoderTemplateAdapter,
-          webrtc::LibaomAv1EncoderTemplateAdapter>>();
-  deps.video_decoder_factory =
-      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
-          webrtc::LibvpxVp8DecoderTemplateAdapter,
-          webrtc::LibvpxVp9DecoderTemplateAdapter,
-          webrtc::OpenH264DecoderTemplateAdapter,
-          webrtc::Dav1dDecoderTemplateAdapter>>();
+  
+  // 3. 核心：自动启用媒体（自动创建ADM、自动创建线程、自动绑定音频）
   webrtc::EnableMedia(deps);
-  peer_connection_factory_ =
-      webrtc::CreateModularPeerConnectionFactory(std::move(deps));
 
-  if (!peer_connection_factory_) {
-    main_wnd_->MessageBox("Error", "Failed to initialize PeerConnectionFactory",
-                          true);
-    DeletePeerConnection();
-    return false;
-  }
+  // 4. 创建工厂
+  peer_connection_factory_ = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
 
-  if (!CreatePeerConnection()) {
-    main_wnd_->MessageBox("Error", "CreatePeerConnection failed", true);
-    DeletePeerConnection();
-  }
-
+  // 5. 创建PeerConnection + 添加音视频轨道
+  CreatePeerConnection();
   AddTracks();
-  AddDataChannel();
+
   return peer_connection_ != nullptr;
 }
 
@@ -919,4 +844,25 @@ void Conductor::SendTestData() {
 
   RTC_LOG(LS_INFO) << "✓ Test data sent successfully";
   RTC_LOG(LS_INFO) << "=== SendTestData END ===";
+}
+
+
+void Conductor::OnKeyInput(const std::string& key_info) {
+  RTC_LOG(LS_INFO) << __FUNCTION__ << ": " << key_info;
+
+  // 安全校验：DataChannel必须存在且已打开
+  if (!data_channel_ || data_channel_->state() != webrtc::DataChannelInterface::kOpen) {
+    RTC_LOG(LS_WARNING) << "DataChannel未就绪，无法发送键盘数据";
+    return;
+  }
+
+  // 构造DataBuffer（文本模式发送）
+  webrtc::DataBuffer buffer(key_info);
+  
+  // 发送数据
+  if (data_channel_->Send(buffer)) {
+    RTC_LOG(LS_INFO) << "键盘数据发送成功: " << key_info;
+  } else {
+    RTC_LOG(LS_ERROR) << "键盘数据发送失败: " << key_info;
+  }
 }

@@ -26,10 +26,11 @@ pkg_config("gstreamer_config") {
     "gobject-2.0",         
   ]
 }
-
 rtc_executable("peerconnection_client") {
   testonly = true
   output_name = "apps_peerconnection_client"
+
+
 
   sources = [
     "conductor.cc",
@@ -43,8 +44,6 @@ rtc_executable("peerconnection_client") {
     "main_wnd.h",
     "peer_connection_client.cc",
     "peer_connection_client.h",
-    "gst_shm_transport.cc",    
-    "gst_shm_transport.h",    
   ]
 
   deps = [
@@ -127,6 +126,7 @@ rtc_executable("peerconnection_client") {
 
   configs += [ ":gtk_config" ]
   configs += [ ":gstreamer_config" ]
+
   cflags = [ "-Wno-deprecated-declarations" ]
   libs = [
     "X11",

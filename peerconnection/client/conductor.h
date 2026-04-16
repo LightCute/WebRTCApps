@@ -137,6 +137,8 @@ class Conductor : public webrtc::PeerConnectionObserver,
 
   void UIThreadCallback(int msg_id, void* data) override;
 
+  void OnKeyInput(const std::string& key_info) override;
+
   // CreateSessionDescriptionObserver implementation.
   void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
   void OnFailure(webrtc::RTCError error) override;

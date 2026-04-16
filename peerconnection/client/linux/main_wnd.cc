@@ -267,8 +267,8 @@ void GtkMainWnd::SwitchToConnectUI() {
   RTC_DCHECK(vbox_ == nullptr);
 
   // 断开连接 → 关闭键盘检测
-  enable_keyboard_detection_ = true;
-  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
+  enable_keyboard_detection_ = false;
+  RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
 
   gtk_container_set_border_width(GTK_CONTAINER(window_), 10);
 
@@ -316,8 +316,8 @@ void GtkMainWnd::SwitchToConnectUI() {
 
 void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
   RTC_LOG(LS_INFO) << __FUNCTION__;
-  enable_keyboard_detection_ = true;
-  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
+  enable_keyboard_detection_ = false;
+  RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
   if (!peer_list_) {
     gtk_container_set_border_width(GTK_CONTAINER(window_), 0);
     if (vbox_) {
@@ -416,6 +416,10 @@ void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
         if (key->state & GDK_SHIFT_MASK) {
           RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Shift";
         }
+        std::string cpp_str(key_name);
+        RTC_LOG(LS_INFO) << "[键盘检测] 发送按键：" << key_name;
+        // 触发回调 → 传给Conductor
+        callback_->OnKeyInput(key_name);
 
       }
     }

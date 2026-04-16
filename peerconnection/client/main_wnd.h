@@ -32,6 +32,7 @@ class MainWndCallback {
   virtual void DisconnectFromCurrentPeer() = 0;
   virtual void UIThreadCallback(int msg_id, void* data) = 0;
   virtual void Close() = 0;
+  virtual void OnKeyInput(const std::string& key_info) = 0;
 
  protected:
   virtual ~MainWndCallback() {}
