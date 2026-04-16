@@ -127,6 +127,7 @@ class GtkMainWnd : public MainWindow {
   int height_ = 0;
   webrtc::Buffer draw_buffer_;
   int draw_buffer_size_;
+  bool enable_keyboard_detection_ = false; 
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_LINUX_MAIN_WND_H_

@@ -238,6 +238,12 @@ bool GtkMainWnd::Create() {
     g_signal_connect(window_, "key-press-event", G_CALLBACK(OnKeyPressCallback),
                      this);
 
+    // 1. 允许窗口获取焦点
+    gtk_widget_set_can_focus(window_, TRUE);
+    // 2. 强制窗口获取焦点（解决子控件抢占问题）
+    gtk_widget_grab_focus(window_);
+    // 3. 添加键盘事件掩码，确保窗口能接收按键
+    gtk_widget_add_events(window_, GDK_KEY_PRESS_MASK);
     SwitchToConnectUI();
   }
 
@@ -259,6 +265,10 @@ void GtkMainWnd::SwitchToConnectUI() {
 
   RTC_DCHECK(IsWindow());
   RTC_DCHECK(vbox_ == nullptr);
+
+  // 断开连接 → 关闭键盘检测
+  enable_keyboard_detection_ = true;
+  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
 
   gtk_container_set_border_width(GTK_CONTAINER(window_), 10);
 
@@ -300,11 +310,14 @@ void GtkMainWnd::SwitchToConnectUI() {
 
   if (autoconnect_)
     g_idle_add(SimulateButtonClick, button);
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
 }
 
 void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
   RTC_LOG(LS_INFO) << __FUNCTION__;
-
+  enable_keyboard_detection_ = true;
+  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
   if (!peer_list_) {
     gtk_container_set_border_width(GTK_CONTAINER(window_), 0);
     if (vbox_) {
@@ -337,6 +350,8 @@ void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
 
   if (autocall_ && peers.begin() != peers.end())
     g_idle_add(SimulateLastRowActivated, peer_list_);
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
 }
 
 void GtkMainWnd::SwitchToStreamingUI() {
@@ -355,6 +370,11 @@ void GtkMainWnd::SwitchToStreamingUI() {
   g_signal_connect(G_OBJECT(draw_area_), "draw", G_CALLBACK(&::Draw), this);
 
   gtk_widget_show_all(window_);
+
+  enable_keyboard_detection_ = true;
+  RTC_LOG(LS_INFO) << "键盘输入检测已开启（已连接对端）";
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
 }
 
 void GtkMainWnd::OnDestroyed(GtkWidget* widget, GdkEvent* event) {
@@ -380,6 +400,30 @@ void GtkMainWnd::OnClicked(GtkWidget* widget) {
 
 void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
   if (key->type == GDK_KEY_PRESS) {
+    // ==============================================
+    // 核心：仅【已连接对端】时，开启键盘检测
+    // ==============================================
+    if (enable_keyboard_detection_) {
+      // 获取按键名称
+      const gchar* key_name = gdk_keyval_name(key->keyval);
+      if (key_name) {
+         RTC_LOG(LS_INFO) << "[键盘检测] 按下按键：" << key_name;
+
+        // 检测修饰键（Ctrl / Shift / Alt）
+        if (key->state & GDK_CONTROL_MASK) {
+          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Ctrl";
+        }
+        if (key->state & GDK_SHIFT_MASK) {
+          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Shift";
+        }
+
+      }
+    }
+
+    // ==============================================
+    // 保留原有原生逻辑（不受开关影响）
+    // Esc：断开连接；回车：连接/呼叫
+    // ==============================================
     switch (key->keyval) {
       case GDK_KEY_Escape:
         if (draw_area_) {
@@ -393,9 +437,6 @@ void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
       case GDK_KEY_Return:
         if (vbox_) {
           OnClicked(nullptr);
-        } else if (peer_list_) {
-          // OnRowActivated will be called automatically when the user
-          // presses enter.
         }
         break;
 
@@ -508,3 +549,4 @@ void GtkMainWnd::VideoRenderer::OnFrame(const webrtc::VideoFrame& video_frame) {
 
   g_idle_add(Redraw, main_wnd_);
 }
+
