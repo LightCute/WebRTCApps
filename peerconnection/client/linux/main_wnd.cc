@@ -404,23 +404,23 @@ void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
     // 核心：仅【已连接对端】时，开启键盘检测
     // ==============================================
     if (enable_keyboard_detection_) {
-      // 获取按键名称
       const gchar* key_name = gdk_keyval_name(key->keyval);
       if (key_name) {
-         RTC_LOG(LS_INFO) << "[键盘检测] 按下按键：" << key_name;
+        // 1. 组装按键数据（可自定义格式：按键名+组合键）
+        std::string key_data = "KEY_PRESS:";
+        key_data += key_name;
 
-        // 检测修饰键（Ctrl / Shift / Alt）
-        if (key->state & GDK_CONTROL_MASK) {
-          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Ctrl";
-        }
-        if (key->state & GDK_SHIFT_MASK) {
-          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Shift";
-        }
-        std::string cpp_str(key_name);
-        RTC_LOG(LS_INFO) << "[键盘检测] 发送按键：" << key_name;
-        // 触发回调 → 传给Conductor
-        callback_->OnKeyInput(key_name);
+        // 追加组合键（Ctrl/Shift/Alt）
+        if (key->state & GDK_CONTROL_MASK) key_data += "+Ctrl";
+        if (key->state & GDK_SHIFT_MASK) key_data += "+Shift";
+        //if (key->state & GDK_ALT_MASK) key_data += "+Alt";
 
+        RTC_LOG(LS_INFO) << "捕获键盘输入: " << key_data;
+        
+        // 2. 🔥 事件驱动：UI线程直接调用回调（无阻塞）
+        if (callback_) {
+          callback_->SendKeyboardData(key_data);
+        }
       }
     }
 

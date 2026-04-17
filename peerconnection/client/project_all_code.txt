@@ -1,0 +1,3210 @@
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/gst_shm_transport.h
+==================================================
+
+#ifndef GST_SHM_TRANSPORT_H_
+#define GST_SHM_TRANSPORT_H_
+
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
+#include <string>
+#include <atomic>
+
+// 共享内存传输配置（与原工程保持一致）
+#define VIDEO_WIDTH     640
+#define VIDEO_HEIGHT    480
+#define VIDEO_FPS       30
+#define LOCAL_SHM_SOCK  "/tmp/webrtc_local_shm"
+#define REMOTE_SHM_SOCK "/tmp/webrtc_remote_shm"
+
+/**
+ * @brief GStreamer 共享内存发送端（WebRTC 端使用）
+ * 功能：接收 I420 格式视频帧 → 写入共享内存
+ */
+class GstShmSender {
+public:
+    explicit GstShmSender(const std::string& shm_socket);
+    ~GstShmSender();
+
+    // 初始化GST管道
+    bool Init();
+    // 推送I420格式视频帧
+    void PushFrame(uint8_t* i420_data, int width, int height);
+    // 销毁管道
+    void Destroy();
+
+private:
+    // 清理残留的共享内存文件
+    void CleanupShmSocket();
+
+    std::string shm_socket_;
+    GstElement* pipeline_ = nullptr;
+    GstElement* appsrc_ = nullptr;
+    std::atomic<bool> initialized_{false};
+    guint frame_count_ = 0;
+};
+
+/**
+ * @brief GStreamer 共享内存接收端（Qt 端使用）
+ * 功能：从共享内存读取视频帧 → 输出给Qt渲染
+ */
+class GstShmReceiver {
+public:
+    explicit GstShmReceiver(const std::string& shm_socket);
+    ~GstShmReceiver();
+
+    bool Init();
+    void Destroy();
+
+private:
+    void CleanupShmSocket();
+    std::string shm_socket_;
+    GstElement* pipeline_ = nullptr;
+};
+
+#endif // GST_SHM_TRANSPORT_H_
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/peer_connection_client.h
+==================================================
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
+#define APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
+
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <string>
+
+#include "api/async_dns_resolver.h"
+#include "api/task_queue/pending_task_safety_flag.h"
+#include "rtc_base/socket.h"
+#include "rtc_base/socket_address.h"
+
+typedef std::map<int, std::string> Peers;
+
+struct PeerConnectionClientObserver {
+  virtual void OnSignedIn() = 0;  // Called when we're logged on.
+  virtual void OnDisconnected() = 0;
+  virtual void OnPeerConnected(int id, const std::string& name) = 0;
+  virtual void OnPeerDisconnected(int peer_id) = 0;
+  virtual void OnMessageFromPeer(int peer_id, const std::string& message) = 0;
+  virtual void OnMessageSent(int err) = 0;
+  virtual void OnServerConnectionFailure() = 0;
+
+ protected:
+  virtual ~PeerConnectionClientObserver() {}
+};
+
+class PeerConnectionClient {
+ public:
+  enum State {
+    NOT_CONNECTED,
+    RESOLVING,
+    SIGNING_IN,
+    CONNECTED,
+    SIGNING_OUT_WAITING,
+    SIGNING_OUT,
+  };
+
+  PeerConnectionClient();
+  ~PeerConnectionClient();
+
+  int id() const;
+  bool is_connected() const;
+  const Peers& peers() const;
+
+  void RegisterObserver(PeerConnectionClientObserver* callback);
+
+  void Connect(const std::string& server,
+               int port,
+               const std::string& client_name);
+
+  bool SendToPeer(int peer_id, const std::string& message);
+  bool SendHangUp(int peer_id);
+  bool IsSendingMessage();
+
+  bool SignOut();
+
+ protected:
+  void DoConnect();
+  void Close();
+  void InitSocketSignals();
+  bool ConnectControlSocket();
+  void OnConnect(webrtc::Socket* socket);
+  void OnHangingGetConnect(webrtc::Socket* socket);
+  void OnMessageFromPeer(int peer_id, const std::string& message);
+
+  // Quick and dirty support for parsing HTTP header values.
+  bool GetHeaderValue(const std::string& data,
+                      size_t eoh,
+                      const char* header_pattern,
+                      size_t* value);
+
+  bool GetHeaderValue(const std::string& data,
+                      size_t eoh,
+                      const char* header_pattern,
+                      std::string* value);
+
+  // Returns true if the whole response has been read.
+  bool ReadIntoBuffer(webrtc::Socket* socket,
+                      std::string* data,
+                      size_t* content_length);
+
+  void OnRead(webrtc::Socket* socket);
+
+  void OnHangingGetRead(webrtc::Socket* socket);
+
+  // Parses a single line entry in the form "<name>,<id>,<connected>"
+  bool ParseEntry(const std::string& entry,
+                  std::string* name,
+                  int* id,
+                  bool* connected);
+
+  int GetResponseStatus(const std::string& response);
+
+  bool ParseServerResponse(const std::string& response,
+                           size_t content_length,
+                           size_t* peer_id,
+                           size_t* eoh);
+
+  void OnClose(webrtc::Socket* socket, int err);
+
+  void OnResolveResult(const webrtc::AsyncDnsResolverResult& result);
+
+  PeerConnectionClientObserver* callback_;
+  webrtc::SocketAddress server_address_;
+  std::unique_ptr<webrtc::AsyncDnsResolverInterface> resolver_;
+  std::unique_ptr<webrtc::Socket> control_socket_;
+  std::unique_ptr<webrtc::Socket> hanging_get_;
+  std::string onconnect_data_;
+  std::string control_data_;
+  std::string notification_data_;
+  std::string client_name_;
+  Peers peers_;
+  State state_;
+  int my_id_;
+  webrtc::ScopedTaskSafety safety_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/peer_connection_client.cc
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "apps/peerconnection/client/peer_connection_client.h"
+
+#include <cerrno>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <string>
+
+#include "api/async_dns_resolver.h"
+#include "api/task_queue/pending_task_safety_flag.h"
+#include "api/units/time_delta.h"
+#include "apps/peerconnection/client/defaults.h"
+#include "rtc_base/async_dns_resolver.h"
+#include "rtc_base/checks.h"
+#include "rtc_base/logging.h"
+#include "rtc_base/net_helpers.h"
+#include "rtc_base/socket.h"
+#include "rtc_base/thread.h"
+
+namespace {
+
+// This is our magical hangup signal.
+constexpr char kByeMessage[] = "BYE";
+// Delay between server connection retries, in milliseconds
+constexpr webrtc::TimeDelta kReconnectDelay = webrtc::TimeDelta::Seconds(2);
+
+webrtc::Socket* CreateClientSocket(int family) {
+  webrtc::Thread* thread = webrtc::Thread::Current();
+  RTC_DCHECK(thread != nullptr);
+  return thread->socketserver()->CreateSocket(family, SOCK_STREAM);
+}
+
+}  // namespace
+
+PeerConnectionClient::PeerConnectionClient()
+    : callback_(nullptr),
+      resolver_(nullptr),
+      state_(NOT_CONNECTED),
+      my_id_(-1) {}
+
+PeerConnectionClient::~PeerConnectionClient() = default;
+
+void PeerConnectionClient::InitSocketSignals() {
+  RTC_DCHECK(control_socket_.get() != nullptr);
+  RTC_DCHECK(hanging_get_.get() != nullptr);
+  control_socket_->SubscribeCloseEvent(
+      this,
+      [this](webrtc::Socket* socket, int error) { OnClose(socket, error); });
+  hanging_get_->SubscribeCloseEvent(
+      this,
+      [this](webrtc::Socket* socket, int error) { OnClose(socket, error); });
+  control_socket_->SubscribeConnectEvent(
+      this, [this](webrtc::Socket* socket) { OnConnect(socket); });
+  hanging_get_->SubscribeConnectEvent(
+      this, [this](webrtc::Socket* socket) { OnHangingGetConnect(socket); });
+  control_socket_->SubscribeReadEvent(
+      this, [this](webrtc::Socket* socket) { OnRead(socket); });
+  hanging_get_->SubscribeReadEvent(
+      this, [this](webrtc::Socket* socket) { OnHangingGetRead(socket); });
+}
+
+int PeerConnectionClient::id() const {
+  return my_id_;
+}
+
+bool PeerConnectionClient::is_connected() const {
+  return my_id_ != -1;
+}
+
+const Peers& PeerConnectionClient::peers() const {
+  return peers_;
+}
+
+void PeerConnectionClient::RegisterObserver(
+    PeerConnectionClientObserver* callback) {
+  RTC_DCHECK(!callback_);
+  callback_ = callback;
+}
+
+void PeerConnectionClient::Connect(const std::string& server,
+                                   int port,
+                                   const std::string& client_name) {
+  RTC_DCHECK(!server.empty());
+  RTC_DCHECK(!client_name.empty());
+
+  if (state_ != NOT_CONNECTED) {
+    RTC_LOG(LS_WARNING)
+        << "The client must not be connected before you can call Connect()";
+    callback_->OnServerConnectionFailure();
+    return;
+  }
+
+  if (server.empty() || client_name.empty()) {
+    callback_->OnServerConnectionFailure();
+    return;
+  }
+
+  if (port <= 0)
+    port = kDefaultServerPort;
+
+  server_address_.SetIP(server);
+  server_address_.SetPort(port);
+  client_name_ = client_name;
+
+  if (server_address_.IsUnresolvedIP()) {
+    RTC_DCHECK_NE(state_, RESOLVING);
+    RTC_DCHECK(!resolver_);
+    state_ = RESOLVING;
+    resolver_ = std::make_unique<webrtc::AsyncDnsResolver>();
+    resolver_->Start(server_address_,
+                     [this] { OnResolveResult(resolver_->result()); });
+  } else {
+    DoConnect();
+  }
+}
+
+void PeerConnectionClient::OnResolveResult(
+    const webrtc::AsyncDnsResolverResult& result) {
+  if (result.GetError() != 0) {
+    callback_->OnServerConnectionFailure();
+    resolver_.reset();
+    state_ = NOT_CONNECTED;
+    return;
+  }
+  if (!result.GetResolvedAddress(AF_INET, &server_address_)) {
+    callback_->OnServerConnectionFailure();
+    resolver_.reset();
+    state_ = NOT_CONNECTED;
+    return;
+  }
+  DoConnect();
+}
+
+void PeerConnectionClient::DoConnect() {
+  control_socket_.reset(CreateClientSocket(server_address_.ipaddr().family()));
+  hanging_get_.reset(CreateClientSocket(server_address_.ipaddr().family()));
+  InitSocketSignals();
+  char buffer[1024];
+  snprintf(buffer, sizeof(buffer), "GET /sign_in?%s HTTP/1.0\r\n\r\n",
+           client_name_.c_str());
+  onconnect_data_ = buffer;
+
+  bool ret = ConnectControlSocket();
+  if (ret)
+    state_ = SIGNING_IN;
+  if (!ret) {
+    callback_->OnServerConnectionFailure();
+  }
+}
+
+bool PeerConnectionClient::SendToPeer(int peer_id, const std::string& message) {
+  if (state_ != CONNECTED)
+    return false;
+
+  RTC_DCHECK(is_connected());
+  RTC_DCHECK(control_socket_->GetState() == webrtc::Socket::CS_CLOSED);
+  if (!is_connected() || peer_id == -1)
+    return false;
+
+  char headers[1024];
+  snprintf(headers, sizeof(headers),
+           "POST /message?peer_id=%i&to=%i HTTP/1.0\r\n"
+           "Content-Length: %zu\r\n"
+           "Content-Type: text/plain\r\n"
+           "\r\n",
+           my_id_, peer_id, message.length());
+  onconnect_data_ = headers;
+  onconnect_data_ += message;
+  return ConnectControlSocket();
+}
+
+bool PeerConnectionClient::SendHangUp(int peer_id) {
+  return SendToPeer(peer_id, kByeMessage);
+}
+
+bool PeerConnectionClient::IsSendingMessage() {
+  return state_ == CONNECTED &&
+         control_socket_->GetState() != webrtc::Socket::CS_CLOSED;
+}
+
+bool PeerConnectionClient::SignOut() {
+  if (state_ == NOT_CONNECTED || state_ == SIGNING_OUT)
+    return true;
+
+  if (hanging_get_->GetState() != webrtc::Socket::CS_CLOSED)
+    hanging_get_->Close();
+
+  if (control_socket_->GetState() == webrtc::Socket::CS_CLOSED) {
+    state_ = SIGNING_OUT;
+
+    if (my_id_ != -1) {
+      char buffer[1024];
+      snprintf(buffer, sizeof(buffer),
+               "GET /sign_out?peer_id=%i HTTP/1.0\r\n\r\n", my_id_);
+      onconnect_data_ = buffer;
+      return ConnectControlSocket();
+    } else {
+      // Can occur if the app is closed before we finish connecting.
+      return true;
+    }
+  } else {
+    state_ = SIGNING_OUT_WAITING;
+  }
+
+  return true;
+}
+
+void PeerConnectionClient::Close() {
+  control_socket_->Close();
+  hanging_get_->Close();
+  onconnect_data_.clear();
+  peers_.clear();
+  resolver_.reset();
+  my_id_ = -1;
+  state_ = NOT_CONNECTED;
+}
+
+bool PeerConnectionClient::ConnectControlSocket() {
+  RTC_DCHECK(control_socket_->GetState() == webrtc::Socket::CS_CLOSED);
+  int err = control_socket_->Connect(server_address_);
+  if (err == SOCKET_ERROR) {
+    Close();
+    return false;
+  }
+  return true;
+}
+
+void PeerConnectionClient::OnConnect(webrtc::Socket* socket) {
+  RTC_DCHECK(!onconnect_data_.empty());
+  size_t sent = socket->Send(onconnect_data_.c_str(), onconnect_data_.length());
+  RTC_DCHECK(sent == onconnect_data_.length());
+  onconnect_data_.clear();
+}
+
+void PeerConnectionClient::OnHangingGetConnect(webrtc::Socket* socket) {
+  char buffer[1024];
+  snprintf(buffer, sizeof(buffer), "GET /wait?peer_id=%i HTTP/1.0\r\n\r\n",
+           my_id_);
+  int len = static_cast<int>(strlen(buffer));
+  int sent = socket->Send(buffer, len);
+  RTC_DCHECK(sent == len);
+}
+
+void PeerConnectionClient::OnMessageFromPeer(int peer_id,
+                                             const std::string& message) {
+  if (message.length() == (sizeof(kByeMessage) - 1) &&
+      message.compare(kByeMessage) == 0) {
+    callback_->OnPeerDisconnected(peer_id);
+  } else {
+    callback_->OnMessageFromPeer(peer_id, message);
+  }
+}
+
+bool PeerConnectionClient::GetHeaderValue(const std::string& data,
+                                          size_t eoh,
+                                          const char* header_pattern,
+                                          size_t* value) {
+  RTC_DCHECK(value != nullptr);
+  size_t found = data.find(header_pattern);
+  if (found != std::string::npos && found < eoh) {
+    *value = atoi(&data[found + strlen(header_pattern)]);
+    return true;
+  }
+  return false;
+}
+
+bool PeerConnectionClient::GetHeaderValue(const std::string& data,
+                                          size_t eoh,
+                                          const char* header_pattern,
+                                          std::string* value) {
+  RTC_DCHECK(value != nullptr);
+  size_t found = data.find(header_pattern);
+  if (found != std::string::npos && found < eoh) {
+    size_t begin = found + strlen(header_pattern);
+    size_t end = data.find("\r\n", begin);
+    if (end == std::string::npos)
+      end = eoh;
+    value->assign(data.substr(begin, end - begin));
+    return true;
+  }
+  return false;
+}
+
+bool PeerConnectionClient::ReadIntoBuffer(webrtc::Socket* socket,
+                                          std::string* data,
+                                          size_t* content_length) {
+  char buffer[0xffff];
+  do {
+    int bytes = socket->Recv(buffer, sizeof(buffer), nullptr);
+    if (bytes <= 0)
+      break;
+    data->append(buffer, bytes);
+  } while (true);
+
+  bool ret = false;
+  size_t i = data->find("\r\n\r\n");
+  if (i != std::string::npos) {
+    RTC_LOG(LS_INFO) << "Headers received";
+    if (GetHeaderValue(*data, i, "\r\nContent-Length: ", content_length)) {
+      size_t total_response_size = (i + 4) + *content_length;
+      if (data->length() >= total_response_size) {
+        ret = true;
+        std::string should_close;
+        const char kConnection[] = "\r\nConnection: ";
+        if (GetHeaderValue(*data, i, kConnection, &should_close) &&
+            should_close.compare("close") == 0) {
+          socket->Close();
+          // Since we closed the socket, there was no notification delivered
+          // to us.  Compensate by letting ourselves know.
+          OnClose(socket, 0);
+        }
+      } else {
+        // We haven't received everything.  Just continue to accept data.
+      }
+    } else {
+      RTC_LOG(LS_ERROR) << "No content length field specified by the server.";
+    }
+  }
+  return ret;
+}
+
+void PeerConnectionClient::OnRead(webrtc::Socket* socket) {
+  size_t content_length = 0;
+  if (ReadIntoBuffer(socket, &control_data_, &content_length)) {
+    size_t peer_id = 0, eoh = 0;
+    bool ok =
+        ParseServerResponse(control_data_, content_length, &peer_id, &eoh);
+    if (ok) {
+      if (my_id_ == -1) {
+        // First response.  Let's store our server assigned ID.
+        RTC_DCHECK(state_ == SIGNING_IN);
+        my_id_ = static_cast<int>(peer_id);
+        RTC_DCHECK(my_id_ != -1);
+
+        // The body of the response will be a list of already connected peers.
+        if (content_length) {
+          size_t pos = eoh + 4;
+          while (pos < control_data_.size()) {
+            size_t eol = control_data_.find('\n', pos);
+            if (eol == std::string::npos)
+              break;
+            int id = 0;
+            std::string name;
+            bool connected;
+            if (ParseEntry(control_data_.substr(pos, eol - pos), &name, &id,
+                           &connected) &&
+                id != my_id_) {
+              peers_[id] = name;
+              callback_->OnPeerConnected(id, name);
+            }
+            pos = eol + 1;
+          }
+        }
+        RTC_DCHECK(is_connected());
+        callback_->OnSignedIn();
+      } else if (state_ == SIGNING_OUT) {
+        Close();
+        callback_->OnDisconnected();
+      } else if (state_ == SIGNING_OUT_WAITING) {
+        SignOut();
+      }
+    }
+
+    control_data_.clear();
+
+    if (state_ == SIGNING_IN) {
+      RTC_DCHECK(hanging_get_->GetState() == webrtc::Socket::CS_CLOSED);
+      state_ = CONNECTED;
+      hanging_get_->Connect(server_address_);
+    }
+  }
+}
+
+void PeerConnectionClient::OnHangingGetRead(webrtc::Socket* socket) {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  size_t content_length = 0;
+  if (ReadIntoBuffer(socket, &notification_data_, &content_length)) {
+    size_t peer_id = 0, eoh = 0;
+    bool ok =
+        ParseServerResponse(notification_data_, content_length, &peer_id, &eoh);
+
+    if (ok) {
+      // Store the position where the body begins.
+      size_t pos = eoh + 4;
+
+      if (my_id_ == static_cast<int>(peer_id)) {
+        // A notification about a new member or a member that just
+        // disconnected.
+        int id = 0;
+        std::string name;
+        bool connected = false;
+        if (ParseEntry(notification_data_.substr(pos), &name, &id,
+                       &connected)) {
+          if (connected) {
+            peers_[id] = name;
+            callback_->OnPeerConnected(id, name);
+          } else {
+            peers_.erase(id);
+            callback_->OnPeerDisconnected(id);
+          }
+        }
+      } else {
+        OnMessageFromPeer(static_cast<int>(peer_id),
+                          notification_data_.substr(pos));
+      }
+    }
+
+    notification_data_.clear();
+  }
+
+  if (hanging_get_->GetState() == webrtc::Socket::CS_CLOSED &&
+      state_ == CONNECTED) {
+    hanging_get_->Connect(server_address_);
+  }
+}
+
+bool PeerConnectionClient::ParseEntry(const std::string& entry,
+                                      std::string* name,
+                                      int* id,
+                                      bool* connected) {
+  RTC_DCHECK(name != nullptr);
+  RTC_DCHECK(id != nullptr);
+  RTC_DCHECK(connected != nullptr);
+  RTC_DCHECK(!entry.empty());
+
+  *connected = false;
+  size_t separator = entry.find(',');
+  if (separator != std::string::npos) {
+    *id = atoi(&entry[separator + 1]);
+    name->assign(entry.substr(0, separator));
+    separator = entry.find(',', separator + 1);
+    if (separator != std::string::npos) {
+      *connected = atoi(&entry[separator + 1]) ? true : false;
+    }
+  }
+  return !name->empty();
+}
+
+int PeerConnectionClient::GetResponseStatus(const std::string& response) {
+  int status = -1;
+  size_t pos = response.find(' ');
+  if (pos != std::string::npos)
+    status = atoi(&response[pos + 1]);
+  return status;
+}
+
+bool PeerConnectionClient::ParseServerResponse(const std::string& response,
+                                               size_t content_length,
+                                               size_t* peer_id,
+                                               size_t* eoh) {
+  int status = GetResponseStatus(response.c_str());
+  if (status != 200) {
+    RTC_LOG(LS_ERROR) << "Received error from server";
+    Close();
+    callback_->OnDisconnected();
+    return false;
+  }
+
+  *eoh = response.find("\r\n\r\n");
+  RTC_DCHECK(*eoh != std::string::npos);
+  if (*eoh == std::string::npos)
+    return false;
+
+  *peer_id = -1;
+
+  // See comment in peer_channel.cc for why we use the Pragma header.
+  GetHeaderValue(response, *eoh, "\r\nPragma: ", peer_id);
+
+  return true;
+}
+
+void PeerConnectionClient::OnClose(webrtc::Socket* socket, int err) {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+
+  socket->Close();
+
+#ifdef WIN32
+  if (err != WSAECONNREFUSED) {
+#else
+  if (err != ECONNREFUSED) {
+#endif
+    if (socket == hanging_get_.get()) {
+      if (state_ == CONNECTED) {
+        hanging_get_->Close();
+        hanging_get_->Connect(server_address_);
+      }
+    } else {
+      callback_->OnMessageSent(err);
+    }
+  } else {
+    if (socket == control_socket_.get()) {
+      RTC_LOG(LS_WARNING) << "Connection refused; retrying in 2 seconds";
+      webrtc::Thread::Current()->PostDelayedTask(
+          SafeTask(safety_.flag(), [this] { DoConnect(); }), kReconnectDelay);
+    } else {
+      Close();
+      callback_->OnDisconnected();
+    }
+  }
+}
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/main_wnd.h
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_MAIN_WND_H_
+#define APPS_PEERCONNECTION_CLIENT_MAIN_WND_H_
+
+#include <map>
+#include <memory>
+#include <string>
+
+#include "api/media_stream_interface.h"
+#include "api/video/video_frame.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "media/base/media_channel.h"
+#include "media/base/video_common.h"
+#if defined(WEBRTC_WIN)
+#include "rtc_base/win32.h"
+#endif  // WEBRTC_WIN
+
+class MainWndCallback {
+ public:
+  virtual void StartLogin(const std::string& server, int port) = 0;
+  virtual void DisconnectFromServer() = 0;
+  virtual void ConnectToPeer(int peer_id) = 0;
+  virtual void DisconnectFromCurrentPeer() = 0;
+  virtual void UIThreadCallback(int msg_id, void* data) = 0;
+  virtual void Close() = 0;
+
+ protected:
+  virtual ~MainWndCallback() {}
+};
+
+// Pure virtual interface for the main window.
+class MainWindow {
+ public:
+  virtual ~MainWindow() {}
+
+  enum UI {
+    CONNECT_TO_SERVER,
+    LIST_PEERS,
+    STREAMING,
+  };
+
+  virtual void RegisterObserver(MainWndCallback* callback) = 0;
+
+  virtual bool IsWindow() = 0;
+  virtual void MessageBox(const char* caption,
+                          const char* text,
+                          bool is_error) = 0;
+
+  virtual UI current_ui() = 0;
+
+  virtual void SwitchToConnectUI() = 0;
+  virtual void SwitchToPeerList(const Peers& peers) = 0;
+  virtual void SwitchToStreamingUI() = 0;
+
+  virtual void StartLocalRenderer(webrtc::VideoTrackInterface* local_video) = 0;
+  virtual void StopLocalRenderer() = 0;
+  virtual void StartRemoteRenderer(
+      webrtc::VideoTrackInterface* remote_video) = 0;
+  virtual void StopRemoteRenderer() = 0;
+
+  virtual void QueueUIThreadCallback(int msg_id, void* data) = 0;
+};
+
+#ifdef WIN32
+
+class MainWnd : public MainWindow {
+ public:
+  static const wchar_t kClassName[];
+
+  enum WindowMessages {
+    UI_THREAD_CALLBACK = WM_APP + 1,
+  };
+
+  MainWnd(const char* server, int port, bool auto_connect, bool auto_call);
+  ~MainWnd();
+
+  bool Create();
+  bool Destroy();
+  bool PreTranslateMessage(MSG* msg);
+
+  virtual void RegisterObserver(MainWndCallback* callback);
+  virtual bool IsWindow();
+  virtual void SwitchToConnectUI();
+  virtual void SwitchToPeerList(const Peers& peers);
+  virtual void SwitchToStreamingUI();
+  virtual void MessageBox(const char* caption, const char* text, bool is_error);
+  virtual UI current_ui() { return ui_; }
+
+  virtual void StartLocalRenderer(webrtc::VideoTrackInterface* local_video);
+  virtual void StopLocalRenderer();
+  virtual void StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video);
+  virtual void StopRemoteRenderer();
+
+  virtual void QueueUIThreadCallback(int msg_id, void* data);
+
+  HWND handle() const { return wnd_; }
+
+  class VideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+   public:
+    VideoRenderer(HWND wnd,
+                  int width,
+                  int height,
+                  webrtc::VideoTrackInterface* track_to_render);
+    virtual ~VideoRenderer();
+
+    void Lock() { ::EnterCriticalSection(&buffer_lock_); }
+
+    void Unlock() { ::LeaveCriticalSection(&buffer_lock_); }
+
+    // VideoSinkInterface implementation
+    void OnFrame(const webrtc::VideoFrame& frame) override;
+
+    const BITMAPINFO& bmi() const { return bmi_; }
+    const uint8_t* image() const { return image_.get(); }
+
+   protected:
+    void SetSize(int width, int height);
+
+    enum {
+      SET_SIZE,
+      RENDER_FRAME,
+    };
+
+    HWND wnd_;
+    BITMAPINFO bmi_;
+    std::unique_ptr<uint8_t[]> image_;
+    CRITICAL_SECTION buffer_lock_;
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
+  };
+
+  // A little helper class to make sure we always to proper locking and
+  // unlocking when working with VideoRenderer buffers.
+  template <typename T>
+  class AutoLock {
+   public:
+    explicit AutoLock(T* obj) : obj_(obj) { obj_->Lock(); }
+    ~AutoLock() { obj_->Unlock(); }
+
+   protected:
+    T* obj_;
+  };
+
+ protected:
+  enum ChildWindowID {
+    EDIT_ID = 1,
+    BUTTON_ID,
+    LABEL1_ID,
+    LABEL2_ID,
+    LISTBOX_ID,
+  };
+
+  void OnPaint();
+  void OnDestroyed();
+
+  void OnDefaultAction();
+
+  bool OnMessage(UINT msg, WPARAM wp, LPARAM lp, LRESULT* result);
+
+  static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+  static bool RegisterWindowClass();
+
+  void CreateChildWindow(HWND* wnd,
+                         ChildWindowID id,
+                         const wchar_t* class_name,
+                         DWORD control_style,
+                         DWORD ex_style);
+  void CreateChildWindows();
+
+  void LayoutConnectUI(bool show);
+  void LayoutPeerListUI(bool show);
+
+  void HandleTabbing();
+
+ private:
+  std::unique_ptr<VideoRenderer> local_renderer_;
+  std::unique_ptr<VideoRenderer> remote_renderer_;
+  UI ui_;
+  HWND wnd_;
+  DWORD ui_thread_id_;
+  HWND edit1_;
+  HWND edit2_;
+  HWND label1_;
+  HWND label2_;
+  HWND button_;
+  HWND listbox_;
+  bool destroyed_;
+  void* nested_msg_;
+  MainWndCallback* callback_;
+  static ATOM wnd_class_;
+  std::string server_;
+  std::string port_;
+  bool auto_connect_;
+  bool auto_call_;
+};
+#endif  // WIN32
+
+#endif  // APPS_PEERCONNECTION_CLIENT_MAIN_WND_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/conductor.h
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_CONDUCTOR_H_
+#define APPS_PEERCONNECTION_CLIENT_CONDUCTOR_H_
+
+#include <deque>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "api/audio/audio_device.h"
+#include "api/data_channel_interface.h"
+#include "api/environment/environment.h"
+#include "api/jsep.h"
+#include "api/media_stream_interface.h"
+#include "api/peer_connection_interface.h"
+#include "api/rtc_error.h"
+#include "api/rtp_receiver_interface.h"
+#include "api/scoped_refptr.h"
+#include "apps/peerconnection/client/main_wnd.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "rtc_base/thread.h"
+
+namespace webrtc {
+class AudioDeviceModule;
+class VideoCaptureModule;
+}  // namespace webrtc
+
+class Conductor : public webrtc::PeerConnectionObserver,
+                  public webrtc::CreateSessionDescriptionObserver,
+                  public PeerConnectionClientObserver,
+                  public MainWndCallback,
+                  public webrtc::DataChannelObserver
+                  {
+ public:
+  enum CallbackID {
+    MEDIA_CHANNELS_INITIALIZED = 1,
+    PEER_CONNECTION_CLOSED,
+    SEND_MESSAGE_TO_PEER,
+    NEW_TRACK_ADDED,
+    TRACK_REMOVED,
+    DATA_CHANNEL_CREATED,
+    DATA_CHANNEL_OPENED,
+    DATA_CHANNEL_CLOSED,
+    DATA_CHANNEL_MESSAGE,
+  };
+
+  Conductor(const webrtc::Environment& env,
+            PeerConnectionClient* absl_nonnull client,
+            MainWindow* absl_nonnull main_wnd);
+
+  bool connection_active() const;
+
+  void Close() override;
+
+ protected:
+  ~Conductor() override;
+  bool InitializePeerConnection();
+  bool ReinitializePeerConnectionForLoopback();
+  bool CreatePeerConnection();
+  void DeletePeerConnection();
+  void EnsureStreamingUI();
+  void AddTracks();
+  void AddDataChannel();
+
+  //
+  // PeerConnectionObserver implementation.
+  //
+
+  void OnSignalingChange(
+      webrtc::PeerConnectionInterface::SignalingState new_state) override {}
+  void OnAddTrack(
+      webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+      const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+          streams) override;
+  void OnRemoveTrack(
+      webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) override;
+  void OnDataChannel(
+      webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override;
+  void OnRenegotiationNeeded() override {}
+  void OnIceConnectionChange(
+      webrtc::PeerConnectionInterface::IceConnectionState new_state) override {}
+  void OnIceGatheringChange(
+      webrtc::PeerConnectionInterface::IceGatheringState new_state) override {}
+  void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
+  void OnIceConnectionReceivingChange(bool receiving) override {}
+  void OnIceCandidateRemoved(const webrtc::IceCandidate* candidate) override {}
+
+  //
+  // DataChannelObserver implementation.
+  //
+
+  void OnStateChange() override;
+  void OnMessage(const webrtc::DataBuffer& buffer) override;
+  void OnBufferedAmountChange(uint64_t /* buffered_amount */) override {}
+  bool IsOkToCallOnTheNetworkThread() override { return false; }
+
+
+  //
+  // PeerConnectionClientObserver implementation.
+  //
+
+  void OnSignedIn() override;
+
+  void OnDisconnected() override;
+
+  void OnPeerConnected(int id, const std::string& name) override;
+
+  void OnPeerDisconnected(int id) override;
+
+  void OnMessageFromPeer(int peer_id, const std::string& message) override;
+
+  void OnMessageSent(int err) override;
+
+  void OnServerConnectionFailure() override;
+
+  //
+  // MainWndCallback implementation.
+  //
+
+  void StartLogin(const std::string& server, int port) override;
+
+  void DisconnectFromServer() override;
+
+  void ConnectToPeer(int peer_id) override;
+
+  void DisconnectFromCurrentPeer() override;
+
+  void UIThreadCallback(int msg_id, void* data) override;
+
+  // CreateSessionDescriptionObserver implementation.
+  void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
+  void OnFailure(webrtc::RTCError error) override;
+
+ protected:
+  // Send a message to the remote peer.
+  void SendMessage(const std::string& json_object);
+  // Send test data through DataChannel
+  void SendTestData();
+
+  int peer_id_;
+  bool loopback_;
+  const webrtc::Environment env_;
+  std::unique_ptr<webrtc::Thread> network_thread_;
+  std::unique_ptr<webrtc::Thread> worker_thread_;
+  std::unique_ptr<webrtc::Thread> signaling_thread_;
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
+      peer_connection_factory_;
+  PeerConnectionClient* client_;
+  MainWindow* main_wnd_;
+  std::deque<std::string*> pending_messages_;
+  std::string server_;
+  // Holds a reference to the local video source so that its underlying
+  // capturer is released only after the PeerConnection (and any tracks/senders)
+  // have been torn down. This helps ensure the capturer is destroyed on the
+  // same thread it was created on when DeletePeerConnection() runs.
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
+  // DataChannel reference for text communication
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_CONDUCTOR_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/defaults.h
+==================================================
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_DEFAULTS_H_
+#define APPS_PEERCONNECTION_CLIENT_DEFAULTS_H_
+
+#include <stdint.h>
+
+#include <string>
+
+extern const char kAudioLabel[];
+extern const char kVideoLabel[];
+extern const char kStreamId[];
+extern const uint16_t kDefaultServerPort;
+
+std::string GetEnvVarOrDefault(const char* env_var_name,
+                               const char* default_value);
+std::string GetSTUNServer();
+std::string GetTURNServer();
+std::string GetDefaultServerName();
+std::string GetPeerName();
+
+std::string GetTurnUserName();
+std::string GetTurnPassword();
+
+#endif  // APPS_PEERCONNECTION_CLIENT_DEFAULTS_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/flag_defs.h
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_FLAG_DEFS_H_
+#define APPS_PEERCONNECTION_CLIENT_FLAG_DEFS_H_
+
+#include <string>
+
+#include "absl/flags/flag.h"
+
+extern const uint16_t kDefaultServerPort;  // From defaults.[h|cc]
+
+// Define flags for the peerconnect_client testing tool, in a separate
+// header file so that they can be shared across the different main.cc's
+// for each platform.
+
+ABSL_FLAG(bool,
+          autoconnect,
+          false,
+          "Connect to the server without user "
+          "intervention.");
+ABSL_FLAG(std::string, server, "localhost", "The server to connect to.");
+ABSL_FLAG(int,
+          port,
+          kDefaultServerPort,
+          "The port on which the server is listening.");
+ABSL_FLAG(
+    bool,
+    autocall,
+    false,
+    "Call the first available other client on "
+    "the server without user intervention.  Note: this flag should only be set "
+    "to true on one of the two clients.");
+
+ABSL_FLAG(
+    std::string,
+    force_fieldtrials,
+    "",
+    "Field trials control experimental features. This flag specifies the field "
+    "trials in effect. E.g. running with "
+    "--force_fieldtrials=WebRTC-FooFeature/Enabled/ "
+    "will assign the group Enabled to field trial WebRTC-FooFeature. Multiple "
+    "trials are separated by \"/\"");
+
+#endif  // APPS_PEERCONNECTION_CLIENT_FLAG_DEFS_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/defaults.cc
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "apps/peerconnection/client/defaults.h"
+
+#include <cstdint>
+#include <cstdlib>
+#include <iterator>
+#include <string>
+
+#ifdef WIN32
+#include <winsock2.h>
+#else
+#include <unistd.h>
+#endif
+
+const char kAudioLabel[] = "audio_label";
+const char kVideoLabel[] = "video_label";
+const char kStreamId[] = "stream_id";
+const uint16_t kDefaultServerPort = 8888;
+
+std::string GetEnvVarOrDefault(const char* env_var_name,
+                               const char* default_value) {
+  std::string value;
+  const char* env_var = getenv(env_var_name);
+  if (env_var)
+    value = env_var;
+
+  if (value.empty())
+    value = default_value;
+
+  return value;
+}
+
+std::string GetSTUNServer() {
+  return GetEnvVarOrDefault("WEBRTC_STUN", "stun:stun.l.google.com:19302");
+}
+
+std::string GetTURNServer() {
+  return GetEnvVarOrDefault("WEBRTC_TURN_SERVER", "turn:120.79.210.6:3478");
+}
+
+std::string GetDefaultServerName() {
+  return GetEnvVarOrDefault("WEBRTC_SERVER", "localhost");
+}
+
+std::string GetTurnUserName() {
+  return GetEnvVarOrDefault("WEBRTC_TURN_USER", "test");
+}
+
+std::string GetTurnPassword() {
+  return GetEnvVarOrDefault("WEBRTC_TURN_PASSWORD", "123");
+}
+
+std::string GetPeerName() {
+  char computer_name[256];
+  std::string ret(GetEnvVarOrDefault("USERNAME", "user"));
+  ret += '@';
+  if (gethostname(computer_name, std::size(computer_name)) == 0) {
+    ret += computer_name;
+  } else {
+    ret += "host";
+  }
+  return ret;
+}
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/conductor.cc
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "apps/peerconnection/client/conductor.h"
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "api/audio/create_audio_device_module.h"
+#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+#include "api/audio_codecs/builtin_audio_encoder_factory.h"
+#include "api/audio_options.h"
+#include "api/audio/audio_device.h"
+#include "api/create_modular_peer_connection_factory.h"
+#include "api/enable_media.h"
+#include "api/environment/environment.h"
+#include "api/jsep.h"
+#include "api/make_ref_counted.h"
+#include "api/media_stream_interface.h"
+#include "api/peer_connection_interface.h"
+#include "api/rtc_error.h"
+#include "api/rtp_receiver_interface.h"
+#include "api/rtp_sender_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/task_queue/task_queue_factory.h"
+#include "api/test/create_frame_generator.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_source_interface.h"
+#include "api/video_codecs/video_decoder_factory_template.h"
+#include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_open_h264_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template.h"
+#include "api/video_codecs/video_encoder_factory_template_libaom_av1_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
+#include "apps/peerconnection/client/defaults.h"
+#include "apps/peerconnection/client/main_wnd.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "json/reader.h"
+#include "json/value.h"
+#include "json/writer.h"
+#include "modules/video_capture/video_capture.h"
+#include "modules/video_capture/video_capture_factory.h"
+#include "pc/video_track_source.h"
+#include "rtc_base/checks.h"
+#include "rtc_base/logging.h"
+#include "rtc_base/strings/json.h"
+#include "rtc_base/thread.h"
+#include "system_wrappers/include/clock.h"
+#include "test/frame_generator_capturer.h"
+#include "test/platform_video_capturer.h"
+#include "test/test_video_capturer.h"
+
+namespace {
+using webrtc::test::TestVideoCapturer;
+
+// Names used for a IceCandidate JSON object.
+const char kCandidateSdpMidName[] = "sdpMid";
+const char kCandidateSdpMlineIndexName[] = "sdpMLineIndex";
+const char kCandidateSdpName[] = "candidate";
+
+// Names used for a SessionDescription JSON object.
+const char kSessionDescriptionTypeName[] = "type";
+const char kSessionDescriptionSdpName[] = "sdp";
+
+class DummySetSessionDescriptionObserver
+    : public webrtc::SetSessionDescriptionObserver {
+ public:
+  static webrtc::scoped_refptr<DummySetSessionDescriptionObserver> Create() {
+    return webrtc::make_ref_counted<DummySetSessionDescriptionObserver>();
+  }
+  void OnSuccess() override { RTC_LOG(LS_INFO) << __FUNCTION__; }
+  void OnFailure(webrtc::RTCError error) override {
+    RTC_LOG(LS_INFO) << __FUNCTION__ << " " << ToString(error.type()) << ": "
+                     << error.message();
+  }
+};
+
+std::unique_ptr<TestVideoCapturer> CreateCapturer(
+    webrtc::TaskQueueFactory& task_queue_factory) {
+  const size_t kWidth = 640;
+  const size_t kHeight = 480;
+  const size_t kFps = 30;
+  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
+      webrtc::VideoCaptureFactory::CreateDeviceInfo());
+  if (info) {
+    int num_devices = info->NumberOfDevices();
+    for (int i = 0; i < num_devices; ++i) {
+      std::unique_ptr<TestVideoCapturer> capturer =
+          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, i);
+      if (capturer) {
+        return capturer;
+      }
+    }
+  }
+  RTC_LOG(LS_WARNING)
+      << "No video capture device found; using synthetic video.";
+  auto frame_generator = webrtc::test::CreateSquareFrameGenerator(
+      kWidth, kHeight, std::nullopt, std::nullopt);
+  return std::make_unique<webrtc::test::FrameGeneratorCapturer>(
+      webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), kFps,
+      task_queue_factory);
+}
+class CapturerTrackSource : public webrtc::VideoTrackSource {
+ public:
+  static webrtc::scoped_refptr<CapturerTrackSource> Create(
+      webrtc::TaskQueueFactory& task_queue_factory) {
+    std::unique_ptr<TestVideoCapturer> capturer =
+        CreateCapturer(task_queue_factory);
+    if (capturer) {
+      capturer->Start();
+      return webrtc::make_ref_counted<CapturerTrackSource>(std::move(capturer));
+    }
+    return nullptr;
+  }
+
+ protected:
+  explicit CapturerTrackSource(std::unique_ptr<TestVideoCapturer> capturer)
+      : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
+
+  ~CapturerTrackSource() override = default;
+
+ private:
+  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
+    return capturer_.get();
+  }
+
+  std::unique_ptr<TestVideoCapturer> capturer_;
+};
+
+}  // namespace
+
+Conductor::Conductor(const webrtc::Environment& env,
+                     PeerConnectionClient* absl_nonnull client,
+                     MainWindow* absl_nonnull main_wnd)
+    : peer_id_(-1),
+      loopback_(false),
+      env_(env),
+      client_(client),
+      main_wnd_(main_wnd) {
+  client_->RegisterObserver(this);
+  main_wnd->RegisterObserver(this);
+}
+
+Conductor::~Conductor() {
+  RTC_DCHECK(!peer_connection_);
+
+  if (worker_thread_ && audio_device_module_) {
+    auto audio_device_module = std::move(audio_device_module_);
+    worker_thread_->BlockingCall(
+        [audio_device_module = std::move(audio_device_module)]() mutable {
+          audio_device_module = nullptr;
+        });
+  }
+
+  if (signaling_thread_) {
+    signaling_thread_->Stop();
+  }
+  if (worker_thread_) {
+    worker_thread_->Stop();
+  }
+  if (network_thread_) {
+    network_thread_->Stop();
+  }
+}
+
+bool Conductor::connection_active() const {
+  return peer_connection_ != nullptr;
+}
+
+void Conductor::Close() {
+  client_->SignOut();
+  DeletePeerConnection();
+}
+
+bool Conductor::InitializePeerConnection() {
+  RTC_DCHECK(!peer_connection_factory_);
+  RTC_DCHECK(!peer_connection_);
+
+  if (!network_thread_) {
+    network_thread_ = webrtc::Thread::CreateWithSocketServer();
+    network_thread_->SetName("app_pc_network_thread", nullptr);
+    if (!network_thread_->Start()) {
+      main_wnd_->MessageBox("Error", "Failed to start network thread", true);
+      return false;
+    }
+  }
+
+  if (!worker_thread_) {
+    worker_thread_ = webrtc::Thread::Create();
+    worker_thread_->SetName("app_pc_worker_thread", nullptr);
+    if (!worker_thread_->Start()) {
+      main_wnd_->MessageBox("Error", "Failed to start worker thread", true);
+      return false;
+    }
+  }
+
+  if (!signaling_thread_) {
+    signaling_thread_ = webrtc::Thread::Create();
+    signaling_thread_->SetName("app_pc_signaling_thread", nullptr);
+    if (!signaling_thread_->Start()) {
+      main_wnd_->MessageBox("Error", "Failed to start signaling thread", true);
+      return false;
+    }
+  }
+
+  if (!audio_device_module_) {
+    // Pulse/ALSA ADM has thread-affinity checks, so create it on the same
+    // worker thread that will later initialize and drive it.
+    audio_device_module_ = worker_thread_->BlockingCall([this] {
+      return webrtc::CreateAudioDeviceModule(
+          env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+    });
+
+    if (!audio_device_module_) {
+      main_wnd_->MessageBox("Error", "Failed to create AudioDeviceModule",
+                            true);
+      return false;
+    }
+  }
+
+  webrtc::PeerConnectionFactoryDependencies deps;
+  deps.network_thread = network_thread_.get();
+  deps.worker_thread = worker_thread_.get();
+  deps.signaling_thread = signaling_thread_.get();
+  deps.env = env_;
+  deps.adm = audio_device_module_;
+  deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
+  deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+  deps.video_encoder_factory =
+      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+          webrtc::LibvpxVp8EncoderTemplateAdapter,
+          webrtc::LibvpxVp9EncoderTemplateAdapter,
+          webrtc::OpenH264EncoderTemplateAdapter,
+          webrtc::LibaomAv1EncoderTemplateAdapter>>();
+  deps.video_decoder_factory =
+      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+          webrtc::LibvpxVp8DecoderTemplateAdapter,
+          webrtc::LibvpxVp9DecoderTemplateAdapter,
+          webrtc::OpenH264DecoderTemplateAdapter,
+          webrtc::Dav1dDecoderTemplateAdapter>>();
+  webrtc::EnableMedia(deps);
+  peer_connection_factory_ =
+      webrtc::CreateModularPeerConnectionFactory(std::move(deps));
+
+  if (!peer_connection_factory_) {
+    main_wnd_->MessageBox("Error", "Failed to initialize PeerConnectionFactory",
+                          true);
+    DeletePeerConnection();
+    return false;
+  }
+
+  if (!CreatePeerConnection()) {
+    main_wnd_->MessageBox("Error", "CreatePeerConnection failed", true);
+    DeletePeerConnection();
+  }
+
+  AddTracks();
+  AddDataChannel();
+  return peer_connection_ != nullptr;
+}
+
+bool Conductor::ReinitializePeerConnectionForLoopback() {
+  loopback_ = true;
+  std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders =
+      peer_connection_->GetSenders();
+  peer_connection_ = nullptr;
+  // Loopback is only possible if encryption is disabled.
+  webrtc::PeerConnectionFactoryInterface::Options options;
+  options.disable_encryption = true;
+  peer_connection_factory_->SetOptions(options);
+  if (CreatePeerConnection()) {
+    for (const auto& sender : senders) {
+      peer_connection_->AddTrack(sender->track(), sender->stream_ids());
+    }
+    peer_connection_->CreateOffer(
+        this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
+  }
+  options.disable_encryption = false;
+  peer_connection_factory_->SetOptions(options);
+  return peer_connection_ != nullptr;
+}
+
+bool Conductor::CreatePeerConnection() {
+  RTC_DCHECK(peer_connection_factory_);
+  RTC_DCHECK(!peer_connection_);
+
+  webrtc::PeerConnectionInterface::RTCConfiguration config;
+  config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
+
+  // 第一步：配置 STUN 服务器（一级方案 - P2P 直连）
+  webrtc::PeerConnectionInterface::IceServer stun_server;
+  stun_server.uri = GetSTUNServer();
+  config.servers.push_back(stun_server);
+
+  // 第二步：配置 TURN 服务器（保底方案 - 中继转发）
+  webrtc::PeerConnectionInterface::IceServer turn_server;
+  turn_server.uri = GetTURNServer();
+  turn_server.username = GetTurnUserName();
+  turn_server.password = GetTurnPassword();
+  config.servers.push_back(turn_server);
+
+  webrtc::PeerConnectionDependencies pc_dependencies(this);
+  auto error_or_peer_connection =
+      peer_connection_factory_->CreatePeerConnectionOrError(
+          config, std::move(pc_dependencies));
+  if (error_or_peer_connection.ok()) {
+    peer_connection_ = std::move(error_or_peer_connection.value());
+  }
+  return peer_connection_ != nullptr;
+}
+
+void Conductor::DeletePeerConnection() {
+  main_wnd_->StopLocalRenderer();
+  main_wnd_->StopRemoteRenderer();
+  if (data_channel_) {
+    data_channel_->UnregisterObserver();
+    data_channel_->Close();
+    data_channel_ = nullptr;
+  }
+  peer_connection_ = nullptr;
+  peer_connection_factory_ = nullptr;
+  local_video_source_ = nullptr;
+  peer_id_ = -1;
+  loopback_ = false;
+}
+
+void Conductor::EnsureStreamingUI() {
+  RTC_DCHECK(peer_connection_);
+  if (main_wnd_->IsWindow()) {
+    if (main_wnd_->current_ui() != MainWindow::STREAMING)
+      main_wnd_->SwitchToStreamingUI();
+  }
+}
+
+//
+// PeerConnectionObserver implementation.
+//
+
+void Conductor::OnAddTrack(
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+    const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+        streams) {
+  RTC_LOG(LS_INFO) << __FUNCTION__ << " " << receiver->id();
+  main_wnd_->QueueUIThreadCallback(NEW_TRACK_ADDED,
+                                   receiver->track().release());
+}
+
+void Conductor::OnRemoveTrack(
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) {
+  RTC_LOG(LS_INFO) << __FUNCTION__ << " " << receiver->id();
+  main_wnd_->QueueUIThreadCallback(TRACK_REMOVED, receiver->track().release());
+}
+
+void Conductor::OnIceCandidate(const webrtc::IceCandidate* candidate) {
+  RTC_LOG(LS_INFO) << __FUNCTION__ << " " << candidate->sdp_mline_index();
+  // For loopback test. To save some connecting delay.
+  if (loopback_) {
+    if (!peer_connection_->AddIceCandidate(candidate)) {
+      RTC_LOG(LS_WARNING) << "Failed to apply the received candidate";
+    }
+    return;
+  }
+
+  Json::Value jmessage;
+  jmessage[kCandidateSdpMidName] = candidate->sdp_mid();
+  jmessage[kCandidateSdpMlineIndexName] = candidate->sdp_mline_index();
+  jmessage[kCandidateSdpName] = candidate->ToString();
+
+  Json::StreamWriterBuilder factory;
+  SendMessage(Json::writeString(factory, jmessage));
+}
+
+
+void Conductor::OnDataChannel(
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc) {
+  RTC_LOG(LS_INFO) << "OnDataChannel called"
+                   << " - label: " << dc->label()
+                   << " - id: " << dc->id()
+                   << " - state: " << dc->state();
+
+  if (!dc) {
+    RTC_LOG(LS_ERROR) << "OnDataChannel: Received null DataChannel";
+    return;
+  }
+
+  if (dc->label() != "chat") {
+    RTC_LOG(LS_WARNING) << "OnDataChannel: Unexpected label: " << dc->label();
+    return;
+  }
+
+  if (data_channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannel already exists, replacing...";
+  }
+
+  data_channel_ = dc;
+
+  // Register as observer
+  data_channel_->RegisterObserver(this);
+
+  RTC_LOG(LS_INFO) << "DataChannel received and observer registered"
+                   << " - label: " << data_channel_->label();
+}
+
+
+
+//
+// PeerConnectionClientObserver implementation.
+//
+
+void Conductor::OnSignedIn() {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  main_wnd_->SwitchToPeerList(client_->peers());
+}
+
+void Conductor::OnDisconnected() {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+
+  DeletePeerConnection();
+
+  if (main_wnd_->IsWindow())
+    main_wnd_->SwitchToConnectUI();
+}
+
+void Conductor::OnPeerConnected(int id, const std::string& name) {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  // Refresh the list if we're showing it.
+  if (main_wnd_->current_ui() == MainWindow::LIST_PEERS)
+    main_wnd_->SwitchToPeerList(client_->peers());
+}
+
+void Conductor::OnPeerDisconnected(int id) {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  if (id == peer_id_) {
+    RTC_LOG(LS_INFO) << "Our peer disconnected";
+    main_wnd_->QueueUIThreadCallback(PEER_CONNECTION_CLOSED, nullptr);
+  } else {
+    // Refresh the list if we're showing it.
+    if (main_wnd_->current_ui() == MainWindow::LIST_PEERS)
+      main_wnd_->SwitchToPeerList(client_->peers());
+  }
+}
+
+void Conductor::OnMessageFromPeer(int peer_id, const std::string& message) {
+  RTC_DCHECK(peer_id_ == peer_id || peer_id_ == -1);
+  RTC_DCHECK(!message.empty());
+
+  if (!peer_connection_) {
+    RTC_DCHECK(peer_id_ == -1);
+    peer_id_ = peer_id;
+
+    if (!InitializePeerConnection()) {
+      RTC_LOG(LS_ERROR) << "Failed to initialize our PeerConnection instance";
+      client_->SignOut();
+      return;
+    }
+  } else if (peer_id != peer_id_) {
+    RTC_DCHECK(peer_id_ != -1);
+    RTC_LOG(LS_WARNING)
+        << "Received a message from unknown peer while already in a "
+           "conversation with a different peer.";
+    return;
+  }
+
+  Json::CharReaderBuilder factory;
+  Json::Value jmessage;
+  std::string parse_errors;
+  std::istringstream message_stream(message);
+  if (!Json::parseFromStream(factory, message_stream, &jmessage,
+                             &parse_errors)) {
+    RTC_LOG(LS_WARNING) << "Received unknown message: " << parse_errors
+                        << " Payload: " << message;
+    return;
+  }
+  std::string type_str;
+  std::string json_object;
+
+  webrtc::GetStringFromJsonObject(jmessage, kSessionDescriptionTypeName,
+                                  &type_str);
+  if (!type_str.empty()) {
+    if (type_str == "offer-loopback") {
+      // This is a loopback call.
+      // Recreate the peerconnection with DTLS disabled.
+      if (!ReinitializePeerConnectionForLoopback()) {
+        RTC_LOG(LS_ERROR) << "Failed to initialize our PeerConnection instance";
+        DeletePeerConnection();
+        client_->SignOut();
+      }
+      return;
+    }
+    std::optional<webrtc::SdpType> type_maybe =
+        webrtc::SdpTypeFromString(type_str);
+    if (!type_maybe) {
+      RTC_LOG(LS_ERROR) << "Unknown SDP type: " << type_str;
+      return;
+    }
+    webrtc::SdpType type = *type_maybe;
+    std::string sdp;
+    if (!webrtc::GetStringFromJsonObject(jmessage, kSessionDescriptionSdpName,
+                                         &sdp)) {
+      RTC_LOG(LS_WARNING)
+          << "Can't parse received session description message.";
+      return;
+    }
+    webrtc::SdpParseError error;
+    std::unique_ptr<webrtc::SessionDescriptionInterface> session_description =
+        webrtc::CreateSessionDescription(type, sdp, &error);
+    if (!session_description) {
+      RTC_LOG(LS_WARNING)
+          << "Can't parse received session description message. "
+             "SdpParseError was: "
+          << error.description;
+      return;
+    }
+    RTC_LOG(LS_INFO) << " Received session description :" << message;
+    peer_connection_->SetRemoteDescription(
+        DummySetSessionDescriptionObserver::Create().get(),
+        session_description.release());
+    if (type == webrtc::SdpType::kOffer) {
+      peer_connection_->CreateAnswer(
+          this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
+    }
+  } else {
+    std::string sdp_mid;
+    int sdp_mlineindex = 0;
+    std::string sdp;
+    if (!webrtc::GetStringFromJsonObject(jmessage, kCandidateSdpMidName,
+                                         &sdp_mid) ||
+        !webrtc::GetIntFromJsonObject(jmessage, kCandidateSdpMlineIndexName,
+                                      &sdp_mlineindex) ||
+        !webrtc::GetStringFromJsonObject(jmessage, kCandidateSdpName, &sdp)) {
+      RTC_LOG(LS_WARNING) << "Can't parse received message.";
+      return;
+    }
+    webrtc::SdpParseError error;
+    std::unique_ptr<webrtc::IceCandidate> candidate(
+        webrtc::CreateIceCandidate(sdp_mid, sdp_mlineindex, sdp, &error));
+    if (!candidate) {
+      RTC_LOG(LS_WARNING) << "Can't parse received candidate message. "
+                             "SdpParseError was: "
+                          << error.description;
+      return;
+    }
+    if (!peer_connection_->AddIceCandidate(candidate.get())) {
+      RTC_LOG(LS_WARNING) << "Failed to apply the received candidate";
+      return;
+    }
+    RTC_LOG(LS_INFO) << " Received candidate :" << message;
+  }
+}
+
+void Conductor::OnMessageSent(int err) {
+  // Process the next pending message if any.
+  main_wnd_->QueueUIThreadCallback(SEND_MESSAGE_TO_PEER, nullptr);
+}
+
+void Conductor::OnServerConnectionFailure() {
+  main_wnd_->MessageBox("Error", ("Failed to connect to " + server_).c_str(),
+                        true);
+}
+
+//
+// MainWndCallback implementation.
+//
+
+void Conductor::StartLogin(const std::string& server, int port) {
+  if (client_->is_connected())
+    return;
+  server_ = server;
+  client_->Connect(server, port, GetPeerName());
+}
+
+
+void Conductor::AddDataChannel() {
+  RTC_DCHECK(peer_connection_);
+
+  if (data_channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannel already exists";
+    return;
+  }
+
+  // Configure DataChannel
+  webrtc::DataChannelInit config;
+  config.ordered = true;
+  config.negotiated = true;  // ← Changed to true to ensure SDP includes m=application
+  config.id = 0;             // ← Fixed ID for both sides to agree
+
+  RTC_LOG(LS_INFO) << "Creating DataChannel with label: chat (negotiated=true, id=0)";
+
+  // Create DataChannel
+  auto dc_or_error = peer_connection_->CreateDataChannelOrError("chat", &config);
+
+  // Error handling
+  if (!dc_or_error.ok()) {
+    RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
+                      << dc_or_error.error().message();
+    return;
+  }
+
+  // Store reference
+  data_channel_ = std::move(dc_or_error.value());
+
+  // Register as observer
+  data_channel_->RegisterObserver(this);
+
+  RTC_LOG(LS_INFO) << "DataChannel created successfully"
+                   << " - label: " << data_channel_->label()
+                   << " - state: " << data_channel_->state();
+}
+
+
+void Conductor::DisconnectFromServer() {
+  if (client_->is_connected())
+    client_->SignOut();
+}
+
+void Conductor::ConnectToPeer(int peer_id) {
+  RTC_DCHECK(peer_id_ == -1);
+  RTC_DCHECK(peer_id != -1);
+
+  if (peer_connection_) {
+    main_wnd_->MessageBox(
+        "Error", "We only support connecting to one peer at a time", true);
+    return;
+  }
+
+  if (InitializePeerConnection()) {
+    peer_id_ = peer_id;
+    peer_connection_->CreateOffer(
+        this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
+  } else {
+    main_wnd_->MessageBox("Error", "Failed to initialize PeerConnection", true);
+  }
+}
+
+void Conductor::AddTracks() {
+  if (!peer_connection_->GetSenders().empty()) {
+    return;  // Already added tracks.
+  }
+
+  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
+      peer_connection_factory_->CreateAudioTrack(
+          kAudioLabel,
+          peer_connection_factory_->CreateAudioSource(webrtc::AudioOptions())
+              .get()));
+  auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
+  if (!result_or_error.ok()) {
+    RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
+                      << result_or_error.error().message();
+  }
+
+  local_video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
+  if (local_video_source_) {
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
+        peer_connection_factory_->CreateVideoTrack(local_video_source_,
+                                                   kVideoLabel));
+    main_wnd_->StartLocalRenderer(video_track_.get());
+
+    result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
+    if (!result_or_error.ok()) {
+      RTC_LOG(LS_ERROR) << "Failed to add video track to PeerConnection: "
+                        << result_or_error.error().message();
+    }
+  } else {
+    RTC_LOG(LS_WARNING)
+        << "No local video track; proceeding without local video";
+  }
+
+  main_wnd_->SwitchToStreamingUI();
+}
+
+void Conductor::DisconnectFromCurrentPeer() {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  if (peer_connection_) {
+    client_->SendHangUp(peer_id_);
+    DeletePeerConnection();
+  }
+
+  if (main_wnd_->IsWindow())
+    main_wnd_->SwitchToPeerList(client_->peers());
+}
+
+void Conductor::UIThreadCallback(int msg_id, void* data) {
+  switch (msg_id) {
+    case PEER_CONNECTION_CLOSED:
+      RTC_LOG(LS_INFO) << "PEER_CONNECTION_CLOSED";
+      DeletePeerConnection();
+
+      if (main_wnd_->IsWindow()) {
+        if (client_->is_connected()) {
+          main_wnd_->SwitchToPeerList(client_->peers());
+        } else {
+          main_wnd_->SwitchToConnectUI();
+        }
+      } else {
+        DisconnectFromServer();
+      }
+      break;
+
+    case SEND_MESSAGE_TO_PEER: {
+      RTC_LOG(LS_INFO) << "SEND_MESSAGE_TO_PEER";
+      std::string* msg = reinterpret_cast<std::string*>(data);
+      if (msg) {
+        // For convenience, we always run the message through the queue.
+        // This way we can be sure that messages are sent to the server
+        // in the same order they were signaled without much hassle.
+        pending_messages_.push_back(msg);
+      }
+
+      if (!pending_messages_.empty() && !client_->IsSendingMessage()) {
+        msg = pending_messages_.front();
+        pending_messages_.pop_front();
+
+        if (!client_->SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
+          RTC_LOG(LS_ERROR) << "SendToPeer failed";
+          DisconnectFromServer();
+        }
+        delete msg;
+      }
+
+      if (!peer_connection_)
+        peer_id_ = -1;
+
+      break;
+    }
+
+    case NEW_TRACK_ADDED: {
+      auto* track = reinterpret_cast<webrtc::MediaStreamTrackInterface*>(data);
+      if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
+        auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
+        main_wnd_->StartRemoteRenderer(video_track);
+      }
+      track->Release();
+      break;
+    }
+
+    case TRACK_REMOVED: {
+      // Remote peer stopped sending a track.
+      auto* track = reinterpret_cast<webrtc::MediaStreamTrackInterface*>(data);
+      // Ensure we detach our renderer before releasing the track to avoid
+      // referencing a destroyed track from the renderer.
+      main_wnd_->StopRemoteRenderer();
+      track->Release();
+      break;
+    }
+
+
+    case DATA_CHANNEL_OPENED:
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_OPENED";
+      // Enable chat UI
+      break;
+
+    case DATA_CHANNEL_CLOSED:
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_CLOSED";
+      // Disable chat UI
+      break;
+
+    case DATA_CHANNEL_MESSAGE: {
+      RTC_LOG(LS_INFO) << "DATA_CHANNEL_MESSAGE";
+      std::string* msg = reinterpret_cast<std::string*>(data);
+      if (msg) {
+        RTC_LOG(LS_INFO) << "Message from peer: " << *msg;
+        delete msg;
+      }
+      break;
+    }
+
+
+    default:
+      RTC_DCHECK_NOTREACHED();
+      break;
+  }
+}
+
+void Conductor::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
+  peer_connection_->SetLocalDescription(
+      DummySetSessionDescriptionObserver::Create().get(), desc);
+
+  std::string sdp;
+  desc->ToString(&sdp);
+
+  // For loopback test. To save some connecting delay.
+  if (loopback_) {
+    // Replace message type from "offer" to "answer"
+    std::unique_ptr<webrtc::SessionDescriptionInterface> session_description =
+        webrtc::CreateSessionDescription(webrtc::SdpType::kAnswer, sdp);
+    peer_connection_->SetRemoteDescription(
+        DummySetSessionDescriptionObserver::Create().get(),
+        session_description.release());
+    return;
+  }
+
+  Json::Value jmessage;
+  jmessage[kSessionDescriptionTypeName] =
+      webrtc::SdpTypeToString(desc->GetType());
+  jmessage[kSessionDescriptionSdpName] = sdp;
+
+  Json::StreamWriterBuilder factory;
+  SendMessage(Json::writeString(factory, jmessage));
+}
+
+void Conductor::OnFailure(webrtc::RTCError error) {
+  RTC_LOG(LS_ERROR) << ToString(error.type()) << ": " << error.message();
+}
+
+void Conductor::SendMessage(const std::string& json_object) {
+  std::string* msg = new std::string(json_object);
+  main_wnd_->QueueUIThreadCallback(SEND_MESSAGE_TO_PEER, msg);
+}
+
+
+//
+// DataChannelObserver implementation.
+//
+
+void Conductor::OnStateChange() {
+  if (!data_channel_) {
+    RTC_LOG(LS_ERROR) << "OnStateChange: data_channel_ is null";
+    return;
+  }
+
+  auto state = data_channel_->state();
+  RTC_LOG(LS_INFO) << "DataChannel state changed: " 
+                   << webrtc::DataChannelInterface::DataStateString(state);
+
+  switch (state) {
+    case webrtc::DataChannelInterface::kConnecting:
+      RTC_LOG(LS_INFO) << "DataChannel is CONNECTING";
+      break;
+
+    case webrtc::DataChannelInterface::kOpen:
+      RTC_LOG(LS_INFO) << "DataChannel is OPEN ★★★";
+      main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_OPENED, nullptr);
+      // Send test data when channel opens
+      SendTestData();
+      break;
+
+    case webrtc::DataChannelInterface::kClosing:
+      RTC_LOG(LS_INFO) << "DataChannel is CLOSING";
+      break;
+
+    case webrtc::DataChannelInterface::kClosed:
+      RTC_LOG(LS_INFO) << "DataChannel is CLOSED";
+      main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_CLOSED, nullptr);
+      break;
+
+    default:
+      RTC_LOG(LS_WARNING) << "Unknown DataChannel state: " << state;
+  }
+}
+
+void Conductor::OnMessage(const webrtc::DataBuffer& buffer) {
+  RTC_LOG(LS_INFO) << "=== DataChannel::OnMessage START ===";
+
+  if (buffer.data.empty()) {
+    RTC_LOG(LS_WARNING) << "Received empty message";
+    return;
+  }
+
+  // Extract message content
+  std::string message(reinterpret_cast<const char*>(buffer.data.data()),
+                      buffer.data.size());
+
+  // Log the received message
+  RTC_LOG(LS_INFO) << "✓ Message received from remote peer"
+                   << " - content: [" << message << "]"
+                   << " - length: " << buffer.data.size()
+                   << " - binary: " << (buffer.binary ? "yes" : "no");
+
+  // Queue message to UI thread
+  std::string* msg = new std::string(message);
+  main_wnd_->QueueUIThreadCallback(DATA_CHANNEL_MESSAGE, msg);
+
+  RTC_LOG(LS_INFO) << "=== DataChannel::OnMessage END ===";
+}
+
+void Conductor::SendTestData() {
+  RTC_LOG(LS_INFO) << "=== SendTestData START ===";
+
+  if (!data_channel_) {
+    RTC_LOG(LS_ERROR) << "DataChannel not available";
+    return;
+  }
+
+  if (data_channel_->state() != webrtc::DataChannelInterface::kOpen) {
+    RTC_LOG(LS_ERROR) << "DataChannel not open, state: "
+                      << data_channel_->state();
+    return;
+  }
+
+  // Construct test message
+  std::string test_message = "Test Data from Conductor";
+
+  RTC_LOG(LS_INFO) << "Sending test message: " << test_message;
+
+  // Send data
+  webrtc::DataBuffer buffer(test_message);
+
+  if (!data_channel_->Send(buffer)) {
+    RTC_LOG(LS_ERROR) << "✗ Failed to send test data";
+    return;
+  }
+
+  RTC_LOG(LS_INFO) << "✓ Test data sent successfully";
+  RTC_LOG(LS_INFO) << "=== SendTestData END ===";
+}
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/gst_shm_transport.cc
+==================================================
+
+#include "gst_shm_transport.h"
+#include <unistd.h>
+#include <fcntl.h>
+#include "rtc_base/logging.h"
+
+// ==================== GstShmSender 实现 ====================
+GstShmSender::GstShmSender(const std::string& shm_socket)
+    : shm_socket_(shm_socket) {}
+
+GstShmSender::~GstShmSender() {
+    Destroy();
+}
+
+void GstShmSender::CleanupShmSocket() {
+    if (access(shm_socket_.c_str(), F_OK) == 0) {
+        unlink(shm_socket_.c_str());
+        RTC_LOG(LS_INFO) << "清理共享内存文件: " << shm_socket_;
+    }
+}
+
+bool GstShmSender::Init() {
+    if (initialized_) return true;
+
+    // 清理残留文件
+    CleanupShmSocket();
+
+    // 创建GST元素
+    pipeline_ = gst_pipeline_new("shm-sender-pipeline");
+    appsrc_ = gst_element_factory_make("appsrc", "video_src");
+    GstElement* convert = gst_element_factory_make("videoconvert", "convert");
+    GstElement* queue = gst_element_factory_make("queue", "queue");
+    GstElement* shmsink = gst_element_factory_make("shmsink", "shm_sink");
+
+    if (!pipeline_ || !appsrc_ || !convert || !queue || !shmsink) {
+        RTC_LOG(LS_ERROR) << "GST 元素创建失败";
+        return false;
+    }
+
+    // 配置appsrc (输入I420)
+    GstCaps* caps = gst_caps_new_simple(
+        "video/x-raw",
+        "format", G_TYPE_STRING, "I420",
+        "width", G_TYPE_INT, VIDEO_WIDTH,
+        "height", G_TYPE_INT, VIDEO_HEIGHT,
+        "framerate", GST_TYPE_FRACTION, VIDEO_FPS, 1,
+        nullptr);
+    g_object_set(G_OBJECT(appsrc_),
+        "caps", caps,
+        "format", GST_FORMAT_TIME,
+        "is-live", TRUE,
+        nullptr);
+    gst_caps_unref(caps);
+
+    // 配置shmsink
+    g_object_set(G_OBJECT(shmsink),
+        "socket-path", shm_socket_.c_str(),
+        "wait-for-connection", FALSE,
+        "shm-size", VIDEO_WIDTH * VIDEO_HEIGHT * 3 / 2 * 2,
+        nullptr);
+
+    // 组装管道
+    gst_bin_add_many(GST_BIN(pipeline_), appsrc_, convert, queue, shmsink, nullptr);
+    if (!gst_element_link_many(appsrc_, convert, queue, shmsink, nullptr)) {
+        RTC_LOG(LS_ERROR) << "GST 管道链接失败";
+        Destroy();
+        return false;
+    }
+
+    // 启动管道
+    gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+    initialized_ = true;
+    RTC_LOG(LS_INFO) << "GST 发送端初始化成功: " << shm_socket_;
+    return true;
+}
+
+void GstShmSender::PushFrame(uint8_t* i420_data, int width, int height) {
+    if (!initialized_ || !i420_data) return;
+
+    gsize buf_size = width * height * 3 / 2;
+    GstBuffer* buf = gst_buffer_new_wrapped_full(
+        GST_MEMORY_FLAG_READONLY,
+        i420_data, buf_size, 0, buf_size,
+        nullptr,  // 用户自定义数据
+        gst_buffer_free);  // 自动释放回调
+
+    // 设置时间戳
+    GST_BUFFER_PTS(buf) = frame_count_ * (GST_SECOND / VIDEO_FPS);
+    GST_BUFFER_DURATION(buf) = GST_SECOND / VIDEO_FPS;
+    frame_count_++;
+
+    // 推送数据
+    gst_app_src_push_buffer(GST_APP_SRC(appsrc_), buf);
+}
+
+void GstShmSender::Destroy() {
+    if (!initialized_) return;
+
+    gst_element_set_state(pipeline_, GST_STATE_NULL);
+    gst_object_unref(pipeline_);
+    pipeline_ = nullptr;
+    appsrc_ = nullptr;
+    initialized_ = false;
+    CleanupShmSocket();
+}
+
+// ==================== GstShmReceiver 实现 ====================
+GstShmReceiver::GstShmReceiver(const std::string& shm_socket)
+    : shm_socket_(shm_socket) {}
+
+GstShmReceiver::~GstShmReceiver() {
+    Destroy();
+}
+
+void GstShmReceiver::CleanupShmSocket() {
+    // 接收端无需删除socket
+}
+
+bool GstShmReceiver::Init() {
+    // Qt端管道：shmsrc ! videoconvert ! qmlglsink (Qt渲染)
+    pipeline_ = gst_pipeline_new("shm-receiver-pipeline");
+    GstElement* shmsrc = gst_element_factory_make("shmsrc", "shm_src");
+    GstElement* convert = gst_element_factory_make("videoconvert", "convert");
+    GstElement* qtsink = gst_element_factory_make("qmlglsink", "qt_sink");
+
+    if (!pipeline_ || !shmsrc || !convert || !qtsink) return false;
+
+    g_object_set(G_OBJECT(shmsrc), "socket-path", shm_socket_.c_str(), nullptr);
+    gst_bin_add_many(GST_BIN(pipeline_), shmsrc, convert, qtsink, nullptr);
+    gst_element_link_many(shmsrc, convert, qtsink, nullptr);
+
+    gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+    return true;
+}
+
+void GstShmReceiver::Destroy() {
+    if (pipeline_) {
+        gst_element_set_state(pipeline_, GST_STATE_NULL);
+        gst_object_unref(pipeline_);
+        pipeline_ = nullptr;
+    }
+}
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/linux/main.cc
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include <gtk/gtk.h>
+
+#include <cstdio>
+#include <memory>
+#include <string>
+
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "api/environment/environment.h"
+#include "api/environment/environment_factory.h"
+#include "api/field_trials.h"
+#include "api/make_ref_counted.h"
+#include "api/scoped_refptr.h"
+#include "api/units/time_delta.h"
+#include "apps/peerconnection/client/conductor.h"
+#include "apps/peerconnection/client/flag_defs.h"
+#include "apps/peerconnection/client/linux/main_wnd.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "rtc_base/physical_socket_server.h"
+#include "rtc_base/ssl_adapter.h"
+#include "rtc_base/thread.h"
+
+class CustomSocketServer : public webrtc::PhysicalSocketServer {
+ public:
+  explicit CustomSocketServer(GtkMainWnd* wnd)
+      : wnd_(wnd), conductor_(nullptr), client_(nullptr) {}
+  ~CustomSocketServer() override {}
+
+  void SetMessageQueue(webrtc::Thread* queue) override {
+    message_queue_ = queue;
+  }
+
+  void set_client(PeerConnectionClient* client) { client_ = client; }
+  void set_conductor(Conductor* conductor) { conductor_ = conductor; }
+
+  // Override so that we can also pump the GTK message loop.
+  // This function never waits.
+  bool Wait(webrtc::TimeDelta max_wait_duration, bool process_io) override {
+    // Pump GTK events.
+    // TODO(henrike): We really should move either the socket server or UI to a
+    // different thread.  Alternatively we could look at merging the two loops
+    // by implementing a dispatcher for the socket server and/or use
+    // g_main_context_set_poll_func.
+    while (gtk_events_pending())
+      gtk_main_iteration();
+
+    if (!wnd_->IsWindow() && !conductor_->connection_active() &&
+        client_ != nullptr && !client_->is_connected()) {
+      message_queue_->Quit();
+    }
+    return webrtc::PhysicalSocketServer::Wait(webrtc::TimeDelta::Zero(),
+                                              process_io);
+  }
+
+ protected:
+  webrtc::Thread* message_queue_;
+  GtkMainWnd* wnd_;
+  Conductor* conductor_;
+  PeerConnectionClient* client_;
+};
+
+int main(int argc, char* argv[]) {
+  gtk_init(&argc, &argv);
+
+  absl::ParseCommandLine(argc, argv);
+
+  webrtc::Environment env =
+      webrtc::CreateEnvironment(std::make_unique<webrtc::FieldTrials>(
+          absl::GetFlag(FLAGS_force_fieldtrials)));
+
+  // Abort if the user specifies a port that is outside the allowed
+  // range [1, 65535].
+  if ((absl::GetFlag(FLAGS_port) < 1) || (absl::GetFlag(FLAGS_port) > 65535)) {
+    printf("Error: %i is not a valid port.\n", absl::GetFlag(FLAGS_port));
+    return -1;
+  }
+
+  const std::string server = absl::GetFlag(FLAGS_server);
+  GtkMainWnd wnd(server.c_str(), absl::GetFlag(FLAGS_port),
+                 absl::GetFlag(FLAGS_autoconnect),
+                 absl::GetFlag(FLAGS_autocall));
+  wnd.Create();
+
+  CustomSocketServer socket_server(&wnd);
+  std::unique_ptr<webrtc::Thread> thread =
+      std::make_unique<webrtc::Thread>(&socket_server);
+  webrtc::ThreadManager::Instance()->SetCurrentThread(thread.get());
+
+  webrtc::InitializeSSL();
+  // Must be constructed after we set the socketserver.
+  PeerConnectionClient client;
+  auto conductor = webrtc::make_ref_counted<Conductor>(env, &client, &wnd);
+  socket_server.set_client(&client);
+  socket_server.set_conductor(conductor.get());
+
+  thread->Run();
+  webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);
+
+  // gtk_main();
+  wnd.Destroy();
+
+  // TODO(henrike): Run the Gtk main loop to tear down the connection.
+  /*
+  while (gtk_events_pending()) {
+    gtk_main_iteration();
+  }
+  */
+  webrtc::CleanupSSL();
+  return 0;
+}
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/linux/main_wnd.h
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef APPS_PEERCONNECTION_CLIENT_LINUX_MAIN_WND_H_
+#define APPS_PEERCONNECTION_CLIENT_LINUX_MAIN_WND_H_
+
+#include <stdint.h>
+
+#include <memory>
+#include <span>
+#include <string>
+
+#include "api/media_stream_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_sink_interface.h"
+#include "apps/peerconnection/client/main_wnd.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "rtc_base/buffer.h"
+
+// Forward declarations.
+typedef struct _GtkWidget GtkWidget;
+typedef union _GdkEvent GdkEvent;
+typedef struct _GdkEventKey GdkEventKey;
+typedef struct _GtkTreeView GtkTreeView;
+typedef struct _GtkTreePath GtkTreePath;
+typedef struct _GtkTreeViewColumn GtkTreeViewColumn;
+typedef struct _cairo cairo_t;
+
+// Implements the main UI of the peer connection client.
+// This is functionally equivalent to the MainWnd class in the Windows
+// implementation.
+class GtkMainWnd : public MainWindow {
+ public:
+  GtkMainWnd(const char* server, int port, bool autoconnect, bool autocall);
+  ~GtkMainWnd() override;
+
+  void RegisterObserver(MainWndCallback* callback) override;
+  bool IsWindow() override;
+  void SwitchToConnectUI() override;
+  void SwitchToPeerList(const Peers& peers) override;
+  void SwitchToStreamingUI() override;
+  void MessageBox(const char* caption,
+                  const char* text,
+                  bool is_error) override;
+  MainWindow::UI current_ui() override;
+  void StartLocalRenderer(webrtc::VideoTrackInterface* local_video) override;
+  void StopLocalRenderer() override;
+  void StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) override;
+  void StopRemoteRenderer() override;
+
+  void QueueUIThreadCallback(int msg_id, void* data) override;
+
+  // Creates and shows the main window with the |Connect UI| enabled.
+  bool Create();
+
+  // Destroys the window.  When the window is destroyed, it ends the
+  // main message loop.
+  bool Destroy();
+
+  // Callback for when the main window is destroyed.
+  void OnDestroyed(GtkWidget* widget, GdkEvent* event);
+
+  // Callback for when the user clicks the "Connect" button.
+  void OnClicked(GtkWidget* widget);
+
+  // Callback for keystrokes.  Used to capture Esc and Return.
+  void OnKeyPress(GtkWidget* widget, GdkEventKey* key);
+
+  // Callback when the user double clicks a peer in order to initiate a
+  // connection.
+  void OnRowActivated(GtkTreeView* tree_view,
+                      GtkTreePath* path,
+                      GtkTreeViewColumn* column);
+
+  void OnRedraw();
+
+  void Draw(GtkWidget* widget, cairo_t* cr);
+
+ protected:
+  class VideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+   public:
+    VideoRenderer(GtkMainWnd* main_wnd,
+                  webrtc::VideoTrackInterface* track_to_render);
+    ~VideoRenderer() override;
+
+    // VideoSinkInterface implementation
+    void OnFrame(const webrtc::VideoFrame& frame) override;
+
+    std::span<const uint8_t> image() const { return image_; }
+
+    int width() const { return width_; }
+
+    int height() const { return height_; }
+
+   protected:
+    void SetSize(int width, int height);
+    webrtc::Buffer image_;
+    int width_;
+    int height_;
+    GtkMainWnd* main_wnd_;
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
+  };
+
+ protected:
+  GtkWidget* window_;     // Our main window.
+  GtkWidget* draw_area_;  // The drawing surface for rendering video streams.
+  GtkWidget* vbox_;       // Container for the Connect UI.
+  GtkWidget* server_edit_;
+  GtkWidget* port_edit_;
+  GtkWidget* peer_list_;  // The list of peers.
+  MainWndCallback* callback_;
+  std::string server_;
+  std::string port_;
+  bool autoconnect_;
+  bool autocall_;
+  std::unique_ptr<VideoRenderer> local_renderer_;
+  std::unique_ptr<VideoRenderer> remote_renderer_;
+  int width_ = 0;
+  int height_ = 0;
+  webrtc::Buffer draw_buffer_;
+  int draw_buffer_size_;
+  bool enable_keyboard_detection_ = false; 
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_LINUX_MAIN_WND_H_
+
+
+################################################################################
+
+==================================================
+文件路径：/home/lab/webrtc-checkout/src/apps/peerconnection/client/linux/main_wnd.cc
+==================================================
+
+/*
+ *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "apps/peerconnection/client/linux/main_wnd.h"
+
+#include <cairo.h>
+#include <gdk/gdk.h>
+#include <gdk/gdkkeysyms.h>
+#include <glib-object.h>
+#include <glib.h>
+#include <glibconfig.h>
+#include <gobject/gclosure.h>
+#include <gtk/gtk.h>
+
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+
+#include "api/media_stream_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/video/i420_buffer.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_frame_buffer.h"
+#include "api/video/video_rotation.h"
+#include "api/video/video_source_interface.h"
+#include "apps/peerconnection/client/main_wnd.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "rtc_base/checks.h"
+#include "rtc_base/logging.h"
+#include "third_party/libyuv/include/libyuv/convert_from.h"
+
+namespace {
+
+//
+// Simple static functions that simply forward the callback to the
+// GtkMainWnd instance.
+//
+
+gboolean OnDestroyedCallback(GtkWidget* widget,
+                             GdkEvent* event,
+                             gpointer data) {
+  reinterpret_cast<GtkMainWnd*>(data)->OnDestroyed(widget, event);
+  return FALSE;
+}
+
+void OnClickedCallback(GtkWidget* widget, gpointer data) {
+  reinterpret_cast<GtkMainWnd*>(data)->OnClicked(widget);
+}
+
+gboolean SimulateButtonClick(gpointer button) {
+  g_signal_emit_by_name(button, "clicked");
+  return false;
+}
+
+gboolean OnKeyPressCallback(GtkWidget* widget,
+                            GdkEventKey* key,
+                            gpointer data) {
+  reinterpret_cast<GtkMainWnd*>(data)->OnKeyPress(widget, key);
+  return false;
+}
+
+void OnRowActivatedCallback(GtkTreeView* tree_view,
+                            GtkTreePath* path,
+                            GtkTreeViewColumn* column,
+                            gpointer data) {
+  reinterpret_cast<GtkMainWnd*>(data)->OnRowActivated(tree_view, path, column);
+}
+
+gboolean SimulateLastRowActivated(gpointer data) {
+  GtkTreeView* tree_view = reinterpret_cast<GtkTreeView*>(data);
+  GtkTreeModel* model = gtk_tree_view_get_model(tree_view);
+
+  // "if iter is NULL, then the number of toplevel nodes is returned."
+  int rows = gtk_tree_model_iter_n_children(model, nullptr);
+  GtkTreePath* lastpath = gtk_tree_path_new_from_indices(rows - 1, -1);
+
+  // Select the last item in the list
+  GtkTreeSelection* selection = gtk_tree_view_get_selection(tree_view);
+  gtk_tree_selection_select_path(selection, lastpath);
+
+  // Our TreeView only has one column, so it is column 0.
+  GtkTreeViewColumn* column = gtk_tree_view_get_column(tree_view, 0);
+
+  gtk_tree_view_row_activated(tree_view, lastpath, column);
+
+  gtk_tree_path_free(lastpath);
+  return false;
+}
+
+// Creates a tree view, that we use to display the list of peers.
+void InitializeList(GtkWidget* list) {
+  GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
+  GtkTreeViewColumn* column = gtk_tree_view_column_new_with_attributes(
+      "List Items", renderer, "text", 0, NULL);
+  gtk_tree_view_append_column(GTK_TREE_VIEW(list), column);
+  GtkListStore* store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
+  gtk_tree_view_set_model(GTK_TREE_VIEW(list), GTK_TREE_MODEL(store));
+  g_object_unref(store);
+}
+
+// Adds an entry to a tree view.
+void AddToList(GtkWidget* list, const gchar* str, int value) {
+  GtkListStore* store =
+      GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(list)));
+
+  GtkTreeIter iter;
+  gtk_list_store_append(store, &iter);
+  gtk_list_store_set(store, &iter, 0, str, 1, value, -1);
+}
+
+struct UIThreadCallbackData {
+  explicit UIThreadCallbackData(MainWndCallback* cb, int id, void* d)
+      : callback(cb), msg_id(id), data(d) {}
+  MainWndCallback* callback;
+  int msg_id;
+  void* data;
+};
+
+gboolean HandleUIThreadCallback(gpointer data) {
+  UIThreadCallbackData* cb_data = reinterpret_cast<UIThreadCallbackData*>(data);
+  cb_data->callback->UIThreadCallback(cb_data->msg_id, cb_data->data);
+  delete cb_data;
+  return false;
+}
+
+gboolean Redraw(gpointer data) {
+  GtkMainWnd* wnd = reinterpret_cast<GtkMainWnd*>(data);
+  wnd->OnRedraw();
+  return false;
+}
+
+gboolean Draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
+  GtkMainWnd* wnd = reinterpret_cast<GtkMainWnd*>(data);
+  wnd->Draw(widget, cr);
+  return false;
+}
+
+}  // namespace
+
+//
+// GtkMainWnd implementation.
+//
+
+GtkMainWnd::GtkMainWnd(const char* server,
+                       int port,
+                       bool autoconnect,
+                       bool autocall)
+    : window_(nullptr),
+      draw_area_(nullptr),
+      vbox_(nullptr),
+      server_edit_(nullptr),
+      port_edit_(nullptr),
+      peer_list_(nullptr),
+      callback_(nullptr),
+      server_(server),
+      autoconnect_(autoconnect),
+      autocall_(autocall) {
+  char buffer[10];
+  snprintf(buffer, sizeof(buffer), "%i", port);
+  port_ = buffer;
+}
+
+GtkMainWnd::~GtkMainWnd() {
+  RTC_DCHECK(!IsWindow());
+}
+
+void GtkMainWnd::RegisterObserver(MainWndCallback* callback) {
+  callback_ = callback;
+}
+
+bool GtkMainWnd::IsWindow() {
+  return window_ != nullptr && GTK_IS_WINDOW(window_);
+}
+
+void GtkMainWnd::MessageBox(const char* caption,
+                            const char* text,
+                            bool is_error) {
+  GtkWidget* dialog = gtk_message_dialog_new(
+      GTK_WINDOW(window_), GTK_DIALOG_DESTROY_WITH_PARENT,
+      is_error ? GTK_MESSAGE_ERROR : GTK_MESSAGE_INFO, GTK_BUTTONS_CLOSE, "%s",
+      text);
+  gtk_window_set_title(GTK_WINDOW(dialog), caption);
+  gtk_dialog_run(GTK_DIALOG(dialog));
+  gtk_widget_destroy(dialog);
+}
+
+MainWindow::UI GtkMainWnd::current_ui() {
+  if (vbox_)
+    return CONNECT_TO_SERVER;
+
+  if (peer_list_)
+    return LIST_PEERS;
+
+  return STREAMING;
+}
+
+void GtkMainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
+  local_renderer_.reset(new VideoRenderer(this, local_video));
+}
+
+void GtkMainWnd::StopLocalRenderer() {
+  local_renderer_.reset();
+}
+
+void GtkMainWnd::StartRemoteRenderer(
+    webrtc::VideoTrackInterface* remote_video) {
+  remote_renderer_.reset(new VideoRenderer(this, remote_video));
+}
+
+void GtkMainWnd::StopRemoteRenderer() {
+  remote_renderer_.reset();
+}
+
+void GtkMainWnd::QueueUIThreadCallback(int msg_id, void* data) {
+  g_idle_add(HandleUIThreadCallback,
+             new UIThreadCallbackData(callback_, msg_id, data));
+}
+
+bool GtkMainWnd::Create() {
+  RTC_DCHECK(window_ == nullptr);
+
+  window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  if (window_) {
+    gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
+    gtk_window_set_default_size(GTK_WINDOW(window_), 640, 480);
+    gtk_window_set_title(GTK_WINDOW(window_), "PeerConnection client");
+    g_signal_connect(G_OBJECT(window_), "delete-event",
+                     G_CALLBACK(&OnDestroyedCallback), this);
+    g_signal_connect(window_, "key-press-event", G_CALLBACK(OnKeyPressCallback),
+                     this);
+
+    // 1. 允许窗口获取焦点
+    gtk_widget_set_can_focus(window_, TRUE);
+    // 2. 强制窗口获取焦点（解决子控件抢占问题）
+    gtk_widget_grab_focus(window_);
+    // 3. 添加键盘事件掩码，确保窗口能接收按键
+    gtk_widget_add_events(window_, GDK_KEY_PRESS_MASK);
+    SwitchToConnectUI();
+  }
+
+  return window_ != nullptr;
+}
+
+bool GtkMainWnd::Destroy() {
+  if (!IsWindow())
+    return false;
+
+  gtk_widget_destroy(window_);
+  window_ = nullptr;
+
+  return true;
+}
+
+void GtkMainWnd::SwitchToConnectUI() {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+
+  RTC_DCHECK(IsWindow());
+  RTC_DCHECK(vbox_ == nullptr);
+
+  // 断开连接 → 关闭键盘检测
+  enable_keyboard_detection_ = true;
+  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
+
+  gtk_container_set_border_width(GTK_CONTAINER(window_), 10);
+
+  if (peer_list_) {
+    gtk_widget_destroy(peer_list_);
+    peer_list_ = nullptr;
+  }
+
+  vbox_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+  GtkWidget* valign = gtk_alignment_new(0, 1, 0, 0);
+  gtk_container_add(GTK_CONTAINER(vbox_), valign);
+  gtk_container_add(GTK_CONTAINER(window_), vbox_);
+
+  GtkWidget* hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+
+  GtkWidget* label = gtk_label_new("Server");
+  gtk_container_add(GTK_CONTAINER(hbox), label);
+
+  server_edit_ = gtk_entry_new();
+  gtk_entry_set_text(GTK_ENTRY(server_edit_), server_.c_str());
+  gtk_widget_set_size_request(server_edit_, 400, 30);
+  gtk_container_add(GTK_CONTAINER(hbox), server_edit_);
+
+  port_edit_ = gtk_entry_new();
+  gtk_entry_set_text(GTK_ENTRY(port_edit_), port_.c_str());
+  gtk_widget_set_size_request(port_edit_, 70, 30);
+  gtk_container_add(GTK_CONTAINER(hbox), port_edit_);
+
+  GtkWidget* button = gtk_button_new_with_label("Connect");
+  gtk_widget_set_size_request(button, 70, 30);
+  g_signal_connect(button, "clicked", G_CALLBACK(OnClickedCallback), this);
+  gtk_container_add(GTK_CONTAINER(hbox), button);
+
+  GtkWidget* halign = gtk_alignment_new(1, 0, 0, 0);
+  gtk_container_add(GTK_CONTAINER(halign), hbox);
+  gtk_box_pack_start(GTK_BOX(vbox_), halign, FALSE, FALSE, 0);
+
+  gtk_widget_show_all(window_);
+
+  if (autoconnect_)
+    g_idle_add(SimulateButtonClick, button);
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
+}
+
+void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+  enable_keyboard_detection_ = true;
+  //RTC_LOG(LS_INFO) << "键盘输入检测已关闭（未连接对端）";
+  if (!peer_list_) {
+    gtk_container_set_border_width(GTK_CONTAINER(window_), 0);
+    if (vbox_) {
+      gtk_widget_destroy(vbox_);
+      vbox_ = nullptr;
+      server_edit_ = nullptr;
+      port_edit_ = nullptr;
+    } else if (draw_area_) {
+      gtk_widget_destroy(draw_area_);
+      draw_area_ = nullptr;
+      draw_buffer_.SetSize(0);
+    }
+
+    peer_list_ = gtk_tree_view_new();
+    g_signal_connect(peer_list_, "row-activated",
+                     G_CALLBACK(OnRowActivatedCallback), this);
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(peer_list_), FALSE);
+    InitializeList(peer_list_);
+    gtk_container_add(GTK_CONTAINER(window_), peer_list_);
+    gtk_widget_show_all(window_);
+  } else {
+    GtkListStore* store =
+        GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(peer_list_)));
+    gtk_list_store_clear(store);
+  }
+
+  AddToList(peer_list_, "List of currently connected peers:", -1);
+  for (Peers::const_iterator i = peers.begin(); i != peers.end(); ++i)
+    AddToList(peer_list_, i->second.c_str(), i->first);
+
+  if (autocall_ && peers.begin() != peers.end())
+    g_idle_add(SimulateLastRowActivated, peer_list_);
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
+}
+
+void GtkMainWnd::SwitchToStreamingUI() {
+  RTC_LOG(LS_INFO) << __FUNCTION__;
+
+  RTC_DCHECK(draw_area_ == nullptr);
+
+  gtk_container_set_border_width(GTK_CONTAINER(window_), 0);
+  if (peer_list_) {
+    gtk_widget_destroy(peer_list_);
+    peer_list_ = nullptr;
+  }
+
+  draw_area_ = gtk_drawing_area_new();
+  gtk_container_add(GTK_CONTAINER(window_), draw_area_);
+  g_signal_connect(G_OBJECT(draw_area_), "draw", G_CALLBACK(&::Draw), this);
+
+  gtk_widget_show_all(window_);
+
+  enable_keyboard_detection_ = true;
+  RTC_LOG(LS_INFO) << "键盘输入检测已开启（已连接对端）";
+
+  gtk_widget_grab_focus(window_);  // 抢回焦点
+}
+
+void GtkMainWnd::OnDestroyed(GtkWidget* widget, GdkEvent* event) {
+  callback_->Close();
+  window_ = nullptr;
+  draw_area_ = nullptr;
+  vbox_ = nullptr;
+  server_edit_ = nullptr;
+  port_edit_ = nullptr;
+  peer_list_ = nullptr;
+}
+
+void GtkMainWnd::OnClicked(GtkWidget* widget) {
+  // Make the connect button insensitive, so that it cannot be clicked more than
+  // once.  Now that the connection includes auto-retry, it should not be
+  // necessary to click it more than once.
+  gtk_widget_set_sensitive(widget, false);
+  server_ = gtk_entry_get_text(GTK_ENTRY(server_edit_));
+  port_ = gtk_entry_get_text(GTK_ENTRY(port_edit_));
+  int port = !port_.empty() ? atoi(port_.c_str()) : 0;
+  callback_->StartLogin(server_, port);
+}
+
+void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
+  if (key->type == GDK_KEY_PRESS) {
+    // ==============================================
+    // 核心：仅【已连接对端】时，开启键盘检测
+    // ==============================================
+    if (enable_keyboard_detection_) {
+      // 获取按键名称
+      const gchar* key_name = gdk_keyval_name(key->keyval);
+      if (key_name) {
+         RTC_LOG(LS_INFO) << "[键盘检测] 按下按键：" << key_name;
+
+        // 检测修饰键（Ctrl / Shift / Alt）
+        if (key->state & GDK_CONTROL_MASK) {
+          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Ctrl";
+        }
+        if (key->state & GDK_SHIFT_MASK) {
+          RTC_LOG(LS_INFO) << "[键盘检测]  + 组合键：Shift";
+        }
+
+      }
+    }
+
+    // ==============================================
+    // 保留原有原生逻辑（不受开关影响）
+    // Esc：断开连接；回车：连接/呼叫
+    // ==============================================
+    switch (key->keyval) {
+      case GDK_KEY_Escape:
+        if (draw_area_) {
+          callback_->DisconnectFromCurrentPeer();
+        } else if (peer_list_) {
+          callback_->DisconnectFromServer();
+        }
+        break;
+
+      case GDK_KEY_KP_Enter:
+      case GDK_KEY_Return:
+        if (vbox_) {
+          OnClicked(nullptr);
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+}
+
+void GtkMainWnd::OnRowActivated(GtkTreeView* tree_view,
+                                GtkTreePath* path,
+                                GtkTreeViewColumn* column) {
+  RTC_DCHECK(peer_list_ != nullptr);
+  GtkTreeIter iter;
+  GtkTreeModel* model;
+  GtkTreeSelection* selection =
+      gtk_tree_view_get_selection(GTK_TREE_VIEW(tree_view));
+  if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+    char* text;
+    int id = -1;
+    gtk_tree_model_get(model, &iter, 0, &text, 1, &id, -1);
+    if (id != -1)
+      callback_->ConnectToPeer(id);
+    g_free(text);
+  }
+}
+
+void GtkMainWnd::OnRedraw() {
+  gdk_threads_enter();
+
+  VideoRenderer* remote_renderer = remote_renderer_.get();
+  if (remote_renderer && !remote_renderer->image().empty() &&
+      draw_area_ != nullptr) {
+    if (width_ != remote_renderer->width() ||
+        height_ != remote_renderer->height()) {
+      width_ = remote_renderer->width();
+      height_ = remote_renderer->height();
+      gtk_widget_set_size_request(draw_area_, remote_renderer->width(),
+                                  remote_renderer->height());
+    }
+    draw_buffer_.SetData(remote_renderer->image());
+    gtk_widget_queue_draw(draw_area_);
+  }
+  // Here we can draw the local preview as well if we want....
+  gdk_threads_leave();
+}
+
+void GtkMainWnd::Draw(GtkWidget* widget, cairo_t* cr) {
+  cairo_format_t format = CAIRO_FORMAT_ARGB32;
+  cairo_surface_t* surface = cairo_image_surface_create_for_data(
+      draw_buffer_.data(), format, width_, height_,
+      cairo_format_stride_for_width(format, width_));
+  cairo_set_source_surface(cr, surface, 0, 0);
+  cairo_rectangle(cr, 0, 0, width_, height_);
+  cairo_fill(cr);
+  cairo_surface_destroy(surface);
+}
+
+GtkMainWnd::VideoRenderer::VideoRenderer(
+    GtkMainWnd* main_wnd,
+    webrtc::VideoTrackInterface* track_to_render)
+    : width_(0),
+      height_(0),
+      main_wnd_(main_wnd),
+      rendered_track_(track_to_render) {
+  rendered_track_->AddOrUpdateSink(this, webrtc::VideoSinkWants());
+}
+
+GtkMainWnd::VideoRenderer::~VideoRenderer() {
+  rendered_track_->RemoveSink(this);
+}
+
+void GtkMainWnd::VideoRenderer::SetSize(int width, int height) {
+  gdk_threads_enter();
+
+  if (width_ == width && height_ == height) {
+    return;
+  }
+
+  width_ = width;
+  height_ = height;
+  // ARGB
+  image_.SetSize(width * height * 4);
+  gdk_threads_leave();
+}
+
+void GtkMainWnd::VideoRenderer::OnFrame(const webrtc::VideoFrame& video_frame) {
+  gdk_threads_enter();
+
+  webrtc::scoped_refptr<webrtc::I420BufferInterface> buffer(
+      video_frame.video_frame_buffer()->ToI420());
+  if (video_frame.rotation() != webrtc::kVideoRotation_0) {
+    buffer = webrtc::I420Buffer::Rotate(*buffer, video_frame.rotation());
+  }
+  SetSize(buffer->width(), buffer->height());
+
+  // TODO(bugs.webrtc.org/6857): This conversion is correct for little-endian
+  // only. Cairo ARGB32 treats pixels as 32-bit values in *native* byte order,
+  // with B in the least significant byte of the 32-bit value. Which on
+  // little-endian means that memory layout is BGRA, with the B byte stored at
+  // lowest address. Libyuv's ARGB format (surprisingly?) uses the same
+  // little-endian format, with B in the first byte in memory, regardless of
+  // native endianness.
+  libyuv::I420ToARGB(buffer->DataY(), buffer->StrideY(), buffer->DataU(),
+                     buffer->StrideU(), buffer->DataV(), buffer->StrideV(),
+                     image_.data(), width_ * 4, buffer->width(),
+                     buffer->height());
+
+  gdk_threads_leave();
+
+  g_idle_add(Redraw, main_wnd_);
+}
+
+
+
+################################################################################
+
