@@ -920,3 +920,26 @@ void Conductor::SendTestData() {
   RTC_LOG(LS_INFO) << "✓ Test data sent successfully";
   RTC_LOG(LS_INFO) << "=== SendTestData END ===";
 }
+
+
+// 🔥 发送键盘数据（UI主线程调用，DataChannel::Send 线程安全）
+void Conductor::SendKeyboardData(const std::string& key_data) {
+  // 1. 状态校验：必须满足所有条件才能发送
+  if (!data_channel_ || 
+      data_channel_->state() != webrtc::DataChannelInterface::kOpen || 
+      !peer_connection_) {
+    RTC_LOG(LS_WARNING) << "DataChannel未就绪，无法发送键盘数据";
+    return;
+  }
+
+  // 2. 异步发送：WebRTC DataChannel Send 是线程安全的异步操作
+  // 🔥 无阻塞、不影响UI主线程
+  webrtc::DataBuffer buffer(key_data);
+  bool send_success = data_channel_->Send(buffer);
+
+  if (send_success) {
+    RTC_LOG(LS_INFO) << "键盘数据发送成功: " << key_data;
+  } else {
+    RTC_LOG(LS_ERROR) << "键盘数据发送失败";
+  }
+}
