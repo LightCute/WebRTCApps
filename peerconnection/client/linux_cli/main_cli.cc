@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <vector>
 #include "api/video/i420_buffer.h"
 #include "api/video/video_rotation.h"
 #include "rtc_base/checks.h"
@@ -59,19 +60,18 @@ void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
     RTC_LOG(LS_INFO) << "Video resolution: " << width_ << "x" << height_;
   }
 
-  size_t y_size = kFixedWidth * kFixedHeight;
+  size_t y_size = width_ * height_;
   size_t uv_size = y_size / 4;
-  uint8_t i420_data[y_size + uv_size * 2];
-
+  std::vector<uint8_t> i420_data(y_size + uv_size * 2);
   // 拷贝Y平面
-  memcpy(i420_data, buffer->DataY(), y_size);
-  // 拷贝U平面
-  memcpy(i420_data + y_size, buffer->DataU(), uv_size);
-  // 拷贝V平面
-  memcpy(i420_data + y_size + uv_size, buffer->DataV(), uv_size);
+  memcpy(&i420_data[0], buffer->DataY(), y_size);
+  // 拷贝U平面（起始位置：下标y_size）
+  memcpy(&i420_data[y_size], buffer->DataU(), uv_size);
+  // 拷贝V平面（起始位置：下标y_size+uv_size）
+  memcpy(&i420_data[y_size + uv_size], buffer->DataV(), uv_size);
 
   // 4. ✅ 核心：推送数据到共享内存
-  shm_sender_->PushFrame(i420_data, kFixedWidth, kFixedHeight);
+  shm_sender_->PushFrame(i420_data.data(), width_, height_);
 }
 
 // ──────────────────────────────────────────────────────────

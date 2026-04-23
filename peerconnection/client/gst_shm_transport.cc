@@ -72,18 +72,29 @@ bool GstShmSender::Init() {
     RTC_LOG(LS_INFO) << "GST 发送端初始化成功: " << shm_socket_;
     return true;
 }
-
 void GstShmSender::PushFrame(uint8_t* i420_data, int width, int height) {
     if (!initialized_ || !i420_data) return;
 
     gsize buf_size = width * height * 3 / 2;
+    // ==================== 修复点1：使用堆内存分配，避免栈内存野指针 ====================
+    uint8_t* frame_data = new uint8_t[buf_size];
+    memcpy(frame_data, i420_data, buf_size);
+
+    // ==================== 修复点2：正确使用 gst_buffer_new_wrapped_full ====================
+    // 释放函数：delete[] 堆内存（匹配GDestroyNotify类型）
     GstBuffer* buf = gst_buffer_new_wrapped_full(
         GST_MEMORY_FLAG_READONLY,
-        i420_data, buf_size, 0, buf_size,
-        nullptr,  // 用户自定义数据
-        gst_buffer_free);  // 自动释放回调
+        frame_data,          // 堆内存数据
+        buf_size,
+        0,
+        buf_size,
+        nullptr,
+        [](gpointer data) {  // 正确的释放回调：lambda表达式匹配GDestroyNotify
+            delete[] static_cast<uint8_t*>(data);
+        }
+    );
 
-    // 设置时间戳
+    // 设置时间戳（不变）
     GST_BUFFER_PTS(buf) = frame_count_ * (GST_SECOND / VIDEO_FPS);
     GST_BUFFER_DURATION(buf) = GST_SECOND / VIDEO_FPS;
     frame_count_++;

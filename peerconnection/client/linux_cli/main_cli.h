@@ -28,7 +28,7 @@
 #include "apps/peerconnection/client/blocking_queue.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/thread.h"
-#include "gst_shm_transport.h"
+#include "apps/peerconnection/client/gst_shm_transport.h"
 
 
 class CliMainWnd : public MainWindow {
