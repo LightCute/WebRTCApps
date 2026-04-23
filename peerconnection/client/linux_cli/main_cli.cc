@@ -220,12 +220,6 @@ void CliMainWnd::StopRemoteRenderer() {
   remote_renderer_.reset();
 }
 
-// gboolean HandleUIThreadCallback(gpointer data) {
-//   UIThreadCallbackData* cb_data = reinterpret_cast<UIThreadCallbackData*>(data);
-//   cb_data->callback->UIThreadCallback(cb_data->msg_id, cb_data->data);
-//   delete cb_data;
-//   return false;
-// }
 
 void CliMainWnd::QueueUIThreadCallback(int msg_id, void* data) {
   // 🔥 WebRTC回调直接投递到信令线程
@@ -254,30 +248,13 @@ void CliMainWnd::InputThreadFunc() {
     }
 }
 
-// ==================== 线程2：UI 回调执行线程（核心！事件驱动，零延迟） ====================
-void CliMainWnd::CallbackThreadFunc() {
-  while (running_) {
-    UIThreadCallbackData data;
-    // 阻塞等待任务 → 有任务立即执行，无任务休眠（不占CPU）
-    if (task_queue_.pop(data)) {
-      if (callback_) {
-        callback_->UIThreadCallback(data.msg_id, data.data);
-        RTC_LOG(LS_INFO) << "执行回调任务: " << data.msg_id;
-      }
-    }
-  }
-  // 退出前清空剩余任务
-  UIThreadCallbackData data;
-  while (task_queue_.try_pop(data)) {}
-}
+
 
 // ==================== 启动双线程 ====================
 void CliMainWnd::Run() {
   if (running_) return;
   running_ = true;
 
-  // 启动两个工作线程
-  //callback_thread_ = std::thread(&CliMainWnd::CallbackThreadFunc, this);
   input_thread_ = std::thread(&CliMainWnd::InputThreadFunc, this);
 }
 

@@ -57,9 +57,7 @@ class CliMainWnd : public MainWindow {
   // ──────────────────────────────────────────────────────────
   void Run();
   void Stop();
-  void PollInput();
   void InputThreadFunc();    // 用户输入线程
-  void CallbackThreadFunc(); // UI回调执行线程
   void set_signaling_thread(webrtc::Thread* thread) {
     signaling_thread_ = thread;
   }
@@ -87,7 +85,6 @@ class CliMainWnd : public MainWindow {
   // ──────────────────────────────────────────────────────────
   // 内部辅助方法
   // ──────────────────────────────────────────────────────────
-  void ProcessPendingCallbacks();
   void HandleUserInput(const std::string& input);
   void PrintPrompt();
   // ──────────────────────────────────────────────────────────
