@@ -634,6 +634,8 @@ void Conductor::ConnectToPeer(int peer_id) {
   RTC_DCHECK(peer_id_ == -1);
   RTC_DCHECK(peer_id != -1);
 
+  RTC_LOG(LS_INFO) << "starting connecet to peer" ;
+
   if (peer_connection_) {
     main_wnd_->MessageBox(
         "Error", "We only support connecting to one peer at a time", true);
@@ -942,4 +944,18 @@ void Conductor::SendKeyboardData(const std::string& key_data) {
   } else {
     RTC_LOG(LS_ERROR) << "键盘数据发送失败";
   }
+}
+void Conductor::RunOnSignalingThread(std::function<void()> task) {
+  if (!signaling_thread_) {
+    RTC_LOG(LS_ERROR) << "Signaling thread not available";
+    return;
+  }
+  // 🔥 修复：对象销毁时才跳过，存活则正常投递
+  if (!safety_.flag()) {
+    RTC_LOG(LS_WARNING) << "Conductor is destroyed, skipping task";
+    return;
+  }
+  signaling_thread_->PostTask(
+    webrtc::SafeTask(safety_.flag(), std::move(task))
+  );
 }

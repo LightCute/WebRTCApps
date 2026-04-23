@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <functional>
 
 #include "api/media_stream_interface.h"
 #include "api/video/video_frame.h"
@@ -33,6 +34,7 @@ class MainWndCallback {
   virtual void UIThreadCallback(int msg_id, void* data) = 0;
   virtual void Close() = 0;
   virtual void SendKeyboardData(const std::string& key_data) = 0;
+  virtual void RunOnSignalingThread(std::function<void()> task) = 0;
  protected:
   virtual ~MainWndCallback() {}
 };

@@ -1,0 +1,4 @@
+gst-launch-1.0 filesrc location=/tmp/webrtc_remote.i420 ! rawvideoparse format=i420 width=宽 height=高 framerate=30/1 ! videoconvert ! autovideosink sync=false
+
+
+gst-launch-1.0 filesrc location=/tmp/webrtc_remote.i420 ! rawvideoparse format=i420 width=640 height=480 framerate=30/1 ! videoconvert ! autovideosink sync=false

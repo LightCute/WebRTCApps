@@ -139,6 +139,8 @@ class Conductor : public webrtc::PeerConnectionObserver,
 
   void SendKeyboardData(const std::string& key_data) override;
 
+  void RunOnSignalingThread(std::function<void()> task) override;
+
   // CreateSessionDescriptionObserver implementation.
   void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
   void OnFailure(webrtc::RTCError error) override;
@@ -152,6 +154,7 @@ class Conductor : public webrtc::PeerConnectionObserver,
   int peer_id_;
   bool loopback_;
   const webrtc::Environment env_;
+  webrtc::ScopedTaskSafety safety_;
   std::unique_ptr<webrtc::Thread> network_thread_;
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
