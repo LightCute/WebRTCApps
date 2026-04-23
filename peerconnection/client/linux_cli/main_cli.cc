@@ -21,33 +21,31 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/thread.h"
-namespace {
-const char kLocalOutputFile[] = "/tmp/webrtc_local.i420";
-const char kRemoteOutputFile[] = "/tmp/webrtc_remote.i420";
-}  // namespace
 
 // ──────────────────────────────────────────────────────────
 // CliVideoRenderer 实现
 // ──────────────────────────────────────────────────────────
-CliMainWnd::CliVideoRenderer::CliVideoRenderer(const std::string& output_path)
-    : output_path_(output_path) {
-  file_ = fopen(output_path_.c_str(), "wb");
-  if (file_) {
-    RTC_LOG(LS_INFO) << "Video will be saved to: " << output_path_;
+CliMainWnd::CliVideoRenderer::CliVideoRenderer(const std::string& shm_socket_path)
+{
+  shm_sender_ = std::make_unique<GstShmSender>(shm_socket_path);
+  if (shm_sender_->Init()) {
+    RTC_LOG(LS_INFO) << "共享内存初始化成功: " << shm_socket_path;
   } else {
-    RTC_LOG(LS_ERROR) << "Failed to open file: " << output_path_;
+    RTC_LOG(LS_ERROR) << "共享内存初始化失败: " << shm_socket_path;
+    shm_sender_.reset();
   }
 }
 
 CliMainWnd::CliVideoRenderer::~CliVideoRenderer() {
-  if (file_) {
-    fclose(file_);
-    RTC_LOG(LS_INFO) << "Video saved to: " << output_path_;
+  // 自动销毁共享内存
+  if (shm_sender_) {
+    shm_sender_->Destroy();
+    RTC_LOG(LS_INFO) << "共享内存已关闭";
   }
 }
 
 void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
-  if (!file_) return;
+  if (!shm_sender_) return;
 
   auto buffer = frame.video_frame_buffer()->ToI420();
   
@@ -61,14 +59,19 @@ void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
     RTC_LOG(LS_INFO) << "Video resolution: " << width_ << "x" << height_;
   }
 
-  // Write Y plane
-  fwrite(buffer->DataY(), 1, buffer->width() * buffer->height(), file_);
-  // Write U plane
-  fwrite(buffer->DataU(), 1, buffer->width()/2 * buffer->height()/2, file_);
-  // Write V plane
-  fwrite(buffer->DataV(), 1, buffer->width()/2 * buffer->height()/2, file_);
-  
-  fflush(file_);
+  size_t y_size = kFixedWidth * kFixedHeight;
+  size_t uv_size = y_size / 4;
+  uint8_t i420_data[y_size + uv_size * 2];
+
+  // 拷贝Y平面
+  memcpy(i420_data, buffer->DataY(), y_size);
+  // 拷贝U平面
+  memcpy(i420_data + y_size, buffer->DataU(), uv_size);
+  // 拷贝V平面
+  memcpy(i420_data + y_size + uv_size, buffer->DataV(), uv_size);
+
+  // 4. ✅ 核心：推送数据到共享内存
+  shm_sender_->PushFrame(i420_data, kFixedWidth, kFixedHeight);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -189,11 +192,11 @@ void CliMainWnd::SwitchToStreamingUI() {
   std::cout << "═══════════════════════════════════════════════" << std::endl;
   std::cout << "          🎥 视频通话中" << std::endl;
   std::cout << "═══════════════════════════════════════════════" << std::endl;
-  std::cout << "本地视频: " << kLocalOutputFile << std::endl;
-  std::cout << "远端视频: " << kRemoteOutputFile << std::endl;
+  std::cout << "本地视频: " << LOCAL_SHM_SOCK << std::endl;
+  std::cout << "远端视频: " << REMOTE_SHM_SOCK << std::endl;
   std::cout << std::endl;
   std::cout << "播放命令:" << std::endl;
-  std::cout << "  ffplay " << kLocalOutputFile << " -f rawvideo -pix_fmt yuv420p -video_size 640x480" << std::endl;
+  std::cout << "  ffplay " << LOCAL_SHM_SOCK << " -f rawvideo -pix_fmt yuv420p -video_size 640x480" << std::endl;
   std::cout << std::endl;
   std::cout << "可用命令:" << std::endl;
   std::cout << "  hangup            - 挂断通话" << std::endl;
@@ -203,7 +206,7 @@ void CliMainWnd::SwitchToStreamingUI() {
 }
 
 void CliMainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
-  local_renderer_ = std::make_unique<CliVideoRenderer>(kLocalOutputFile);
+  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM_SOCK);
   local_video->AddOrUpdateSink(local_renderer_.get(), webrtc::VideoSinkWants());
 }
 
@@ -212,7 +215,7 @@ void CliMainWnd::StopLocalRenderer() {
 }
 
 void CliMainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
-  remote_renderer_ = std::make_unique<CliVideoRenderer>(kRemoteOutputFile);
+  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM_SOCK);
   remote_video->AddOrUpdateSink(remote_renderer_.get(), webrtc::VideoSinkWants());
 }
 
@@ -258,58 +261,18 @@ void CliMainWnd::Run() {
   input_thread_ = std::thread(&CliMainWnd::InputThreadFunc, this);
 }
 
-void CliMainWnd::PollInput() {
-  if (!running_) return;
-
-  // 🔥 新增：每次轮询都处理所有UI回调（修复回调卡死）
-  ProcessPendingCallbacks();
-
-  char buf[128] = {0};
-  ssize_t n = ::read(0, buf, sizeof(buf)-1);
-
-  if (n > 0) {
-    std::string input(buf, n);
-    input.erase(std::remove(input.begin(), input.end(), '\n'), input.end());
-    input.erase(std::remove(input.begin(), input.end(), '\r'), input.end());
-    if (!input.empty()) {
-      HandleUserInput(input);
-    } else {
-      PrintPrompt();
-    }
-  }
-
-  // 10ms 非阻塞轮询
-  webrtc::Thread::Current()->PostDelayedTask([this]() {
-    PollInput();
-  }, webrtc::TimeDelta::Millis(10));
-}
-
 void CliMainWnd::Stop() {
   if (!running_) return;
   running_ = false;
 
-  // 唤醒阻塞队列
-  //task_queue_.stop();
 
   // 等待线程退出
   if (input_thread_.joinable()) input_thread_.join();
-  //if (callback_thread_.joinable()) callback_thread_.join();
 
   // 停止 WebRTC
   if (webrtc::Thread::Current()) webrtc::Thread::Current()->Quit();
 }
 
-// ──────────────────────────────────────────────────────────
-// 内部辅助方法
-// ──────────────────────────────────────────────────────────
-void CliMainWnd::ProcessPendingCallbacks() {
-  UIThreadCallbackData data;
-  while (task_queue_.try_pop(data)) {
-    callback_->UIThreadCallback(data.msg_id, data.data);
-    std::cout << "conductor callback do task " << data.msg_id << std::endl;
-  }
-
-}
 
 
 void CliMainWnd::HandleUserInput(const std::string& input) {

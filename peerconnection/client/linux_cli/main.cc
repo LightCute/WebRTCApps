@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
-
+#include <gst/gst.h>
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "api/environment/environment.h"
@@ -58,7 +58,7 @@ class CliSocketServer : public webrtc::PhysicalSocketServer {
 };
 
 int main(int argc, char* argv[]) {
-  // 🔥 移除 gtk_init
+  gst_init(&argc, &argv);
   std::cout << "Starting PeerConnectionClient CLI..." << std::endl;
   absl::ParseCommandLine(argc, argv);
 

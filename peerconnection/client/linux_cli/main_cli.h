@@ -17,7 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <cstdio>
+
 
 #include "api/media_stream_interface.h"
 #include "api/scoped_refptr.h"
@@ -28,7 +28,7 @@
 #include "apps/peerconnection/client/blocking_queue.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/thread.h"
-
+#include "gst_shm_transport.h"
 
 
 class CliMainWnd : public MainWindow {
@@ -71,13 +71,12 @@ class CliMainWnd : public MainWindow {
   // ──────────────────────────────────────────────────────────
   class CliVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
    public:
-    explicit CliVideoRenderer(const std::string& output_path);
+    explicit CliVideoRenderer(const std::string& shm_socket_path);
     ~CliVideoRenderer() override;
     void OnFrame(const webrtc::VideoFrame& frame) override;
 
    private:
-    std::string output_path_;
-    FILE* file_ = nullptr;
+    std::unique_ptr<GstShmSender> shm_sender_;
     int width_ = 0;
     int height_ = 0;
   };

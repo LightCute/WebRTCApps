@@ -46,6 +46,8 @@ rtc_executable("peerconnection_client") {
     "peer_connection_client.cc",
     "peer_connection_client.h",
     "blocking_queue.h",
+    "gst_shm_transport.cc",
+    "gst_shm_transport.h",
   ]
 
   deps = [
