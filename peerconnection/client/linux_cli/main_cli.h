@@ -28,7 +28,10 @@
 #include "apps/peerconnection/client/blocking_queue.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/thread.h"
-#include "apps/peerconnection/client/gst_shm_transport.h"
+#include "apps/peerconnection/client/video_shm_class.h"
+
+#define LOCAL_SHM_SOCK  "/tmp/local-video-shm"
+#define REMOTE_SHM_SOCK "/tmp/remote-video-shm"
 
 
 class CliMainWnd : public MainWindow {
@@ -71,12 +74,12 @@ class CliMainWnd : public MainWindow {
   // ──────────────────────────────────────────────────────────
   class CliVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
    public:
-    explicit CliVideoRenderer(const std::string& shm_socket_path);
+    explicit CliVideoRenderer(ShmType type);
     ~CliVideoRenderer() override;
     void OnFrame(const webrtc::VideoFrame& frame) override;
 
    private:
-    std::unique_ptr<GstShmSender> shm_sender_;
+    std::unique_ptr<ShmSender> shm_sender_;
     int width_ = 0;
     int height_ = 0;
   };

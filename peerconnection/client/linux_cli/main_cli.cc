@@ -26,23 +26,17 @@
 // ──────────────────────────────────────────────────────────
 // CliVideoRenderer 实现
 // ──────────────────────────────────────────────────────────
-CliMainWnd::CliVideoRenderer::CliVideoRenderer(const std::string& shm_socket_path)
+CliMainWnd::CliVideoRenderer::CliVideoRenderer(ShmType type)
 {
-  shm_sender_ = std::make_unique<GstShmSender>(shm_socket_path);
-  if (shm_sender_->Init()) {
-    RTC_LOG(LS_INFO) << "共享内存初始化成功: " << shm_socket_path;
-  } else {
-    RTC_LOG(LS_ERROR) << "共享内存初始化失败: " << shm_socket_path;
-    shm_sender_.reset();
-  }
+  // 🔥 直接创建 ShmSender，自动初始化！无需 Init()
+  shm_sender_ = std::make_unique<ShmSender>(type);
+  RTC_LOG(LS_INFO) << "共享内存初始化完成 (System V)";
 }
 
 CliMainWnd::CliVideoRenderer::~CliVideoRenderer() {
-  // 自动销毁共享内存
-  if (shm_sender_) {
-    shm_sender_->Destroy();
-    RTC_LOG(LS_INFO) << "共享内存已关闭";
-  }
+  // 🔥 无需手动 Destroy！智能指针自动释放
+  shm_sender_.reset();
+  RTC_LOG(LS_INFO) << "共享内存已关闭";
 }
 
 void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
@@ -206,7 +200,7 @@ void CliMainWnd::SwitchToStreamingUI() {
 }
 
 void CliMainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
-  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM_SOCK);
+  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM);
   local_video->AddOrUpdateSink(local_renderer_.get(), webrtc::VideoSinkWants());
 }
 
@@ -215,7 +209,7 @@ void CliMainWnd::StopLocalRenderer() {
 }
 
 void CliMainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
-  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM_SOCK);
+  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM);
   remote_video->AddOrUpdateSink(remote_renderer_.get(), webrtc::VideoSinkWants());
 }
 
