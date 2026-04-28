@@ -26,46 +26,60 @@
 // ──────────────────────────────────────────────────────────
 // CliVideoRenderer 实现
 // ──────────────────────────────────────────────────────────
-CliMainWnd::CliVideoRenderer::CliVideoRenderer(ShmType type)
-{
-  // 🔥 直接创建 ShmSender，自动初始化！无需 Init()
-  shm_sender_ = std::make_unique<ShmSender>(type);
-  RTC_LOG(LS_INFO) << "共享内存初始化完成 (System V)";
+CliMainWnd::CliVideoRenderer::CliVideoRenderer(const std::string& key_path, int proj_id) {
+  shm_writer_ = std::make_unique<ShmVideoWriter>();
+  if (!shm_writer_->init(key_path, proj_id)) {
+    RTC_LOG(LS_ERROR) << "ShmVideoWriter init failed for " << key_path;
+    shm_writer_.reset();
+    return;
+  }
+  RTC_LOG(LS_INFO) << "共享内存写入端初始化完成: " << key_path;
 }
 
 CliMainWnd::CliVideoRenderer::~CliVideoRenderer() {
-  // 🔥 无需手动 Destroy！智能指针自动释放
-  shm_sender_.reset();
-  RTC_LOG(LS_INFO) << "共享内存已关闭";
+  shm_writer_.reset();
+  RTC_LOG(LS_INFO) << "共享内存写入端已关闭";
 }
 
 void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
-  if (!shm_sender_) return;
+  if (!shm_writer_) return;
 
   auto buffer = frame.video_frame_buffer()->ToI420();
-  
+
   if (frame.rotation() != webrtc::kVideoRotation_0) {
     buffer = webrtc::I420Buffer::Rotate(*buffer, frame.rotation());
   }
 
-  if (width_ != buffer->width() || height_ != buffer->height()) {
-    width_ = buffer->width();
-    height_ = buffer->height();
+  int w = buffer->width();
+  int h = buffer->height();
+  if (width_ != w || height_ != h) {
+    width_ = w;
+    height_ = h;
     RTC_LOG(LS_INFO) << "Video resolution: " << width_ << "x" << height_;
   }
 
-  size_t y_size = width_ * height_;
+  size_t y_size = static_cast<size_t>(w) * h;
   size_t uv_size = y_size / 4;
-  std::vector<uint8_t> i420_data(y_size + uv_size * 2);
-  // 拷贝Y平面
+  size_t total = y_size + uv_size * 2;
+
+  if (total > FRAME_MAX_SIZE) {
+    RTC_LOG(LS_ERROR) << "Frame too large: " << total << " > " << FRAME_MAX_SIZE;
+    return;
+  }
+
+  std::vector<uint8_t> i420_data(total);
   memcpy(&i420_data[0], buffer->DataY(), y_size);
-  // 拷贝U平面（起始位置：下标y_size）
   memcpy(&i420_data[y_size], buffer->DataU(), uv_size);
-  // 拷贝V平面（起始位置：下标y_size+uv_size）
   memcpy(&i420_data[y_size + uv_size], buffer->DataV(), uv_size);
 
-  // 4. ✅ 核心：推送数据到共享内存
-  shm_sender_->PushFrame(i420_data.data(), width_, height_);
+  VideoFrameHead head{};
+  head.timestamp = frame.render_time_ms() * 1000;  // ms → µs
+  head.frame_len = static_cast<uint32_t>(total);
+  head.width = static_cast<uint16_t>(w);
+  head.height = static_cast<uint16_t>(h);
+  head.frame_type = 0;
+
+  shm_writer_->write_frame(head, i420_data.data());
 }
 
 // ──────────────────────────────────────────────────────────
@@ -186,11 +200,8 @@ void CliMainWnd::SwitchToStreamingUI() {
   std::cout << "═══════════════════════════════════════════════" << std::endl;
   std::cout << "          🎥 视频通话中" << std::endl;
   std::cout << "═══════════════════════════════════════════════" << std::endl;
-  std::cout << "本地视频: " << LOCAL_SHM_SOCK << std::endl;
-  std::cout << "远端视频: " << REMOTE_SHM_SOCK << std::endl;
-  std::cout << std::endl;
-  std::cout << "播放命令:" << std::endl;
-  std::cout << "  ffplay " << LOCAL_SHM_SOCK << " -f rawvideo -pix_fmt yuv420p -video_size 640x480" << std::endl;
+  std::cout << "本地视频 SHM: " << LOCAL_SHM_KEY << " (id=" << LOCAL_SHM_ID << ")" << std::endl;
+  std::cout << "远端视频 SHM: " << REMOTE_SHM_KEY << " (id=" << REMOTE_SHM_ID << ")" << std::endl;
   std::cout << std::endl;
   std::cout << "可用命令:" << std::endl;
   std::cout << "  hangup            - 挂断通话" << std::endl;
@@ -200,7 +211,7 @@ void CliMainWnd::SwitchToStreamingUI() {
 }
 
 void CliMainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
-  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM);
+  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM_KEY, LOCAL_SHM_ID);
   local_video->AddOrUpdateSink(local_renderer_.get(), webrtc::VideoSinkWants());
 }
 
@@ -209,7 +220,7 @@ void CliMainWnd::StopLocalRenderer() {
 }
 
 void CliMainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
-  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM);
+  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM_KEY, REMOTE_SHM_ID);
   remote_video->AddOrUpdateSink(remote_renderer_.get(), webrtc::VideoSinkWants());
 }
 

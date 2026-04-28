@@ -23,7 +23,7 @@
 #include "api/video/video_sink_interface.h"
 #include "apps/peerconnection/client/main_wnd.h"
 #include "apps/peerconnection/client/peer_connection_client.h"
-#include "apps/peerconnection/client/gst_shm_transport.h"
+
 #include "rtc_base/buffer.h"
 
 // Forward declarations.

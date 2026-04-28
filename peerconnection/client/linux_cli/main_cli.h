@@ -16,6 +16,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 
@@ -28,10 +29,12 @@
 #include "apps/peerconnection/client/blocking_queue.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/thread.h"
-#include "apps/peerconnection/client/video_shm_class.h"
+#include "apps/peerconnection/client/shm_writer.h"
 
-#define LOCAL_SHM_SOCK  "/tmp/local-video-shm"
-#define REMOTE_SHM_SOCK "/tmp/remote-video-shm"
+#define LOCAL_SHM_KEY   "/tmp/webrtc_local"
+#define REMOTE_SHM_KEY  "/tmp/webrtc_remote"
+#define LOCAL_SHM_ID    888
+#define REMOTE_SHM_ID   999
 
 
 class CliMainWnd : public MainWindow {
@@ -74,12 +77,12 @@ class CliMainWnd : public MainWindow {
   // ──────────────────────────────────────────────────────────
   class CliVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
    public:
-    explicit CliVideoRenderer(ShmType type);
+    explicit CliVideoRenderer(const std::string& key_path, int proj_id);
     ~CliVideoRenderer() override;
     void OnFrame(const webrtc::VideoFrame& frame) override;
 
    private:
-    std::unique_ptr<ShmSender> shm_sender_;
+    std::unique_ptr<ShmVideoWriter> shm_writer_;
     int width_ = 0;
     int height_ = 0;
   };

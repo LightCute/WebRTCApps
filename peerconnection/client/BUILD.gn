@@ -17,14 +17,7 @@ pkg_config("gtk_config") {
   ]
 }
 
-pkg_config("gst_config") {
-  packages = [
-    "gstreamer-1.0",         # GStreamer 核心
-    "gstreamer-app-1.0",     # App 插件（用于和代码交互）
-    "gstreamer-video-1.0",   # 视频相关
-    "gstreamer-base-1.0",    # 基础组件
-  ]
-}
+
 
 rtc_executable("peerconnection_client") {
   testonly = true
@@ -46,8 +39,11 @@ rtc_executable("peerconnection_client") {
     "peer_connection_client.cc",
     "peer_connection_client.h",
     "blocking_queue.h",
-    "video_shm_class.cc",
-    "video_shm_class.h",
+    "shm_common.cc",
+    "shm_common.h",
+    "shm_writer.cc",
+    "shm_writer.h",
+    "shm_reader.h",
   ]
 
   deps = [
@@ -128,12 +124,13 @@ rtc_executable("peerconnection_client") {
     "//third_party/libyuv",
   ]
 
-  configs += [ ":gtk_config", ":gst_config" ]
+  configs += [ ":gtk_config" ]
   cflags = [ "-Wno-deprecated-declarations" ]
   libs = [
     "X11",
     "Xcomposite",
     "Xext",
     "Xrender",
+    "pthread",
   ]
 }

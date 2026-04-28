@@ -10,7 +10,7 @@ rtc_build_examples=false
 rtc_build_tools=false 
 rtc_include_tests=true 
 rtc_include_pulse_audio=true 
-use_sysroot=false'
+use_sysroot=true'
 GN_ARGS="${GN_ARGS:-${DEFAULT_GN_ARGS}}"
 
 echo "Generating ${OUT_DIR}"
