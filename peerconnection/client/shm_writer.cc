@@ -1,6 +1,10 @@
 #include "shm_writer.h"
 #include <sys/shm.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstring>
+#include <cstdio>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
@@ -15,8 +19,19 @@ ShmVideoWriter::~ShmVideoWriter() {
 }
 
 bool ShmVideoWriter::init(const std::string& key_path, int proj_id) {
+  // ftok() requires the file to exist; create it if missing
+  int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
+  if (fd == -1) {
+    perror("shm_writer: open key file");
+    return false;
+  }
+  close(fd);
+
   key_t key = ftok(key_path.c_str(), proj_id);
-  if (key == -1) return false;
+  if (key == -1) {
+    perror("shm_writer: ftok");
+    return false;
+  }
 
   m_shmid = shmget(key, SHM_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
   if (m_shmid == -1) return false;

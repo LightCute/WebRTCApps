@@ -16,6 +16,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -73,16 +74,45 @@ class CliMainWnd : public MainWindow {
     void* data;
   };
   // ──────────────────────────────────────────────────────────
-  // 内部类：CLI 视频渲染器（存 YUV 文件）
+  // 内部类：专用 IO 线程 + 单帧覆盖队列
+  // ──────────────────────────────────────────────────────────
+  class FrameIoWorker {
+   public:
+    void Start(std::unique_ptr<ShmVideoWriter> writer);
+    void Stop();
+    void PostFrame(std::vector<uint8_t> i420_data, VideoFrameHead head);
+
+   private:
+    void Loop();
+
+    struct FrameData {
+      std::vector<uint8_t> i420_data;
+      VideoFrameHead head;
+    };
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::optional<FrameData> pending_;
+    bool stopped_ = false;
+
+    std::unique_ptr<ShmVideoWriter> writer_;
+    std::thread thread_;
+  };
+
+  // ──────────────────────────────────────────────────────────
+  // 内部类：CLI 视频渲染器（通过 FrameIoWorker 异步写共享内存）
   // ──────────────────────────────────────────────────────────
   class CliVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
    public:
-    explicit CliVideoRenderer(const std::string& key_path, int proj_id);
+    CliVideoRenderer(const std::string& key_path,
+                     int proj_id,
+                     webrtc::VideoTrackInterface* track);
     ~CliVideoRenderer() override;
     void OnFrame(const webrtc::VideoFrame& frame) override;
 
    private:
-    std::unique_ptr<ShmVideoWriter> shm_writer_;
+    webrtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
+    FrameIoWorker io_worker_;
     int width_ = 0;
     int height_ = 0;
   };

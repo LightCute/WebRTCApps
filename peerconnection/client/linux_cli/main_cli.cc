@@ -24,27 +24,79 @@
 #include "rtc_base/thread.h"
 
 // ──────────────────────────────────────────────────────────
+// FrameIoWorker 实现
+// ──────────────────────────────────────────────────────────
+void CliMainWnd::FrameIoWorker::Start(std::unique_ptr<ShmVideoWriter> writer) {
+  writer_ = std::move(writer);
+  stopped_ = false;
+  thread_ = std::thread(&CliMainWnd::FrameIoWorker::Loop, this);
+}
+
+void CliMainWnd::FrameIoWorker::Stop() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopped_ = true;
+  }
+  cv_.notify_one();
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
+void CliMainWnd::FrameIoWorker::PostFrame(std::vector<uint8_t> i420_data,
+                                          VideoFrameHead head) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ = FrameData{std::move(i420_data), head};
+  }
+  cv_.notify_one();
+}
+
+void CliMainWnd::FrameIoWorker::Loop() {
+  while (true) {
+    FrameData frame;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
+      if (stopped_) {
+        return;
+      }
+      frame = std::move(*pending_);
+      pending_.reset();
+    }
+    writer_->write_frame(frame.head, frame.i420_data.data());
+  }
+}
+
+// ──────────────────────────────────────────────────────────
 // CliVideoRenderer 实现
 // ──────────────────────────────────────────────────────────
-CliMainWnd::CliVideoRenderer::CliVideoRenderer(const std::string& key_path, int proj_id) {
-  shm_writer_ = std::make_unique<ShmVideoWriter>();
-  if (!shm_writer_->init(key_path, proj_id)) {
+CliMainWnd::CliVideoRenderer::CliVideoRenderer(
+    const std::string& key_path,
+    int proj_id,
+    webrtc::VideoTrackInterface* track)
+    : rendered_track_(track) {
+  auto writer = std::make_unique<ShmVideoWriter>();
+  if (!writer->init(key_path, proj_id)) {
     RTC_LOG(LS_ERROR) << "ShmVideoWriter init failed for " << key_path;
-    shm_writer_.reset();
     return;
   }
   RTC_LOG(LS_INFO) << "共享内存写入端初始化完成: " << key_path;
+  io_worker_.Start(std::move(writer));
+  rendered_track_->AddOrUpdateSink(this, webrtc::VideoSinkWants());
 }
 
 CliMainWnd::CliVideoRenderer::~CliVideoRenderer() {
-  shm_writer_.reset();
+  rendered_track_->RemoveSink(this);
+  io_worker_.Stop();
   RTC_LOG(LS_INFO) << "共享内存写入端已关闭";
 }
 
 void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
-  if (!shm_writer_) return;
-
   auto buffer = frame.video_frame_buffer()->ToI420();
+  if (!buffer) {
+    return;
+  }
 
   if (frame.rotation() != webrtc::kVideoRotation_0) {
     buffer = webrtc::I420Buffer::Rotate(*buffer, frame.rotation());
@@ -73,13 +125,13 @@ void CliMainWnd::CliVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
   memcpy(&i420_data[y_size + uv_size], buffer->DataV(), uv_size);
 
   VideoFrameHead head{};
-  head.timestamp = frame.render_time_ms() * 1000;  // ms → µs
+  head.timestamp = frame.render_time_ms() * 1000;
   head.frame_len = static_cast<uint32_t>(total);
   head.width = static_cast<uint16_t>(w);
   head.height = static_cast<uint16_t>(h);
   head.frame_type = 0;
 
-  shm_writer_->write_frame(head, i420_data.data());
+  io_worker_.PostFrame(std::move(i420_data), head);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -211,8 +263,8 @@ void CliMainWnd::SwitchToStreamingUI() {
 }
 
 void CliMainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
-  local_renderer_ = std::make_unique<CliVideoRenderer>(LOCAL_SHM_KEY, LOCAL_SHM_ID);
-  local_video->AddOrUpdateSink(local_renderer_.get(), webrtc::VideoSinkWants());
+  local_renderer_ = std::make_unique<CliVideoRenderer>(
+      LOCAL_SHM_KEY, LOCAL_SHM_ID, local_video);
 }
 
 void CliMainWnd::StopLocalRenderer() {
@@ -220,14 +272,13 @@ void CliMainWnd::StopLocalRenderer() {
 }
 
 void CliMainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
-  remote_renderer_ = std::make_unique<CliVideoRenderer>(REMOTE_SHM_KEY, REMOTE_SHM_ID);
-  remote_video->AddOrUpdateSink(remote_renderer_.get(), webrtc::VideoSinkWants());
+  remote_renderer_ = std::make_unique<CliVideoRenderer>(
+      REMOTE_SHM_KEY, REMOTE_SHM_ID, remote_video);
 }
 
 void CliMainWnd::StopRemoteRenderer() {
   remote_renderer_.reset();
 }
-
 
 void CliMainWnd::QueueUIThreadCallback(int msg_id, void* data) {
   // 🔥 WebRTC回调直接投递到信令线程
