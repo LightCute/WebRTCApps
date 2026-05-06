@@ -1,0 +1,1312 @@
+========== 工程目录结构（仅含代码文件）==========
+
+📂 .:
+  └─ compat.h
+  └─ data_socket.cc
+  └─ data_socket.h
+  └─ main.cc
+  └─ peer_channel.cc
+  └─ peer_channel.h
+
+==================================================
+========== 所有代码文件内容 ==========
+
+
+========== ./compat.h ==========
+Lines: 21
+
+// compat.h — Standalone build compatibility (replaces rtc_base and absl deps)
+#pragma once
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
+#define RTC_DCHECK(x) assert(x)
+#define RTC_DCHECK_EQ(a, b) assert((a) == (b))
+#define RTC_DCHECK_NE(a, b) assert((a) != (b))
+
+namespace absl {
+using string_view = std::string_view;
+inline std::string StrCat(const std::string& a, const std::string& b) {
+  return a + b;
+}
+inline std::string StrCat(const std::string& a, int b) {
+  return a + std::to_string(b);
+}
+}  // namespace absl
+
+========== ./data_socket.h ==========
+Lines: 151
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef EXAMPLES_PEERCONNECTION_SERVER_DATA_SOCKET_H_
+#define EXAMPLES_PEERCONNECTION_SERVER_DATA_SOCKET_H_
+
+#include <cstddef>
+#include <string>
+
+
+#ifdef WIN32
+#include <winsock2.h>
+typedef int socklen_t;
+typedef SOCKET NativeSocket;
+#else
+#define closesocket close
+typedef int NativeSocket;
+
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
+#endif
+
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET static_cast<NativeSocket>(-1)
+#endif
+#endif
+
+class SocketBase {
+ public:
+  SocketBase() : socket_(INVALID_SOCKET) {}
+  explicit SocketBase(NativeSocket socket) : socket_(socket) {}
+  SocketBase(SocketBase& other) = delete;
+  SocketBase& operator=(const SocketBase& other) = delete;
+  ~SocketBase() { Close(); }
+
+  NativeSocket socket() const { return socket_; }
+  bool valid() const { return socket_ != INVALID_SOCKET; }
+
+  bool Create();
+  void Close();
+
+ protected:
+  NativeSocket socket_;
+};
+
+// Represents an HTTP server socket.
+class DataSocket : public SocketBase {
+ public:
+  enum RequestMethod {
+    INVALID,
+    GET,
+    POST,
+    OPTIONS,
+  };
+
+  explicit DataSocket(NativeSocket socket)
+      : SocketBase(socket), method_(INVALID), content_length_(0) {}
+
+  ~DataSocket() {}
+
+  static const char kCrossOriginAllowHeaders[];
+
+  bool headers_received() const { return method_ != INVALID; }
+
+  RequestMethod method() const { return method_; }
+
+  const std::string& request_path() const { return request_path_; }
+  std::string request_arguments() const;
+
+  const std::string& data() const { return data_; }
+
+  const std::string& content_type() const { return content_type_; }
+
+  size_t content_length() const { return content_length_; }
+
+  bool request_received() const {
+    return headers_received() && (method_ != POST || data_received());
+  }
+
+  bool data_received() const {
+    return method_ != POST || data_.length() >= content_length_;
+  }
+
+  // Checks if the request path (minus arguments) matches a given path.
+  bool PathEquals(const char* path) const;
+
+  // Called when we have received some data from clients.
+  // Returns false if an error occurred.
+  bool OnDataAvailable(bool* close_socket);
+
+  // Send a raw buffer of bytes.
+  bool Send(const std::string& data) const;
+
+  // Send an HTTP response.  The `status` should start with a valid HTTP
+  // response code, followed by a string.  E.g. "200 OK".
+  // If `connection_close` is set to true, an extra "Connection: close" HTTP
+  // header will be included.  `content_type` is the mime content type, not
+  // including the "Content-Type: " string.
+  // `extra_headers` should be either empty or a list of headers where each
+  // header terminates with "\r\n".
+  // `data` is the body of the message.  It's length will be specified via
+  // a "Content-Length" header.
+  bool Send(const std::string& status,
+            bool connection_close,
+            const std::string& content_type,
+            const std::string& extra_headers,
+            const std::string& data) const;
+
+  // Clears all held state and prepares the socket for receiving a new request.
+  void Clear();
+
+ protected:
+  // A fairly relaxed HTTP header parser.  Parses the method, path and
+  // content length (POST only) of a request.
+  // Returns true if a valid request was received and no errors occurred.
+  bool ParseHeaders();
+
+  // Figures out whether the request is a GET or POST and what path is
+  // being requested.
+  bool ParseMethodAndPath(const char* begin, size_t len);
+
+  // Determines the length of the body and it's mime type.
+  bool ParseContentLengthAndType(const char* headers, size_t length);
+
+ protected:
+  RequestMethod method_;
+  size_t content_length_;
+  std::string content_type_;
+  std::string request_path_;
+  std::string request_headers_;
+  std::string data_;
+};
+
+// The server socket.  Accepts connections and generates DataSocket instances
+// for each new connection.
+class ListeningSocket : public SocketBase {
+ public:
+  ListeningSocket() {}
+
+  bool Listen(unsigned short port);
+  DataSocket* Accept() const;
+};
+
+#endif  // EXAMPLES_PEERCONNECTION_SERVER_DATA_SOCKET_H_
+
+========== ./data_socket.cc ==========
+Lines: 302
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "examples/peerconnection/server/data_socket.h"
+
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "rtc_base/checks.h"
+#include "rtc_base/ip_address.h"
+#include "rtc_base/net_helpers.h"
+
+#if defined(WEBRTC_POSIX)
+#include <asm-generic/socket.h>
+#include <unistd.h>  // IWYU pragma: keep
+#endif
+
+static const char kHeaderTerminator[] = "\r\n\r\n";
+static const int kHeaderTerminatorLength = sizeof(kHeaderTerminator) - 1;
+
+// static
+const char DataSocket::kCrossOriginAllowHeaders[] =
+    "Access-Control-Allow-Origin: *\r\n"
+    "Access-Control-Allow-Credentials: true\r\n"
+    "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
+    "Access-Control-Allow-Headers: Content-Type, "
+    "Content-Length, Connection, Cache-Control\r\n"
+    "Access-Control-Expose-Headers: Content-Length\r\n";
+
+#if defined(WIN32)
+class WinsockInitializer {
+  static WinsockInitializer singleton;
+
+  WinsockInitializer() {
+    WSADATA data;
+    WSAStartup(MAKEWORD(1, 0), &data);
+  }
+
+ public:
+  ~WinsockInitializer() { WSACleanup(); }
+};
+WinsockInitializer WinsockInitializer::singleton;
+#endif
+
+//
+// SocketBase
+//
+
+bool SocketBase::Create() {
+  RTC_DCHECK(!valid());
+  socket_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  return valid();
+}
+
+void SocketBase::Close() {
+  if (socket_ != INVALID_SOCKET) {
+    closesocket(socket_);
+    socket_ = INVALID_SOCKET;
+  }
+}
+
+//
+// DataSocket
+//
+
+std::string DataSocket::request_arguments() const {
+  size_t args = request_path_.find('?');
+  if (args != std::string::npos)
+    return request_path_.substr(args + 1);
+  return "";
+}
+
+bool DataSocket::PathEquals(const char* path) const {
+  RTC_DCHECK(path);
+  size_t args = request_path_.find('?');
+  if (args != std::string::npos)
+    return request_path_.substr(0, args).compare(path) == 0;
+  return request_path_.compare(path) == 0;
+}
+
+bool DataSocket::OnDataAvailable(bool* close_socket) {
+  RTC_DCHECK(valid());
+  char buffer[0xfff] = {0};
+  int bytes = recv(socket_, buffer, sizeof(buffer), 0);
+  if (bytes == SOCKET_ERROR || bytes == 0) {
+    *close_socket = true;
+    return false;
+  }
+
+  *close_socket = false;
+
+  bool ret = true;
+  if (headers_received()) {
+    if (method_ != POST) {
+      // unexpectedly received data.
+      ret = false;
+    } else {
+      data_.append(buffer, bytes);
+    }
+  } else {
+    request_headers_.append(buffer, bytes);
+    size_t found = request_headers_.find(kHeaderTerminator);
+    if (found != std::string::npos) {
+      data_ = request_headers_.substr(found + kHeaderTerminatorLength);
+      request_headers_.resize(found + kHeaderTerminatorLength);
+      ret = ParseHeaders();
+    }
+  }
+  return ret;
+}
+
+bool DataSocket::Send(const std::string& data) const {
+  return send(socket_, data.data(), static_cast<int>(data.length()), 0) !=
+         SOCKET_ERROR;
+}
+
+bool DataSocket::Send(const std::string& status,
+                      bool connection_close,
+                      const std::string& content_type,
+                      const std::string& extra_headers,
+                      const std::string& data) const {
+  RTC_DCHECK(valid());
+  RTC_DCHECK(!status.empty());
+  std::string buffer("HTTP/1.1 " + status + "\r\n");
+
+  buffer +=
+      "Server: PeerConnectionTestServer/0.1\r\n"
+      "Cache-Control: no-cache\r\n";
+
+  if (connection_close)
+    buffer += "Connection: close\r\n";
+
+  if (!content_type.empty())
+    buffer += "Content-Type: " + content_type + "\r\n";
+
+  buffer += "Content-Length: " + absl::StrCat(data.size()) + "\r\n";
+
+  if (!extra_headers.empty()) {
+    buffer += extra_headers;
+    // Extra headers are assumed to have a separator per header.
+  }
+
+  buffer += kCrossOriginAllowHeaders;
+
+  buffer += "\r\n";
+  buffer += data;
+
+  return Send(buffer);
+}
+
+void DataSocket::Clear() {
+  method_ = INVALID;
+  content_length_ = 0;
+  content_type_.clear();
+  request_path_.clear();
+  request_headers_.clear();
+  data_.clear();
+}
+
+bool DataSocket::ParseHeaders() {
+  RTC_DCHECK(!request_headers_.empty());
+  RTC_DCHECK_EQ(method_, INVALID);
+  size_t i = request_headers_.find("\r\n");
+  if (i == std::string::npos)
+    return false;
+
+  if (!ParseMethodAndPath(request_headers_.data(), i))
+    return false;
+
+  RTC_DCHECK_NE(method_, INVALID);
+  RTC_DCHECK(!request_path_.empty());
+
+  if (method_ == POST) {
+    const char* headers = request_headers_.data() + i + 2;
+    size_t len = request_headers_.length() - i - 2;
+    if (!ParseContentLengthAndType(headers, len))
+      return false;
+  }
+
+  return true;
+}
+
+bool DataSocket::ParseMethodAndPath(const char* begin, size_t len) {
+  struct {
+    const char* method_name;
+    size_t method_name_len;
+    RequestMethod id;
+  } supported_methods[] = {
+      {.method_name = "GET", .method_name_len = 3, .id = GET},
+      {.method_name = "POST", .method_name_len = 4, .id = POST},
+      {.method_name = "OPTIONS", .method_name_len = 7, .id = OPTIONS},
+  };
+
+  const char* path = nullptr;
+  for (const auto& method : supported_methods) {
+    if (len > method.method_name_len &&
+        isspace(begin[method.method_name_len]) &&
+        strncmp(begin, method.method_name, method.method_name_len) == 0) {
+      method_ = method.id;
+      path = begin + method.method_name_len;
+      break;
+    }
+  }
+
+  const char* end = begin + len;
+  if (!path || path >= end)
+    return false;
+
+  ++path;
+  begin = path;
+  while (!isspace(*path) && path < end)
+    ++path;
+
+  request_path_.assign(begin, path - begin);
+
+  return true;
+}
+
+bool DataSocket::ParseContentLengthAndType(const char* headers, size_t length) {
+  RTC_DCHECK_EQ(content_length_, 0);
+  RTC_DCHECK(content_type_.empty());
+
+  const char* end = headers + length;
+  while (headers && headers < end) {
+    if (!isspace(headers[0])) {
+      static constexpr absl::string_view kContentLength = "Content-Length:";
+      static constexpr absl::string_view kContentType = "Content-Type:";
+      if (absl::string_view(headers, end - headers)
+              .starts_with(kContentLength)) {
+        headers += kContentLength.size();
+        while (headers[0] == ' ')
+          ++headers;
+        content_length_ = atoi(headers);
+      } else if (absl::string_view(headers, end - headers)
+                     .starts_with(kContentType)) {
+        headers += kContentType.size();
+        while (headers[0] == ' ')
+          ++headers;
+        const char* type_end = strstr(headers, "\r\n");
+        if (type_end == nullptr)
+          type_end = end;
+        content_type_.assign(headers, type_end);
+      }
+    } else {
+      ++headers;
+    }
+    headers = strstr(headers, "\r\n");
+    if (headers)
+      headers += 2;
+  }
+
+  return !content_type_.empty() && content_length_ != 0;
+}
+
+//
+// ListeningSocket
+//
+
+bool ListeningSocket::Listen(unsigned short port) {
+  RTC_DCHECK(valid());
+  int enabled = 1;
+  if (setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&enabled),
+                 sizeof(enabled)) != 0) {
+    printf("setsockopt failed\n");
+    return false;
+  }
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(port);
+  if (bind(socket_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) ==
+      SOCKET_ERROR) {
+    printf("bind failed\n");
+    return false;
+  }
+  return listen(socket_, 5) != SOCKET_ERROR;
+}
+
+DataSocket* ListeningSocket::Accept() const {
+  RTC_DCHECK(valid());
+  struct sockaddr_in addr = {};
+  socklen_t size = sizeof(addr);
+  NativeSocket client =
+      accept(socket_, reinterpret_cast<sockaddr*>(&addr), &size);
+  if (client == INVALID_SOCKET)
+    return nullptr;
+
+  return new DataSocket(client);
+}
+
+========== ./peer_channel.h ==========
+Lines: 141
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#ifndef EXAMPLES_PEERCONNECTION_SERVER_PEER_CHANNEL_H_
+#define EXAMPLES_PEERCONNECTION_SERVER_PEER_CHANNEL_H_
+
+#include <time.h>
+
+#include <queue>
+#include <string>
+#include <vector>
+
+class DataSocket;
+
+// Represents a single peer connected to the server.
+class ChannelMember {
+ public:
+  explicit ChannelMember(DataSocket* socket);
+  ~ChannelMember();
+
+  bool connected() const { return connected_; }
+  int id() const { return id_; }
+  void set_disconnected() { connected_ = false; }
+  bool is_wait_request(DataSocket* ds) const;
+  const std::string& name() const { return name_; }
+
+  // Call state tracking (0 = not in a call)
+  bool in_call() const { return call_partner_id_ != 0; }
+  int call_partner_id() const { return call_partner_id_; }
+  void set_call_partner(int pid) { call_partner_id_ = pid; }
+
+  bool TimedOut();
+
+  std::string GetPeerIdHeader() const;
+
+  bool NotifyOfOtherMember(const ChannelMember& other);
+
+  // Returns "name,id,connected,busy\n" (busy=1 if in call)
+  std::string GetEntry() const;
+
+  void ForwardRequestToPeer(DataSocket* ds, ChannelMember* peer);
+
+  void OnClosing(DataSocket* ds);
+
+  void QueueResponse(const std::string& status,
+                     const std::string& content_type,
+                     const std::string& extra_headers,
+                     const std::string& data);
+
+  void SetWaitingSocket(DataSocket* ds);
+
+ protected:
+  struct QueuedResponse {
+    std::string status, content_type, extra_headers, data;
+  };
+
+  DataSocket* waiting_socket_;
+  int id_;
+  bool connected_;
+  int call_partner_id_ = 0;  // 0=not in call, >0=in call with peer
+  time_t timestamp_;
+  std::string name_;
+  std::queue<QueuedResponse> queue_;
+  static int s_member_id_;
+};
+
+// Manages all currently connected peers.
+class PeerChannel {
+ public:
+  typedef std::vector<ChannelMember*> Members;
+
+  PeerChannel() {}
+
+  ~PeerChannel() { DeleteAll(); }
+
+  const Members& members() const { return members_; }
+
+  // Returns true if the request should be treated as a new ChannelMember
+  // request.  Otherwise the request is not peerconnection related.
+  static bool IsPeerConnection(const DataSocket* ds);
+
+  // Finds a connected peer that's associated with the `ds` socket.
+  ChannelMember* Lookup(DataSocket* ds) const;
+
+  // Checks if the request has a "peer_id" parameter and if so, looks up the
+  // peer for which the request is targeted at.
+  ChannelMember* IsTargetedRequest(const DataSocket* ds) const;
+
+  // Adds a new ChannelMember instance to the list of connected peers and
+  // associates it with the socket.
+  bool AddMember(DataSocket* ds);
+
+  // Closes all connections and sends a "shutting down" message to all
+  // connected peers.
+  void CloseAll();
+
+  // Called when a socket was determined to be closing by the peer (or if the
+  // connection went dead).
+  void OnClosing(DataSocket* ds);
+
+  // Explicitly remove a member and broadcast the change. Used for sign_out.
+  void RemoveMember(ChannelMember* member);
+
+  // Build a peer list string (same format as BuildResponseForNewMember but
+  // without the DCHECK for connected — disconnected members may still be in
+  // the list briefly).
+  std::string BuildPeerList(const ChannelMember* exclude, std::string* ct);
+
+  // Server-mediated hangup: clear call state for both parties and notify both.
+  void HandleHangUp(ChannelMember* member);
+
+  // Returns true if peer is currently in a call.
+  bool IsPeerBusy(int peer_id) const;
+
+  // Set call state for a pair of members. Returns true on success.
+  bool SetCallPair(int caller_id, int target_id);
+
+  void CheckForTimeout();
+
+ protected:
+  void DeleteAll();
+  void BroadcastChangedState(const ChannelMember& member,
+                             Members* delivery_failures);
+  void HandleDeliveryFailures(Members* failures);
+
+  // Builds a simple list of "name,id\n" entries for each member.
+  std::string BuildResponseForNewMember(const ChannelMember& member,
+                                        std::string* content_type);
+
+ protected:
+  Members members_;
+};
+
+#endif  // EXAMPLES_PEERCONNECTION_SERVER_PEER_CHANNEL_H_
+
+========== ./main.cc ==========
+Lines: 200
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <string>
+#include <vector>
+
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "absl/flags/usage.h"
+#include "examples/peerconnection/server/data_socket.h"
+#include "examples/peerconnection/server/peer_channel.h"
+#include "rtc_base/checks.h"
+
+#if defined(WEBRTC_POSIX)
+#include <sys/select.h>
+#endif
+
+// As of now, no components in peerconnection_server rely on WebRTC components
+// that change its behavior based on a field trial, so this flag is currently
+// unused. See peerconnection_client for example how this command line flag
+// can be used and propagated.
+ABSL_FLAG(
+    std::string,
+    force_fieldtrials,
+    "",
+    "Field trials control experimental features. This flag specifies the field "
+    "trials in effect. E.g. running with "
+    "--force_fieldtrials=WebRTC-FooFeature/Enabled/ "
+    "will assign the group Enabled to field trial WebRTC-FooFeature. Multiple "
+    "trials are separated by \"/\"");
+ABSL_FLAG(int, port, 8888, "default: 8888");
+
+static const size_t kMaxConnections = (FD_SETSIZE - 2);
+
+void HandleBrowserRequest(DataSocket* ds, bool* quit) {
+  RTC_DCHECK(ds && ds->valid());
+  RTC_DCHECK(quit);
+
+  const std::string& path = ds->request_path();
+
+  *quit = (path.compare("/quit") == 0);
+
+  if (*quit) {
+    ds->Send("200 OK", true, "text/html", "",
+             "<html><body>Quitting...</body></html>");
+  } else if (ds->method() == DataSocket::OPTIONS) {
+    // We'll get this when a browsers do cross-resource-sharing requests.
+    // The headers to allow cross-origin script support will be set inside
+    // Send.
+    ds->Send("200 OK", true, "", "", "");
+  } else {
+    // Here we could write some useful output back to the browser depending on
+    // the path.
+    printf("Received an invalid request: %s\n", ds->request_path().c_str());
+    ds->Send("500 Sorry", true, "text/html", "",
+             "<html><body>Sorry, not yet implemented</body></html>");
+  }
+}
+
+int main(int argc, char* argv[]) {
+  absl::SetProgramUsageMessage(
+      "Example usage: ./peerconnection_server --port=8888\n");
+  absl::ParseCommandLine(argc, argv);
+
+  int port = absl::GetFlag(FLAGS_port);
+
+  // Abort if the user specifies a port that is outside the allowed
+  // range [1, 65535].
+  if ((port < 1) || (port > 65535)) {
+    printf("Error: %i is not a valid port.\n", port);
+    return -1;
+  }
+
+  ListeningSocket listener;
+  if (!listener.Create()) {
+    printf("Failed to create server socket\n");
+    return -1;
+  } else if (!listener.Listen(port)) {
+    printf("Failed to listen on server socket\n");
+    return -1;
+  }
+
+  printf("Server listening on port %i\n", port);
+
+  PeerChannel clients;
+  typedef std::vector<DataSocket*> SocketArray;
+  SocketArray sockets;
+  bool quit = false;
+  while (!quit) {
+    fd_set socket_set;
+    FD_ZERO(&socket_set);
+    if (listener.valid())
+      FD_SET(listener.socket(), &socket_set);
+
+    for (SocketArray::iterator i = sockets.begin(); i != sockets.end(); ++i)
+      FD_SET((*i)->socket(), &socket_set);
+
+    struct timeval timeout = {.tv_sec = 10, .tv_usec = 0};
+    if (select(FD_SETSIZE, &socket_set, nullptr, nullptr, &timeout) ==
+        SOCKET_ERROR) {
+      printf("select failed\n");
+      break;
+    }
+
+    for (SocketArray::iterator i = sockets.begin(); i != sockets.end(); ++i) {
+      DataSocket* s = *i;
+      bool socket_done = true;
+      if (FD_ISSET(s->socket(), &socket_set)) {
+        if (s->OnDataAvailable(&socket_done) && s->request_received()) {
+          ChannelMember* member = clients.Lookup(s);
+          if (member || PeerChannel::IsPeerConnection(s)) {
+            if (!member) {
+              if (s->PathEquals("/sign_in")) {
+                clients.AddMember(s);
+              } else {
+                printf("No member found for: %s\n", s->request_path().c_str());
+                s->Send("500 Error", true, "text/plain", "",
+                        "Peer most likely gone.");
+              }
+            } else if (member->is_wait_request(s)) {
+              // no need to do anything.
+              socket_done = false;
+            } else {
+              ChannelMember* target = clients.IsTargetedRequest(s);
+              if (target) {
+                member->ForwardRequestToPeer(s, target);
+              } else if (s->PathEquals("/hangup")) {
+                clients.HandleHangUp(member);
+                s->Send("200 OK", true, "text/plain", "", "");
+              } else if (s->PathEquals("/sign_out")) {
+                // Remove member and broadcast updated peer list to others.
+                // Send the remaining peer list to the disconnecting client.
+                std::string content_type;
+                std::string peer_list = clients.BuildPeerList(member, &content_type);
+                s->Send("200 OK", true, content_type, "", peer_list);
+                clients.RemoveMember(member);
+                member = nullptr;
+              } else {
+                printf("Couldn't find target for request: %s\n",
+                       s->request_path().c_str());
+                s->Send("500 Error", true, "text/plain", "",
+                        "Peer most likely gone.");
+              }
+            }
+          } else {
+            HandleBrowserRequest(s, &quit);
+            if (quit) {
+              printf("Quitting...\n");
+              FD_CLR(listener.socket(), &socket_set);
+              listener.Close();
+              clients.CloseAll();
+            }
+          }
+        }
+      } else {
+        socket_done = false;
+      }
+
+      if (socket_done) {
+        printf("Disconnecting socket\n");
+        clients.OnClosing(s);
+        RTC_DCHECK(s->valid());  // Close must not have been called yet.
+        FD_CLR(s->socket(), &socket_set);
+        delete (*i);
+        i = sockets.erase(i);
+        if (i == sockets.end())
+          break;
+      }
+    }
+
+    clients.CheckForTimeout();
+
+    if (FD_ISSET(listener.socket(), &socket_set)) {
+      DataSocket* s = listener.Accept();
+      if (sockets.size() >= kMaxConnections) {
+        delete s;  // sorry, that's all we can take.
+        printf("Connection limit reached\n");
+      } else {
+        sockets.push_back(s);
+        printf("New connection...\n");
+      }
+    }
+  }
+
+  for (SocketArray::iterator i = sockets.begin(); i != sockets.end(); ++i)
+    delete (*i);
+  sockets.clear();
+
+  return 0;
+}
+
+========== ./peer_channel.cc ==========
+Lines: 455
+
+/*
+ *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
+ *
+ *  Use of this source code is governed by a BSD-style license
+ *  that can be found in the LICENSE file in the root of the source
+ *  tree. An additional intellectual property rights grant can be found
+ *  in the file PATENTS.  All contributing project authors may
+ *  be found in the AUTHORS file in the root of the source tree.
+ */
+
+#include "examples/peerconnection/server/peer_channel.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <iterator>
+#include <string>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "examples/peerconnection/server/data_socket.h"
+#include "rtc_base/checks.h"
+
+// Set to the peer id of the originator when messages are being
+// exchanged between peers, but set to the id of the receiving peer
+// itself when notifications are sent from the server about the state
+// of other peers.
+//
+// WORKAROUND: Since support for CORS varies greatly from one browser to the
+// next, we don't use a custom name for our peer-id header (originally it was
+// "X-Peer-Id: ").  Instead, we use a "simple header", "Pragma" which should
+// always be exposed to CORS requests.  There is a special CORS header devoted
+// to exposing proprietary headers (Access-Control-Expose-Headers), however
+// at this point it is not working correctly in some popular browsers.
+static const char kPeerIdHeader[] = "Pragma: ";
+
+static const char* kRequestPaths[] = {
+    "/wait",
+    "/sign_out",
+    "/message",
+    "/hangup",
+};
+
+enum RequestPathIndex {
+  kWait,
+  kSignOut,
+  kMessage,
+  kHangUp,
+};
+
+const size_t kMaxNameLength = 512;
+
+//
+// ChannelMember
+//
+
+int ChannelMember::s_member_id_ = 0;
+
+ChannelMember::ChannelMember(DataSocket* socket)
+    : waiting_socket_(nullptr),
+      id_(++s_member_id_),
+      connected_(true),
+      timestamp_(time(nullptr)) {
+  RTC_DCHECK(socket);
+  RTC_DCHECK_EQ(socket->method(), DataSocket::GET);
+  RTC_DCHECK(socket->PathEquals("/sign_in"));
+  name_ = socket->request_arguments();
+  if (name_.empty())
+    name_ = "peer_" + absl::StrCat(id_);
+  else if (name_.length() > kMaxNameLength)
+    name_.resize(kMaxNameLength);
+
+  std::replace(name_.begin(), name_.end(), ',', '_');
+}
+
+ChannelMember::~ChannelMember() {}
+
+bool ChannelMember::is_wait_request(DataSocket* ds) const {
+  return ds && ds->PathEquals(kRequestPaths[kWait]);
+}
+
+bool ChannelMember::TimedOut() {
+  return waiting_socket_ == nullptr && (time(nullptr) - timestamp_) > 30;
+}
+
+std::string ChannelMember::GetPeerIdHeader() const {
+  return kPeerIdHeader + absl::StrCat(id_) + "\r\n";
+}
+
+bool ChannelMember::NotifyOfOtherMember(const ChannelMember& other) {
+  RTC_DCHECK_NE(&other, this);
+  QueueResponse("200 OK", "text/plain", GetPeerIdHeader(), other.GetEntry());
+  return true;
+}
+
+// Returns a string in the form "name,id,connected,busy\n".
+std::string ChannelMember::GetEntry() const {
+  RTC_DCHECK(name_.length() <= kMaxNameLength);
+
+  char entry[kMaxNameLength + 20];
+  snprintf(entry, sizeof(entry), "%s,%d,%d,%d\n",
+           name_.substr(0, kMaxNameLength).c_str(), id_, connected_,
+           call_partner_id_ != 0 ? 1 : 0);
+  return entry;
+}
+
+void ChannelMember::ForwardRequestToPeer(DataSocket* ds, ChannelMember* peer) {
+  RTC_DCHECK(peer);
+  RTC_DCHECK(ds);
+
+  std::string extra_headers(GetPeerIdHeader());
+
+  if (peer == this) {
+    ds->Send("200 OK", true, ds->content_type(), extra_headers, ds->data());
+  } else {
+    // Check if target is busy (already in a call with someone else)
+    if (peer->in_call() && peer->call_partner_id() != id_) {
+      const char* busy_msg = "BUSY";
+      ds->Send("200 OK", true, "text/plain", extra_headers, busy_msg);
+      printf("Client %s tried to call busy %s\n", name_.c_str(),
+             peer->name().c_str());
+      return;
+    }
+    printf("Client %s sending to %s\n", name_.c_str(), peer->name().c_str());
+    peer->QueueResponse("200 OK", ds->content_type(), extra_headers,
+                        ds->data());
+    ds->Send("200 OK", true, "text/plain", "", "");
+    // Track call state: mark both as in-call with each other
+    call_partner_id_ = peer->id();
+    peer->set_call_partner(id_);
+  }
+}
+
+void ChannelMember::OnClosing(DataSocket* ds) {
+  if (ds == waiting_socket_) {
+    waiting_socket_ = nullptr;
+    timestamp_ = time(nullptr);
+  }
+}
+
+void ChannelMember::QueueResponse(const std::string& status,
+                                  const std::string& content_type,
+                                  const std::string& extra_headers,
+                                  const std::string& data) {
+  if (waiting_socket_) {
+    RTC_DCHECK(queue_.empty());
+    RTC_DCHECK_EQ(waiting_socket_->method(), DataSocket::GET);
+    bool ok =
+        waiting_socket_->Send(status, true, content_type, extra_headers, data);
+    if (!ok) {
+      printf("Failed to deliver data to waiting socket\n");
+    }
+    waiting_socket_ = nullptr;
+    timestamp_ = time(nullptr);
+  } else {
+    QueuedResponse qr;
+    qr.status = status;
+    qr.content_type = content_type;
+    qr.extra_headers = extra_headers;
+    qr.data = data;
+    queue_.push(qr);
+  }
+}
+
+void ChannelMember::SetWaitingSocket(DataSocket* ds) {
+  RTC_DCHECK_EQ(ds->method(), DataSocket::GET);
+  if (ds && !queue_.empty()) {
+    RTC_DCHECK(!waiting_socket_);
+    const QueuedResponse& response = queue_.front();
+    ds->Send(response.status, true, response.content_type,
+             response.extra_headers, response.data);
+    queue_.pop();
+  } else {
+    waiting_socket_ = ds;
+  }
+}
+
+//
+// PeerChannel
+//
+
+// static
+bool PeerChannel::IsPeerConnection(const DataSocket* ds) {
+  RTC_DCHECK(ds);
+  return (ds->method() == DataSocket::POST && ds->content_length() > 0) ||
+         (ds->method() == DataSocket::GET && ds->PathEquals("/sign_in"));
+}
+
+ChannelMember* PeerChannel::Lookup(DataSocket* ds) const {
+  RTC_DCHECK(ds);
+
+  if (ds->method() != DataSocket::GET && ds->method() != DataSocket::POST)
+    return nullptr;
+
+  size_t i = 0;
+  for (; i < std::size(kRequestPaths); ++i) {
+    if (ds->PathEquals(kRequestPaths[i]))
+      break;
+  }
+
+  if (i == std::size(kRequestPaths))
+    return nullptr;
+
+  std::string args(ds->request_arguments());
+  static constexpr absl::string_view kPeerId = "peer_id=";
+  size_t found = args.find(kPeerId);
+  if (found == std::string::npos)
+    return nullptr;
+
+  int id = atoi(&args[found + kPeerId.size()]);
+  Members::const_iterator iter = members_.begin();
+  for (; iter != members_.end(); ++iter) {
+    if (id == (*iter)->id()) {
+      if (i == kWait)
+        (*iter)->SetWaitingSocket(ds);
+      if (i == kSignOut)
+        (*iter)->set_disconnected();
+      return *iter;
+    }
+  }
+
+  return nullptr;
+}
+
+ChannelMember* PeerChannel::IsTargetedRequest(const DataSocket* ds) const {
+  RTC_DCHECK(ds);
+  // Regardless of GET or POST, we look for the peer_id parameter
+  // only in the request_path.
+  const std::string& path = ds->request_path();
+  size_t args = path.find('?');
+  if (args == std::string::npos)
+    return nullptr;
+  size_t found;
+  static constexpr absl::string_view kTargetPeerIdParam = "to=";
+  do {
+    found = path.find(kTargetPeerIdParam, args);
+    if (found == std::string::npos)
+      return nullptr;
+    if (found == (args + 1) || path[found - 1] == '&') {
+      found += kTargetPeerIdParam.size();
+      break;
+    }
+    args = found + kTargetPeerIdParam.size();
+  } while (true);
+  int id = atoi(&path[found]);
+  Members::const_iterator i = members_.begin();
+  for (; i != members_.end(); ++i) {
+    if ((*i)->id() == id) {
+      return *i;
+    }
+  }
+  return nullptr;
+}
+
+bool PeerChannel::AddMember(DataSocket* ds) {
+  RTC_DCHECK(IsPeerConnection(ds));
+  ChannelMember* new_guy = new ChannelMember(ds);
+  Members failures;
+  BroadcastChangedState(*new_guy, &failures);
+  HandleDeliveryFailures(&failures);
+  members_.push_back(new_guy);
+
+  printf("New member added (total=%zu): %s\n", members_.size(),
+         new_guy->name().c_str());
+
+  // Let the newly connected peer know about other members of the channel.
+  std::string content_type;
+  std::string response = BuildResponseForNewMember(*new_guy, &content_type);
+  ds->Send("200 Added", true, content_type, new_guy->GetPeerIdHeader(),
+           response);
+  return true;
+}
+
+void PeerChannel::RemoveMember(ChannelMember* member) {
+  if (!member) return;
+  // Clear any waiting socket to prevent dangling reference
+  member->set_disconnected();
+  Members::iterator i = std::find(members_.begin(), members_.end(), member);
+  if (i != members_.end()) {
+    members_.erase(i);
+    Members failures;
+    BroadcastChangedState(*member, &failures);
+    HandleDeliveryFailures(&failures);
+  }
+  delete member;
+}
+
+std::string PeerChannel::BuildPeerList(const ChannelMember* exclude,
+                                       std::string* content_type) {
+  *content_type = "text/plain";
+  std::string response;
+  for (Members::iterator i = members_.begin(); i != members_.end(); ++i) {
+    if (exclude && exclude->id() == (*i)->id()) continue;
+    if ((*i)->connected())
+      response += (*i)->GetEntry();
+  }
+  return response;
+}
+
+void PeerChannel::HandleHangUp(ChannelMember* member) {
+  if (!member || !member->in_call()) return;
+  int partner_id = member->call_partner_id();
+  // Find the partner
+  ChannelMember* partner = nullptr;
+  for (auto* m : members_) {
+    if (m->id() == partner_id) { partner = m; break; }
+  }
+  // Clear call state
+  member->set_call_partner(0);
+  if (partner) partner->set_call_partner(0);
+  printf("HangUp: %s(%d) and %s(%d) call cleared\n",
+         member->name().c_str(), member->id(),
+         partner ? partner->name().c_str() : "?", partner_id);
+  // Notify the hangup initiator with partner's ID in header
+  std::string confirm_msg = "HANGUP_CONFIRM";
+  member->QueueResponse("200 OK", "text/plain",
+                        kPeerIdHeader + std::to_string(partner_id) + "\r\n",
+                        confirm_msg);
+  // Notify the partner with initiator's ID in header
+  if (partner) {
+    partner->QueueResponse("200 OK", "text/plain",
+                           kPeerIdHeader + std::to_string(member->id()) + "\r\n",
+                           confirm_msg);
+  }
+  // Broadcast updated peer list to everyone
+  Members failures;
+  for (auto* m : members_) {
+    // Send updated peer list to each connected member
+    std::string ct;
+    std::string pl = BuildPeerList(nullptr, &ct);
+    m->QueueResponse("200 OK", ct, m->GetPeerIdHeader(), pl);
+  }
+}
+
+bool PeerChannel::IsPeerBusy(int peer_id) const {
+  for (auto* m : members_) {
+    if (m->id() == peer_id) return m->in_call();
+  }
+  return false;
+}
+
+bool PeerChannel::SetCallPair(int caller_id, int target_id) {
+  ChannelMember *caller = nullptr, *target = nullptr;
+  for (auto* m : members_) {
+    if (m->id() == caller_id) caller = m;
+    if (m->id() == target_id) target = m;
+  }
+  if (!caller || !target) return false;
+  caller->set_call_partner(target_id);
+  target->set_call_partner(caller_id);
+  return true;
+}
+
+void PeerChannel::CloseAll() {
+  Members::const_iterator i = members_.begin();
+  for (; i != members_.end(); ++i) {
+    (*i)->QueueResponse("200 OK", "text/plain", "", "Server shutting down");
+  }
+  DeleteAll();
+}
+
+void PeerChannel::OnClosing(DataSocket* ds) {
+  for (Members::iterator i = members_.begin(); i != members_.end(); ++i) {
+    ChannelMember* m = (*i);
+    m->OnClosing(ds);
+    if (!m->connected()) {
+      i = members_.erase(i);
+      Members failures;
+      BroadcastChangedState(*m, &failures);
+      HandleDeliveryFailures(&failures);
+      delete m;
+      if (i == members_.end())
+        break;
+    }
+  }
+  printf("Total connected: %zu\n", members_.size());
+}
+
+void PeerChannel::CheckForTimeout() {
+  for (Members::iterator i = members_.begin(); i != members_.end(); ++i) {
+    ChannelMember* m = (*i);
+    if (m->TimedOut()) {
+      printf("Timeout: %s\n", m->name().c_str());
+      m->set_disconnected();
+      i = members_.erase(i);
+      Members failures;
+      BroadcastChangedState(*m, &failures);
+      HandleDeliveryFailures(&failures);
+      delete m;
+      if (i == members_.end())
+        break;
+    }
+  }
+}
+
+void PeerChannel::DeleteAll() {
+  for (Members::iterator i = members_.begin(); i != members_.end(); ++i)
+    delete (*i);
+  members_.clear();
+}
+
+void PeerChannel::BroadcastChangedState(const ChannelMember& member,
+                                        Members* delivery_failures) {
+  // This function should be called prior to DataSocket::Close().
+  RTC_DCHECK(delivery_failures);
+
+  if (!member.connected()) {
+    printf("Member disconnected: %s\n", member.name().c_str());
+  }
+
+  Members::iterator i = members_.begin();
+  for (; i != members_.end(); ++i) {
+    if (&member != (*i)) {
+      if (!(*i)->NotifyOfOtherMember(member)) {
+        (*i)->set_disconnected();
+        delivery_failures->push_back(*i);
+        i = members_.erase(i);
+        if (i == members_.end())
+          break;
+      }
+    }
+  }
+}
+
+void PeerChannel::HandleDeliveryFailures(Members* failures) {
+  RTC_DCHECK(failures);
+
+  while (!failures->empty()) {
+    Members::iterator i = failures->begin();
+    ChannelMember* member = *i;
+    RTC_DCHECK(!member->connected());
+    failures->erase(i);
+    BroadcastChangedState(*member, failures);
+    delete member;
+  }
+}
+
+// Builds a simple list of "name,id\n" entries for each member.
+std::string PeerChannel::BuildResponseForNewMember(const ChannelMember& member,
+                                                   std::string* content_type) {
+  RTC_DCHECK(content_type);
+
+  *content_type = "text/plain";
+  // The peer itself will always be the first entry.
+  std::string response(member.GetEntry());
+  for (Members::iterator i = members_.begin(); i != members_.end(); ++i) {
+    if (member.id() != (*i)->id()) {
+      if ((*i)->connected())
+        response += (*i)->GetEntry();
+    }
+  }
+
+  return response;
+}
+
+
+=====================================
+Total files: 6
+Total lines: 1270

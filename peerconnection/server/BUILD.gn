@@ -1,0 +1,25 @@
+import("../../../webrtc.gni")
+
+rtc_executable("peerconnection_server") {
+  testonly = true
+
+  sources = [
+    "data_socket.cc",
+    "data_socket.h",
+    "main.cc",
+    "peer_channel.cc",
+    "peer_channel.h",
+  ]
+
+  deps = [
+    "../../../rtc_base:checks",
+    "../../../rtc_base:ip_address",
+    "../../../rtc_base:net_helpers",
+    "../../../rtc_base:stringutils",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+    "//third_party/abseil-cpp/absl/flags:usage",
+    "//third_party/abseil-cpp/absl/strings",
+    "//third_party/abseil-cpp/absl/strings:string_view",
+  ]
+}
