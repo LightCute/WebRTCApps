@@ -4,10 +4,9 @@
 #include <iostream>
 #include <sstream>
 
-#include "apps/peerconnection/client/webrtc_engine.h"
-#include "rtc_base/logging.h"
+#include "apps/peerconnection/client/engine_controller.h"
 
-CliRunner::CliRunner(WebRTCEngine* engine,
+CliRunner::CliRunner(EngineController* engine,
                      const std::string& server,
                      int port,
                      bool autoconnect,
@@ -20,26 +19,26 @@ CliRunner::CliRunner(WebRTCEngine* engine,
 
 CliRunner::~CliRunner() { Stop(); }
 
-void CliRunner::Run() {
-  // Wire engine events to stdout; also handle auto-call
-  engine_->SetEventCallback([this](const std::string& json) {
-    std::cout << "[event] " << json << std::endl;
-    PrintPrompt();
-    // Auto-call: when a peer appears and autocall is set, call the first peer
-    if (autocall_ && !engine_->connection_active()) {
-      // Look for "peer_online" event to extract peer_id
-      auto pos = json.find("\"peer_online\"");
-      if (pos != std::string::npos) {
-        auto id_pos = json.find("\"id\":");
-        if (id_pos != std::string::npos) {
-          int id = std::stoi(json.substr(id_pos + 5));
-          std::cout << "Auto-calling peer " << id << "..." << std::endl;
-          engine_->ConnectToPeer(id);
-          autocall_ = false;  // only auto-call once
-        }
+void CliRunner::OnEngineEvent(const std::string& json) {
+  std::cout << "[event] " << json << std::endl;
+  PrintPrompt();
+
+  if (autocall_ && !engine_->connection_active()) {
+    auto pos = json.find("\"peer_online\"");
+    if (pos != std::string::npos) {
+      auto id_pos = json.find("\"id\":");
+      if (id_pos != std::string::npos) {
+        int id = std::stoi(json.substr(id_pos + 5));
+        std::cout << "Auto-calling peer " << id << "..." << std::endl;
+        engine_->ConnectToPeer(id);
+        autocall_ = false;
       }
     }
-  });
+  }
+}
+
+void CliRunner::Run() {
+  engine_->RegisterObserver(this);
 
   std::cout << "=== WebRTC CLI (standalone mode) ===" << std::endl;
   std::cout << "Commands: connect, disconnect, call <id>, hangup, mute, unmute, pause, resume, send <text>, quit" << std::endl;

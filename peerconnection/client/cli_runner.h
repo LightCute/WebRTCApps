@@ -5,11 +5,13 @@
 #include <atomic>
 #include <string>
 
-class WebRTCEngine;
+#include "apps/peerconnection/client/engine_controller.h"
 
-class CliRunner {
+class EngineController;
+
+class CliRunner : public EngineObserver {
  public:
-  CliRunner(WebRTCEngine* engine,
+  CliRunner(EngineController* engine,
             const std::string& server,
             int port,
             bool autoconnect,
@@ -19,13 +21,16 @@ class CliRunner {
   void Run();
   void Stop();
 
+  // EngineObserver
+  void OnEngineEvent(const std::string& json) override;
+
   static void PrintPrompt();
 
  private:
   void InputLoop();
   void HandleInput(const std::string& line);
 
-  WebRTCEngine* engine_;
+  EngineController* engine_;
   std::string server_;
   int port_;
   bool autoconnect_;
