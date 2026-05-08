@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <poll.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -43,13 +44,22 @@ static int connect_test_client(const std::string& path) {
   return fd;
 }
 
+static int timed_read(int fd, char* buf, size_t len, int timeout_ms) {
+  struct pollfd pfd = {};
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  int ret = poll(&pfd, 1, timeout_ms);
+  if (ret <= 0) return ret;  // timeout or error
+  return read(fd, buf, len);
+}
+
 static std::string send_and_recv(int fd, const std::string& json) {
   std::string line = json + "\n";
   ssize_t nw = write(fd, line.c_str(), line.size());
   if (nw <= 0) return "";
 
   char buf[4096];
-  ssize_t nr = read(fd, buf, sizeof(buf) - 1);
+  ssize_t nr = timed_read(fd, buf, sizeof(buf) - 1, 2000);
   if (nr <= 0) return "";
   buf[nr] = '\0';
 
@@ -420,11 +430,10 @@ void test_on_engine_event_forwarding() {
 
   // Fire an event from the fake engine
   fake.EmitEvent(R"({"event":"peer_online","peer":{"id":10,"name":"alice"}})");
-  wait_a_bit();
 
-  // Read what arrived on the client socket (non-blocking check)
+  // Read what arrived on the client socket (with timeout)
   char buf[4096];
-  ssize_t nr = read(fd, buf, sizeof(buf) - 1);
+  ssize_t nr = timed_read(fd, buf, sizeof(buf) - 1, 2000);
   CHECK(nr > 0, "client received data");
   buf[nr] = '\0';
   std::string event(buf, nr);
