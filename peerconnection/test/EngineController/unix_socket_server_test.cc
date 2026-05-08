@@ -422,6 +422,7 @@ void test_on_engine_event_forwarding() {
   FakeEngineController fake;
 
   UnixSocketServer server(path, &fake);
+  fake.RegisterObserver(&server);  // wire observer so EmitEvent → SendToClient
   server.Start();
   wait_a_bit();
 
