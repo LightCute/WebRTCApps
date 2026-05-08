@@ -859,6 +859,10 @@ void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
   });
 }
 
+bool WebRTCEngine::connection_active() const {
+  return connection_active_.load(std::memory_order_acquire);
+}
+
 // ==================== PeerConnectionObserver ====================
 
 void WebRTCEngine::OnAddTrack(
