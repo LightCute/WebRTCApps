@@ -104,23 +104,22 @@ void test_connect_command() {
   wait_a_bit();
 
   int fd = connect_test_client(path);
-  if (fd < 0) { FAIL("connect_test_client failed"); goto cleanup; }
-  PASS();  // connection established
+  CHECK(fd >= 0, "connect_test_client");
 
-  std::string resp = send_and_recv(
-      fd, R"({"id":1,"cmd":"connect","params":{"server":"10.0.1.2","port":7777}})");
-  CHECK(!resp.empty(), "should get response");
-  CHECK(resp.find(R"("ok":true)") != std::string::npos, "should be ok");
-  CHECK(fake.calls.size() == 1, "one call recorded");
-  CHECK(fake.calls[0].method == "ConnectToServer", "method");
-  CHECK(fake.calls[0].arg_str == "10.0.1.2", "arg_str");
-  CHECK(fake.calls[0].arg_int == 7777, "arg_int");
+  {
+    std::string resp = send_and_recv(
+        fd, R"({"id":1,"cmd":"connect","params":{"server":"10.0.1.2","port":7777}})");
+    CHECK(!resp.empty(), "should get response");
+    CHECK(resp.find(R"("ok":true)") != std::string::npos, "should be ok");
+    CHECK(fake.calls.size() == 1, "one call recorded");
+    CHECK(fake.calls[0].method == "ConnectToServer", "method");
+    CHECK(fake.calls[0].arg_str == "10.0.1.2", "arg_str");
+    CHECK(fake.calls[0].arg_int == 7777, "arg_int");
+  }
 
   // Shutdown via command
-  resp = send_and_recv(fd, R"({"id":99,"cmd":"shutdown"})");
+  send_and_recv(fd, R"({"id":99,"cmd":"shutdown"})");
   close(fd);
-
-cleanup:
   server.Stop();
   unlink(path.c_str());
 }

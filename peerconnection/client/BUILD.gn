@@ -119,3 +119,24 @@ rtc_executable("peerconnection_client") {
     "pthread",
   ]
 }
+
+rtc_executable("unix_socket_server_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/unix_socket_server_test.cc",
+    "unix_socket_server.cc",
+    "unix_socket_server.h",
+  ]
+
+  deps = [
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "//third_party/jsoncpp",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
