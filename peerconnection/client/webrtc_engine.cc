@@ -464,14 +464,28 @@ void WebRTCEngine::ShmAudioSource::CaptureLoop() {
 
 // ==================== WebRTCEngine ====================
 
-WebRTCEngine::WebRTCEngine(const webrtc::Environment& env,
-                             EventCallback on_event)
-    : on_event_(std::move(on_event)),
-      env_(env),
+WebRTCEngine::WebRTCEngine(const webrtc::Environment& env)
+    : env_(env),
       safety_(webrtc::PendingTaskSafetyFlag::Create()),
       peer_id_(-1),
       loopback_(false) {
   signaling_client_.RegisterObserver(this);
+}
+
+void WebRTCEngine::RegisterObserver(EngineObserver* observer) {
+  if (signaling_thread_->IsCurrent()) {
+    observer_ = observer;
+  } else {
+    signaling_thread_->PostTask([this, observer] { observer_ = observer; });
+  }
+}
+
+void WebRTCEngine::UnregisterObserver() {
+  if (signaling_thread_->IsCurrent()) {
+    observer_ = nullptr;
+  } else {
+    signaling_thread_->PostTask([this] { observer_ = nullptr; });
+  }
 }
 
 WebRTCEngine::~WebRTCEngine() {
@@ -560,6 +574,15 @@ void WebRTCEngine::Shutdown() {
 }
 
 void WebRTCEngine::ConnectToServer(const std::string& server, int port) {
+  if (signaling_thread_->IsCurrent()) {
+    ConnectToServerImpl(server, port);
+  } else {
+    signaling_thread_->PostTask(
+        [this, server, port] { ConnectToServerImpl(server, port); });
+  }
+}
+
+void WebRTCEngine::ConnectToServerImpl(const std::string& server, int port) {
   if (signaling_client_.is_connected())
     return;
   server_ = server;
@@ -568,11 +591,27 @@ void WebRTCEngine::ConnectToServer(const std::string& server, int port) {
 }
 
 void WebRTCEngine::DisconnectFromServer() {
+  if (signaling_thread_->IsCurrent()) {
+    DisconnectFromServerImpl();
+  } else {
+    signaling_thread_->PostTask([this] { DisconnectFromServerImpl(); });
+  }
+}
+
+void WebRTCEngine::DisconnectFromServerImpl() {
   if (signaling_client_.is_connected())
     signaling_client_.SignOut();
 }
 
 void WebRTCEngine::ConnectToPeer(int peer_id) {
+  if (signaling_thread_->IsCurrent()) {
+    ConnectToPeerImpl(peer_id);
+  } else {
+    signaling_thread_->PostTask([this, peer_id] { ConnectToPeerImpl(peer_id); });
+  }
+}
+
+void WebRTCEngine::ConnectToPeerImpl(int peer_id) {
   RTC_DCHECK(peer_id_ == -1);
   RTC_DCHECK(peer_id != -1);
 
@@ -591,6 +630,14 @@ void WebRTCEngine::ConnectToPeer(int peer_id) {
 }
 
 void WebRTCEngine::HangUp() {
+  if (signaling_thread_->IsCurrent()) {
+    HangUpImpl();
+  } else {
+    signaling_thread_->PostTask([this] { HangUpImpl(); });
+  }
+}
+
+void WebRTCEngine::HangUpImpl() {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   if (peer_connection_) {
     // Server-mediated hangup: send /hangup to server, which sends
@@ -602,6 +649,14 @@ void WebRTCEngine::HangUp() {
 }
 
 void WebRTCEngine::SetAudioMuted(bool muted) {
+  if (signaling_thread_->IsCurrent()) {
+    SetAudioMutedImpl(muted);
+  } else {
+    signaling_thread_->PostTask([this, muted] { SetAudioMutedImpl(muted); });
+  }
+}
+
+void WebRTCEngine::SetAudioMutedImpl(bool muted) {
   // Stub: log and set internal state. Full implementation can follow.
   RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
   if (audio_device_module_) {
@@ -613,6 +668,14 @@ void WebRTCEngine::SetAudioMuted(bool muted) {
 }
 
 void WebRTCEngine::SetVideoPaused(bool paused) {
+  if (signaling_thread_->IsCurrent()) {
+    SetVideoPausedImpl(paused);
+  } else {
+    signaling_thread_->PostTask([this, paused] { SetVideoPausedImpl(paused); });
+  }
+}
+
+void WebRTCEngine::SetVideoPausedImpl(bool paused) {
   // Stub: log and set internal state. Full implementation can follow.
   RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
   if (peer_connection_) {
@@ -628,6 +691,14 @@ void WebRTCEngine::SetVideoPaused(bool paused) {
 }
 
 void WebRTCEngine::SendData(const std::string& text) {
+  if (signaling_thread_->IsCurrent()) {
+    SendDataImpl(text);
+  } else {
+    signaling_thread_->PostTask([this, text] { SendDataImpl(text); });
+  }
+}
+
+void WebRTCEngine::SendDataImpl(const std::string& text) {
   if (data_channel_ &&
       data_channel_->state() == webrtc::DataChannelInterface::kOpen) {
     data_channel_->Send(webrtc::DataBuffer(text));
@@ -639,6 +710,14 @@ void WebRTCEngine::SendData(const std::string& text) {
 // ==================== Device Management ====================
 
 void WebRTCEngine::QueryDevices() {
+  if (signaling_thread_->IsCurrent()) {
+    QueryDevicesImpl();
+  } else {
+    signaling_thread_->PostTask([this] { QueryDevicesImpl(); });
+  }
+}
+
+void WebRTCEngine::QueryDevicesImpl() {
   // ADM is created by InitializePeerConnection() when a call starts.
   // Don't create it here — PulseAudio init crashes in some environments.
   if (!audio_device_module_ && worker_thread_) {
@@ -665,7 +744,7 @@ void WebRTCEngine::QueryDevices() {
   Json::Value video_event;
   video_event["event"] = "video_devices";
   video_event["devices"] = video_arr;
-  on_event_(Json::writeString(factory, video_event));
+  if (observer_) observer_->OnEngineEvent(Json::writeString(factory, video_event));
 
   Json::Value audio_arr(Json::arrayValue);
   if (audio_device_module_ && worker_thread_) {
@@ -690,7 +769,7 @@ void WebRTCEngine::QueryDevices() {
     Json::Value audio_event;
     audio_event["event"] = "audio_input_devices";
     audio_event["devices"] = audio_arr;
-    on_event_(Json::writeString(factory, audio_event));
+    if (observer_) observer_->OnEngineEvent(Json::writeString(factory, audio_event));
   }
 
   // ALSA fallback: use arecord -l when ADM enumeration returns empty.
@@ -725,13 +804,21 @@ void WebRTCEngine::QueryDevices() {
         Json::Value alsa_event;
         alsa_event["event"] = "audio_input_devices";
         alsa_event["devices"] = alsa_arr;
-        on_event_(Json::writeString(factory, alsa_event));
+        if (observer_) observer_->OnEngineEvent(Json::writeString(factory, alsa_event));
       }
     }
   }
 }
 
 void WebRTCEngine::SetVideoDevice(int device_idx) {
+  if (signaling_thread_->IsCurrent()) {
+    SetVideoDeviceImpl(device_idx);
+  } else {
+    signaling_thread_->PostTask([this, device_idx] { SetVideoDeviceImpl(device_idx); });
+  }
+}
+
+void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
   if (!local_video_source_) {
     RTC_LOG(LS_WARNING) << "No local video source to swap";
     return;
@@ -747,6 +834,14 @@ void WebRTCEngine::SetVideoDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
+  if (signaling_thread_->IsCurrent()) {
+    SetAudioInputDeviceImpl(device_idx);
+  } else {
+    signaling_thread_->PostTask([this, device_idx] { SetAudioInputDeviceImpl(device_idx); });
+  }
+}
+
+void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
   current_audio_input_device_idx_ = device_idx;
   if (!audio_device_module_) return;
   // Apply device change. If not recording yet, recording will use this device
@@ -816,7 +911,7 @@ void WebRTCEngine::OnDataChannel(
 void WebRTCEngine::OnIceConnectionChange(
     webrtc::PeerConnectionInterface::IceConnectionState new_state) {
   RTC_LOG(LS_INFO) << __FUNCTION__ << " " << new_state;
-  on_event_(std::string(R"({"event":"ice_state","state":")") +
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"ice_state","state":")") +
             IceConnectionStateToString(new_state) + R"("})");
 }
 
@@ -858,11 +953,11 @@ void WebRTCEngine::OnFailure(webrtc::RTCError error) {
 
 void WebRTCEngine::OnSignedIn() {
   RTC_LOG(LS_INFO) << __FUNCTION__;
-  on_event_(R"({"event":"server_connected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_connected"})");
   // Also emit current peer list.
   const Peers& peers = signaling_client_.peers();
   if (!peers.empty()) {
-    on_event_(BuildPeerListJson(peers));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(peers));
   }
 }
 
@@ -871,15 +966,15 @@ void WebRTCEngine::OnDisconnected() {
 
   DeletePeerConnection();
 
-  on_event_(R"({"event":"server_disconnected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_disconnected"})");
 }
 
 void WebRTCEngine::OnPeerConnected(int id, const std::string& name) {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   // Emit individual peer event + full peer list.
-  on_event_(std::string(R"({"event":"peer_online","peer":{"id":)") +
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"peer_online","peer":{"id":)") +
             std::to_string(id) + R"(,"name":")" + name + R"("}})");
-  on_event_(BuildPeerListJson(signaling_client_.peers()));
+  if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
 }
 
 void WebRTCEngine::OnPeerDisconnected(int id) {
@@ -888,8 +983,8 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     RTC_LOG(LS_INFO) << "Our peer disconnected";
     // Phase 2 confirmation — must be sent before cleanup.
     signaling_client_.SendHangUpConfirm();
-    on_event_(R"({"event":"call_disconnected"})");
-    on_event_(BuildPeerListJson(signaling_client_.peers()));
+    if (observer_) observer_->OnEngineEvent(R"({"event":"call_disconnected"})");
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
 
     // Sign out + reconnect: fully reset signaling state so the second
     // call starts from a clean slate (no residual call_partner / hangup
@@ -939,15 +1034,15 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
         webrtc::TimeDelta::Seconds(2));
   } else {
     // Emit individual offline event + refreshed peer list.
-    on_event_(R"({"event":"peer_offline","peer_id":)" +
+    if (observer_) observer_->OnEngineEvent(R"({"event":"peer_offline","peer_id":)" +
               std::to_string(id) + "}");
-    on_event_(BuildPeerListJson(signaling_client_.peers()));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
   }
 }
 
 void WebRTCEngine::OnPeerBusy(int peer_id) {
   RTC_LOG(LS_INFO) << __FUNCTION__ << " " << peer_id;
-  on_event_(std::string(R"({"event":"peer_busy","peer_id":)")
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"peer_busy","peer_id":)")
             + std::to_string(peer_id) + "}");
 }
 
@@ -1080,7 +1175,7 @@ void WebRTCEngine::OnMessageSent(int err) {
 void WebRTCEngine::OnServerConnectionFailure() {
   std::string error_msg = "Failed to connect to " + server_;
   RTC_LOG(LS_ERROR) << error_msg;
-  on_event_(R"({"event":"server_connection_failed","error":")" +
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_connection_failed","error":")" +
             error_msg + R"("})");
 }
 
@@ -1091,7 +1186,7 @@ void WebRTCEngine::OnStateChange() {
     const char* state_str =
         DataChannelStateToString(data_channel_->state());
     RTC_LOG(LS_INFO) << "DataChannel state: " << state_str;
-    on_event_(std::string(R"({"event":"data_channel_state","state":")") +
+    if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"data_channel_state","state":")") +
               state_str + R"("})");
   }
 }
@@ -1099,7 +1194,7 @@ void WebRTCEngine::OnStateChange() {
 void WebRTCEngine::OnMessage(const webrtc::DataBuffer& buffer) {
   RTC_LOG(LS_INFO) << "DataChannel message received";
   std::string text(buffer.data.data<char>(), buffer.data.size());
-  on_event_(R"({"event":"data_received","text":")" +
+  if (observer_) observer_->OnEngineEvent(R"({"event":"data_received","text":")" +
             EscapeJsonString(text) + R"("})");
 }
 
@@ -1214,11 +1309,13 @@ bool WebRTCEngine::CreatePeerConnection() {
           config, std::move(pc_dependencies));
   if (error_or_peer_connection.ok()) {
     peer_connection_ = std::move(error_or_peer_connection.value());
+    connection_active_.store(true, std::memory_order_release);
   }
   return peer_connection_ != nullptr;
 }
 
 void WebRTCEngine::DeletePeerConnection() {
+  connection_active_.store(false, std::memory_order_release);
   // Clear pending messages first to prevent stale ICE candidates from being sent
   while (!pending_messages_.empty()) {
     delete pending_messages_.front();
@@ -1281,7 +1378,7 @@ void WebRTCEngine::AddTracks() {
         << "No local video track; proceeding without local video";
   }
 
-  on_event_(R"({"event":"call_connected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"call_connected"})");
 }
 
 void WebRTCEngine::AddDataChannel() {
