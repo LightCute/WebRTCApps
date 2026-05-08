@@ -428,7 +428,12 @@ void test_on_engine_event_forwarding() {
   int fd = connect_test_client(path);
   CHECK(fd >= 0, "connect");
 
-  // Fire an event from the fake engine
+  // Sync: send a dummy command and wait for response to ensure the IO thread
+  // has accepted the connection and client_fd_ is set.
+  std::string sync = send_and_recv(fd, R"({"id":0,"cmd":"disconnect"})");
+  CHECK(!sync.empty(), "sync response received");
+
+  // Now fire an event — client_fd_ is guaranteed set
   fake.EmitEvent(R"({"event":"peer_online","peer":{"id":10,"name":"alice"}})");
 
   // Read what arrived on the client socket (with timeout)
