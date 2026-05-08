@@ -14,17 +14,21 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "apps/peerconnection/client/webrtc_engine.h"
+#include "apps/peerconnection/client/engine_controller.h"
 #include "json/reader.h"
 #include "json/value.h"
 #include "json/writer.h"
 #include "rtc_base/logging.h"
 
 UnixSocketServer::UnixSocketServer(const std::string& socket_path,
-                                   WebRTCEngine* engine)
+                                   EngineController* engine)
     : socket_path_(socket_path), engine_(engine) {}
 
 UnixSocketServer::~UnixSocketServer() { Stop(); }
+
+void UnixSocketServer::OnEngineEvent(const std::string& json) {
+  SendToClient(json);
+}
 
 void UnixSocketServer::Start() {
   running_ = true;
@@ -94,30 +98,22 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
       SendResponse(id, false, "Missing server or port");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, server, port] {
-          engine_->ConnectToServer(server, port);
-          SendResponse(id, true);
-      });
+    engine_->ConnectToServer(server, port);
+    SendResponse(id, true);
   } else if (cmd == "disconnect") {
-    engine_->signaling_thread()->PostTask([this, id] {
-        engine_->DisconnectFromServer();
-        SendResponse(id, true);
-      });
+    engine_->DisconnectFromServer();
+    SendResponse(id, true);
   } else if (cmd == "call") {
     int peer_id = root["params"].get("peer_id", -1).asInt();
     if (peer_id < 0) {
       SendResponse(id, false, "Invalid peer_id");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, peer_id] {
-        engine_->ConnectToPeer(peer_id);
-        SendResponse(id, true);
-      });
+    engine_->ConnectToPeer(peer_id);
+    SendResponse(id, true);
   } else if (cmd == "hangup") {
-    engine_->signaling_thread()->PostTask([this, id] {
-        engine_->HangUp();
-        SendResponse(id, true);
-      });
+    engine_->HangUp();
+    SendResponse(id, true);
   } else if (cmd == "shutdown") {
     SendResponse(id, true);
     running_ = false;
@@ -125,42 +121,32 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
   } else if (cmd == "set_mute") {
     bool audio_mute = root["params"].get("audio", false).asBool();
     bool video_mute = root["params"].get("video", false).asBool();
-    engine_->signaling_thread()->PostTask([this, audio_mute, video_mute] {
-        if (audio_mute) engine_->SetAudioMuted(true);
-        if (video_mute) engine_->SetVideoPaused(true);
-      });
+    if (audio_mute) engine_->SetAudioMuted(true);
+    if (video_mute) engine_->SetVideoPaused(true);
     SendResponse(id, true);
   } else if (cmd == "send_data") {
     std::string text = root["params"].get("text", "").asString();
-    engine_->signaling_thread()->PostTask([this, id, text] {
-        engine_->SendData(text);
-        SendResponse(id, true);
-      });
+    engine_->SendData(text);
+    SendResponse(id, true);
   } else if (cmd == "query_devices") {
-    engine_->signaling_thread()->PostTask([this, id] {
-      engine_->QueryDevices();
-      SendResponse(id, true);
-    });
+    engine_->QueryDevices();
+    SendResponse(id, true);
   } else if (cmd == "set_video_device") {
     int idx = root["params"].get("device_idx", -1).asInt();
     if (idx < 0) {
       SendResponse(id, false, "Missing device_idx");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, idx] {
-      engine_->SetVideoDevice(idx);
-      SendResponse(id, true);
-    });
+    engine_->SetVideoDevice(idx);
+    SendResponse(id, true);
   } else if (cmd == "set_audio_input_device") {
     int idx = root["params"].get("device_idx", -1).asInt();
     if (idx < 0) {
       SendResponse(id, false, "Missing device_idx");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, idx] {
-      engine_->SetAudioInputDevice(idx);
-      SendResponse(id, true);
-    });
+    engine_->SetAudioInputDevice(idx);
+    SendResponse(id, true);
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }

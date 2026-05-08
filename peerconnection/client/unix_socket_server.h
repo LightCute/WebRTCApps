@@ -9,17 +9,22 @@
 #include <string>
 #include <thread>
 
-class WebRTCEngine;
+#include "apps/peerconnection/client/engine_controller.h"
 
-class UnixSocketServer {
+class EngineController;
+
+class UnixSocketServer : public EngineObserver {
  public:
-  UnixSocketServer(const std::string& socket_path, WebRTCEngine* engine);
+  UnixSocketServer(const std::string& socket_path, EngineController* engine);
   ~UnixSocketServer();
 
   void Start();
   void Stop();
   void Wait();                       // Block until shutdown
   void SendToClient(const std::string& json);
+
+  // EngineObserver
+  void OnEngineEvent(const std::string& json) override;
 
  private:
   void IoLoop();
@@ -28,7 +33,7 @@ class UnixSocketServer {
   void SendResponse(int id, bool ok, const std::string& error = "");
 
   std::string socket_path_;
-  WebRTCEngine* engine_;             // non-owning
+  EngineController* engine_;             // non-owning
   int listen_fd_ = -1;
   int client_fd_ = -1;
 
