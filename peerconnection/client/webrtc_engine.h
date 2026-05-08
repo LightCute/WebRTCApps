@@ -4,7 +4,6 @@
 
 #include <atomic>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,53 +25,43 @@
 #include "apps/peerconnection/client/peer_connection_client.h"
 #include "apps/peerconnection/client/shm_video_writer.h"
 #include "apps/peerconnection/client/shm_audio_writer.h"
+#include "apps/peerconnection/client/engine_controller.h"
 #include "apps/peerconnection/client/shm_audio_reader.h"
 #include "rtc_base/thread.h"
 
-class WebRTCEngine : public webrtc::PeerConnectionObserver,
+class WebRTCEngine : public EngineController,
+                     public webrtc::PeerConnectionObserver,
                      public webrtc::CreateSessionDescriptionObserver,
                      public PeerConnectionClientObserver,
                      public webrtc::DataChannelObserver {
  public:
-  using EventCallback = std::function<void(const std::string& json)>;
-
-  WebRTCEngine(const webrtc::Environment& env, EventCallback on_event);
+  WebRTCEngine(const webrtc::Environment& env);
   ~WebRTCEngine() override;
 
-  // Lifecycle
+  // EngineController implementation (thread-safe, callable from any thread)
+  void RegisterObserver(EngineObserver* observer) override;
+  void UnregisterObserver() override;
+  void ConnectToServer(const std::string& server, int port) override;
+  void DisconnectFromServer() override;
+  void ConnectToPeer(int peer_id) override;
+  void HangUp() override;
+  void SetAudioMuted(bool muted) override;
+  void SetVideoPaused(bool paused) override;
+  void SendData(const std::string& text) override;
+  void QueryDevices() override;
+  void SetVideoDevice(int device_idx) override;
+  void SetAudioInputDevice(int device_idx) override;
+  bool connection_active() const override;
+
+  // Lifecycle (called by main.cc, not part of EngineController)
   bool Init();
   void Shutdown();
-
-  // Signaling
-  void ConnectToServer(const std::string& server, int port);
-  void DisconnectFromServer();
-  void ConnectToPeer(int peer_id);
-  void HangUp();
-
-  // Media control
-  void SetAudioMuted(bool muted);
-  void SetVideoPaused(bool paused);
-
-  // DataChannel
-  void SendData(const std::string& text);
-
-  // Device management
-  void QueryDevices();
-  void SetVideoDevice(int device_idx);
-  void SetAudioInputDevice(int device_idx);
 
   // RefCountInterface (required by CreateSessionDescriptionObserver)
   void AddRef() const override {}
   webrtc::RefCountReleaseStatus Release() const override {
     return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
   }
-
-  // Callback can be set after construction (for daemon mode wiring)
-  void SetEventCallback(EventCallback cb) { on_event_ = std::move(cb); }
-
-  // Thread access for UnixSocketServer command dispatch
-  webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
-  bool connection_active() const { return peer_connection_ != nullptr; }
 
  protected:
   // PeerConnectionObserver
@@ -116,6 +105,18 @@ class WebRTCEngine : public webrtc::PeerConnectionObserver,
   void AddTracks();
   void AddDataChannel();
   void SendMessage(const std::string& json_object);
+
+  // EngineController Impl helpers — must be called on signaling thread
+  void ConnectToServerImpl(const std::string& server, int port);
+  void DisconnectFromServerImpl();
+  void ConnectToPeerImpl(int peer_id);
+  void HangUpImpl();
+  void SetAudioMutedImpl(bool muted);
+  void SetVideoPausedImpl(bool paused);
+  void SendDataImpl(const std::string& text);
+  void QueryDevicesImpl();
+  void SetVideoDeviceImpl(int device_idx);
+  void SetAudioInputDeviceImpl(int device_idx);
 
   // SHM renderers
   void StartLocalShmRenderer(webrtc::VideoTrackInterface* track);
@@ -203,7 +204,8 @@ class WebRTCEngine : public webrtc::PeerConnectionObserver,
     std::atomic<bool> running_{false};
   };
 
-  EventCallback on_event_;
+  EngineObserver* observer_ = nullptr;
+  std::atomic<bool> connection_active_{false};
   const webrtc::Environment env_;
   webrtc::ScopedTaskSafety safety_;
 
