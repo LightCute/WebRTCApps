@@ -46,8 +46,7 @@ int main(int argc, char* argv[]) {
   webrtc::LogMessage::AddLogToStream(&log_sink, webrtc::LS_INFO);
   RTC_LOG(LS_INFO) << "Logging to: " << runtime_dir << "/daemon.0.log";
 
-  // Create engine with no-op callback (set later)
-  WebRTCEngine engine(env, nullptr);
+  WebRTCEngine engine(env);
 
   if (!engine.Init()) {
     std::cerr << "Failed to initialize WebRTC engine" << std::endl;
@@ -67,9 +66,7 @@ int main(int argc, char* argv[]) {
   } else {
     std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
     UnixSocketServer unix_server(sock_path, &engine);
-    engine.SetEventCallback([&](const std::string& json) {
-      unix_server.SendToClient(json);
-    });
+    engine.RegisterObserver(&unix_server);
     unix_server.Start();
     std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
     unix_server.Wait();
