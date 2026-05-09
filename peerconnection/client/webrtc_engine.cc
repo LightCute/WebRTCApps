@@ -863,23 +863,18 @@ void WebRTCEngine::AddTracks() {
     return;  // Already added tracks.
   }
 
-  // Audio track: select source based on --audio-source flag
+  // Audio track: create SHM source if requested, else ADM via pipeline
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
   std::string audio_source = absl::GetFlag(FLAGS_audio_source);
   if (audio_source == "shm") {
-    local_audio_source_ = ShmAudioCapturer::Create(
+    shm_source = ShmAudioCapturer::Create(
         shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!local_audio_source_) {
+    if (!shm_source)
       RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
-      local_audio_source_ =
-          factory_->CreateAudioSource(webrtc::AudioOptions());
-    }
-  } else {
-    local_audio_source_ =
-        factory_->CreateAudioSource(webrtc::AudioOptions());
   }
 
-  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
-      factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get()));
+  local_audio_source_ = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get());
   auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
   if (!result_or_error.ok()) {
     RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
