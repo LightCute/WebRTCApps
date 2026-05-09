@@ -23,6 +23,8 @@ rtc_executable("peerconnection_client") {
     "flag_defs.h",
     "json_helpers.cc",
     "json_helpers.h",
+    "pc_factory.cc",
+    "pc_factory.h",
     "peer_connection_client.cc",
     "peer_connection_client.h",
     "signaling_interface.h",

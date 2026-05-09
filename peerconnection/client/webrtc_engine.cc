@@ -10,6 +10,7 @@
 
 #include "apps/peerconnection/client/webrtc_engine.h"
 #include "apps/peerconnection/client/json_helpers.h"
+#include "apps/peerconnection/client/pc_factory.h"
 #include "apps/peerconnection/client/peer_connection_client.h"
 
 #pragma GCC diagnostic push
@@ -922,40 +923,17 @@ bool WebRTCEngine::InitializePeerConnection() {
     }
   }
 
-  webrtc::PeerConnectionFactoryDependencies deps;
-  deps.network_thread = network_thread_.get();
-  deps.worker_thread = worker_thread_.get();
-  deps.signaling_thread = signaling_thread_.get();
-  deps.env = env_;
-  deps.adm = audio_device_module_;
-  deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
-  deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  deps.video_encoder_factory =
-      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
-          webrtc::LibvpxVp8EncoderTemplateAdapter,
-          webrtc::LibvpxVp9EncoderTemplateAdapter,
-          webrtc::OpenH264EncoderTemplateAdapter,
-          webrtc::LibaomAv1EncoderTemplateAdapter>>();
-  deps.video_decoder_factory =
-      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
-          webrtc::LibvpxVp8DecoderTemplateAdapter,
-          webrtc::LibvpxVp9DecoderTemplateAdapter,
-          webrtc::OpenH264DecoderTemplateAdapter,
-          webrtc::Dav1dDecoderTemplateAdapter>>();
-  webrtc::EnableMedia(deps);
-  factory_ =
-      webrtc::CreateModularPeerConnectionFactory(std::move(deps));
-
-  if (!factory_) {
-    RTC_LOG(LS_ERROR) << "Failed to initialize PeerConnectionFactory";
+  auto pc = PcFactory::Create(network_thread_.get(), worker_thread_.get(),
+                               signaling_thread_.get(), env_,
+                               audio_device_module_.get(), this);
+  if (!pc.factory || !pc.connection) {
+    RTC_LOG(LS_ERROR) << "Failed to create PeerConnection";
     DeletePeerConnection();
     return false;
   }
-
-  if (!CreatePeerConnection()) {
-    RTC_LOG(LS_ERROR) << "CreatePeerConnection failed";
-    DeletePeerConnection();
-  }
+  factory_ = std::move(pc.factory);
+  peer_connection_ = std::move(pc.connection);
+  connection_active_.store(true, std::memory_order_release);
 
   AddTracks();
 
@@ -965,34 +943,6 @@ bool WebRTCEngine::InitializePeerConnection() {
   });
   AddDataChannel();
 
-  return peer_connection_ != nullptr;
-}
-
-bool WebRTCEngine::CreatePeerConnection() {
-  RTC_DCHECK(factory_);
-  RTC_DCHECK(!peer_connection_);
-
-  webrtc::PeerConnectionInterface::RTCConfiguration config;
-  config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-
-  webrtc::PeerConnectionInterface::IceServer stun_server;
-  stun_server.uri = GetSTUNServer();
-  config.servers.push_back(stun_server);
-
-  webrtc::PeerConnectionInterface::IceServer turn_server;
-  turn_server.uri = GetTURNServer();
-  turn_server.username = GetTurnUserName();
-  turn_server.password = GetTurnPassword();
-  config.servers.push_back(turn_server);
-
-  webrtc::PeerConnectionDependencies pc_dependencies(this);
-  auto error_or_peer_connection =
-      factory_->CreatePeerConnectionOrError(
-          config, std::move(pc_dependencies));
-  if (error_or_peer_connection.ok()) {
-    peer_connection_ = std::move(error_or_peer_connection.value());
-    connection_active_.store(true, std::memory_order_release);
-  }
   return peer_connection_ != nullptr;
 }
 

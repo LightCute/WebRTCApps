@@ -94,7 +94,6 @@ class WebRTCEngine : public EngineController,
  private:
   // Internal helpers (ported from Conductor)
   bool InitializePeerConnection();
-  bool CreatePeerConnection();
   void DeletePeerConnection();
   void AddTracks();
   void AddDataChannel();
