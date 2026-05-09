@@ -13,8 +13,6 @@ rtc_executable("peerconnection_client") {
 
   sources = [
     "main.cc",
-    "media_pipeline.cc",
-    "media_pipeline.h",
     "cli_runner.cc",
     "cli_runner.h",
     "data_channel_manager.cc",
