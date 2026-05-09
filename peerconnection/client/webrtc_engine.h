@@ -126,6 +126,7 @@ class WebRTCEngine : public EngineController,
   // WebRTC objects
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
   // DataChannel manager
   std::unique_ptr<DataChannelManager> dc_manager_;
 
