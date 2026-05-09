@@ -80,8 +80,6 @@ ABSL_DECLARE_FLAG(std::string, audio_source);
 
 namespace {
 
-using webrtc::test::TestVideoCapturer;
-
 class DummySetSessionDescriptionObserver
     : public webrtc::SetSessionDescriptionObserver {
  public:
@@ -93,80 +91,6 @@ class DummySetSessionDescriptionObserver
     RTC_LOG(LS_INFO) << __FUNCTION__ << " " << ToString(error.type()) << ": "
                      << error.message();
   }
-};
-
-std::unique_ptr<TestVideoCapturer> CreateCapturer(
-    webrtc::TaskQueueFactory& task_queue_factory,
-    int device_idx = -1) {
-  const size_t kWidth = 640;
-  const size_t kHeight = 480;
-  const size_t kFps = 30;
-  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
-      webrtc::VideoCaptureFactory::CreateDeviceInfo());
-  if (info) {
-    int num_devices = info->NumberOfDevices();
-    if (device_idx >= 0 && device_idx < num_devices) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, device_idx);
-      if (capturer) {
-        return capturer;
-      }
-    }
-    for (int i = 0; i < num_devices; ++i) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, i);
-      if (capturer) {
-        return capturer;
-      }
-    }
-  }
-  RTC_LOG(LS_WARNING)
-      << "No video capture device found; using synthetic video.";
-  auto frame_generator = webrtc::test::CreateSquareFrameGenerator(
-      kWidth, kHeight, std::nullopt, std::nullopt);
-  return std::make_unique<webrtc::test::FrameGeneratorCapturer>(
-      webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), kFps,
-      task_queue_factory);
-}
-
-class CapturerTrackSource : public webrtc::VideoTrackSource {
- public:
-  static webrtc::scoped_refptr<CapturerTrackSource> Create(
-      webrtc::TaskQueueFactory& task_queue_factory,
-      int device_idx = -1) {
-    std::unique_ptr<TestVideoCapturer> capturer =
-        CreateCapturer(task_queue_factory, device_idx);
-    if (capturer) {
-      capturer->Start();
-      return webrtc::make_ref_counted<CapturerTrackSource>(std::move(capturer));
-    }
-    return nullptr;
-  }
-
-  void SwapCapturer(std::unique_ptr<TestVideoCapturer> new_capturer) {
-    if (!new_capturer) return;
-    RTC_LOG(LS_INFO) << "Swapping video capturer";
-    {
-      std::lock_guard<std::mutex> lock(capturer_mutex_);
-      capturer_->Stop();
-      capturer_ = std::move(new_capturer);
-      capturer_->Start();
-    }
-  }
-
- protected:
-  explicit CapturerTrackSource(std::unique_ptr<TestVideoCapturer> capturer)
-      : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
-
-  ~CapturerTrackSource() override = default;
-
- private:
-  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
-    return capturer_.get();
-  }
-
-  std::mutex capturer_mutex_;
-  std::unique_ptr<TestVideoCapturer> capturer_;
 };
 
 }  // namespace
@@ -508,18 +432,7 @@ void WebRTCEngine::SetVideoDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  if (!local_video_source_) {
-    RTC_LOG(LS_WARNING) << "No local video source to swap";
-    return;
-  }
-  auto new_capturer = CreateCapturer(env_.task_queue_factory(), device_idx);
-  if (!new_capturer) {
-    RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
-    return;
-  }
-  auto* capturer_source = static_cast<CapturerTrackSource*>(local_video_source_.get());
-  capturer_source->SwapCapturer(std::move(new_capturer));
-  if (pipeline_) pipeline_->set_video_device_idx(device_idx);
+  pipeline_->SetVideoDevice(device_idx, local_video_source_.get());
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
@@ -973,7 +886,7 @@ void WebRTCEngine::AddTracks() {
                       << result_or_error.error().message();
   }
 
-  local_video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
+  local_video_source_ = MediaPipeline::CreateVideoCapturer(env_);
   if (local_video_source_) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
         factory_->CreateVideoTrack(local_video_source_, kVideoLabel));

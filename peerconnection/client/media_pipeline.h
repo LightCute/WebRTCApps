@@ -22,7 +22,14 @@ class MediaPipeline {
   bool CreateAudioDeviceModule();
   webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
 
-  // ---- Device state ----
+  // ---- Video source (capturer factory, Step 4a) ----
+  static webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
+  CreateVideoCapturer(const webrtc::Environment& env);
+
+  // ---- Device management ----
+  void SetVideoDevice(int device_idx,
+                      webrtc::VideoTrackSourceInterface* video_source);
+
   void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
 
