@@ -4,11 +4,6 @@
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
-#include "absl/flags/declare.h"
-#include "absl/flags/flag.h"
-
-ABSL_DECLARE_FLAG(std::string, audio_source);
-
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -27,7 +22,6 @@ ABSL_DECLARE_FLAG(std::string, audio_source);
 #include "api/test/create_frame_generator.h"
 #include "api/video/video_source_interface.h"
 #include "apps/peerconnection/client/defaults.h"
-#include "apps/peerconnection/client/shm_audio_reader.h"
 #include "json/json.h"
 #include "modules/video_capture/video_capture.h"
 #include "modules/video_capture/video_capture_factory.h"
@@ -122,11 +116,9 @@ class CapturerTrackSource : public webrtc::VideoTrackSource {
 // ==================== MediaManager ====================
 
 MediaManager::MediaManager(const webrtc::Environment& env,
-                           webrtc::Thread* worker_thread,
-                           webrtc::Thread* signaling_thread)
+                           webrtc::Thread* worker_thread)
     : env_(env),
-      worker_thread_(worker_thread),
-      signaling_thread_(signaling_thread) {}
+      worker_thread_(worker_thread) {}
 
 MediaManager::~MediaManager() = default;
 
@@ -153,21 +145,15 @@ webrtc::AudioDeviceModule* MediaManager::GetADM() const {
 
 bool MediaManager::AddTracks(
     webrtc::PeerConnectionFactoryInterface* factory,
-    webrtc::PeerConnectionInterface* pc) {
+    webrtc::PeerConnectionInterface* pc,
+    webrtc::AudioSourceInterface* external_audio_source) {
   if (!pc->GetSenders().empty()) {
     return true;  // Already added tracks.
   }
 
-  // Audio track: select source based on --audio-source flag
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    audio_source_ = WebRTCEngine::ShmAudioSource::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!audio_source_) {
-      RTC_LOG(LS_ERROR)
-          << "Failed to create ShmAudioSource, falling back to ADM";
-      audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
-    }
+  // Audio track: use external source if provided, otherwise create from ADM
+  if (external_audio_source) {
+    audio_source_ = external_audio_source;
   } else {
     audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
   }
