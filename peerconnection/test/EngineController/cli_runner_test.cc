@@ -1,5 +1,10 @@
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
 #include <cassert>
 #include <cstdio>
+#include <sstream>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -13,6 +18,8 @@
 
 #include "apps/peerconnection/client/cli_runner.h"
 #include "apps/peerconnection/test/EngineController/fake_engine_controller.h"
+
+#pragma GCC diagnostic pop
 
 // ---- stdin/stdout redirection helpers ----
 
@@ -56,7 +63,7 @@ struct IORedirect {
   std::string read_out() {
     char buf[4096];
     ssize_t n = ::read(stdout_pipe[0], buf, sizeof(buf) - 1);
-    if (n > 0) { buf[n] = '\0'; return std::string(buf, n); }
+    if (n > 0) return std::string(buf, static_cast<size_t>(n));
     return "";
   }
 };
@@ -66,22 +73,27 @@ struct IORedirect {
 static int tests_run = 0;
 static int tests_failed = 0;
 
+// Use stderr for test output so it's not swallowed by stdout redirection
 #define TEST(name)                                \
   do {                                            \
     tests_run++;                                  \
-    std::cout << "  " << name << " ... ";         \
+    std::cerr << "  " << name << " ... ";         \
   } while (0)
 
 #define PASS()                                    \
   do {                                            \
-    std::cout << "PASS" << std::endl;             \
+    std::cerr << "PASS" << std::endl;             \
   } while (0)
 
-#define FAIL(reason)                                                      \
+#define FAIL_MSG(msg)                                                      \
   do {                                                                    \
     tests_failed++;                                                       \
-    std::cout << "FAIL (" << __LINE__ << "): " << reason << std::endl;   \
+    std::ostringstream _os;                                               \
+    _os << msg;                                                           \
+    std::cerr << "FAIL (" << __LINE__ << "): " << _os.str() << std::endl;\
   } while (0)
+
+#define FAIL(reason) FAIL_MSG(reason)
 
 #define CHECK(cond, reason) \
   do {                      \
@@ -92,6 +104,22 @@ static int tests_failed = 0;
   } while (0)
 
 // ---- test cases ----
+
+#define REQUIRE_CALLS(vec, n)                                               \
+  do {                                                                      \
+    if ((vec).size() < (size_t)(n)) {                                       \
+      FAIL_MSG("expected >= " << (n) << " calls, got " << (vec).size());    \
+      return;                                                               \
+    }                                                                       \
+  } while (0)
+
+#define FIND_CALL(vec, method_name, found)                           \
+  do {                                                               \
+    found = false;                                                   \
+    for (auto& c : (vec)) {                                          \
+      if (c.method == (method_name)) { found = true; break; }        \
+    }                                                                \
+  } while (0)
 
 // Helper: run CliRunner::InputLoop in a background thread so we can feed
 // commands and check results. The CliRunner must NOT be destroyed until the
@@ -125,7 +153,7 @@ void test_connect_command() {
   CliTest t("10.0.1.2", 7777, false, false);
   t.start();
   t.feed_and_wait({"connect", "quit"});
-  CHECK(t.fake.calls.size() >= 2, "at least 2 calls (RegisterObserver + ConnectToServer)");
+  REQUIRE_CALLS(t.fake.calls, 2);
   CHECK(t.fake.calls[0].method == "RegisterObserver", "first call is RegisterObserver");
   CHECK(t.fake.calls[1].method == "ConnectToServer", "ConnectToServer");
   CHECK(t.fake.calls[1].arg_str == "10.0.1.2", "server arg");
@@ -361,7 +389,7 @@ void test_stop_stops_loop() {
 // ---- main ----
 
 int main() {
-  std::cout << "=== CliRunner Tests ===" << std::endl;
+  std::cerr << "=== CliRunner Tests ===" << std::endl;
 
   test_connect_command();
   test_disconnect_command();
@@ -384,7 +412,7 @@ int main() {
   test_autocall_only_once();
   test_stop_stops_loop();
 
-  std::cout << std::endl
+  std::cerr << std::endl
             << tests_run << " tests, " << tests_failed << " failed"
             << std::endl;
   return tests_failed ? 1 : 0;

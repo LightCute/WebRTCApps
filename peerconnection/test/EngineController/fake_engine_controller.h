@@ -29,8 +29,14 @@ class FakeEngineController : public EngineController {
 
   // ---- EngineController ----
 
-  void RegisterObserver(EngineObserver* obs) override { observer = obs; }
-  void UnregisterObserver() override { observer = nullptr; }
+  void RegisterObserver(EngineObserver* obs) override {
+    calls.push_back({"RegisterObserver"});
+    observer = obs;
+  }
+  void UnregisterObserver() override {
+    calls.push_back({"UnregisterObserver"});
+    observer = nullptr;
+  }
 
   void ConnectToServer(const std::string& server, int port) override {
     calls.push_back({"ConnectToServer", server, port});

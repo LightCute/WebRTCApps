@@ -151,6 +151,7 @@ rtc_executable("cli_runner_test") {
   ]
 
   # cli_runner depends only on engine_controller.h (pure virtual, zero deps)
+  deps = []
   cflags = [ "-Wno-deprecated-declarations" ]
   libs = [
     "pthread",
