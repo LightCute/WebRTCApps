@@ -6,6 +6,7 @@
 #include "api/audio/audio_device.h"
 #include "api/environment/environment.h"
 #include "api/media_stream_interface.h"
+#include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
 #include "apps/peerconnection/client/shm_audio_renderer.h"
 #include "apps/peerconnection/client/shm_video_renderer.h"
@@ -22,8 +23,11 @@ class MediaPipeline {
   bool CreateAudioDeviceModule();
   webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
 
-  // ---- Video source ----
+  // ---- Sources ----
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
+  webrtc::AudioSourceInterface* CreateAudioSource(
+      webrtc::PeerConnectionFactoryInterface* factory,
+      webrtc::AudioSourceInterface* external_source = nullptr);
 
   // ---- Device management ----
   void SetVideoDevice(int device_idx,
@@ -48,6 +52,7 @@ class MediaPipeline {
   webrtc::Thread* const worker_thread_;
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source_;
 
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;

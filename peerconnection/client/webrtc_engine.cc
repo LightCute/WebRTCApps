@@ -171,7 +171,6 @@ void WebRTCEngine::Shutdown() {
   pipeline_->StopLocalRenderer();
   pipeline_->StopRemoteRenderer();
   pipeline_->StopRemoteAudioRenderer();
-  local_audio_source_ = nullptr;
 
   if (pipeline_)
     pipeline_->Shutdown();
@@ -587,7 +586,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     auto f = std::move(factory_);
     auto vs = std::move(local_video_source_);
     auto adm = pipeline_->adm();
-    auto las = std::move(local_audio_source_);
     pipeline_->StopLocalRenderer();
     pipeline_->StopRemoteRenderer();
     pipeline_->StopRemoteAudioRenderer();
@@ -596,8 +594,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     loopback_ = false;
     signaling_->Close();
     signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
-                                  vs = std::move(vs), adm = std::move(adm),
-                                  las = std::move(las)]() mutable {
+                                  adm = std::move(adm)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
         pending_messages_.pop_front();
@@ -613,8 +610,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
       pc->Close();
       pc = nullptr;
       f = nullptr;
-      vs = nullptr;
-      las = nullptr;
     });
     // Auto-reconnect after cleanup (server has removed the old member entry).
     signaling_thread_->PostDelayedTask(
@@ -849,7 +844,6 @@ void WebRTCEngine::DeletePeerConnection() {
   pipeline_->StopRemoteRenderer();
   pipeline_->StopRemoteAudioRenderer();
   dc_manager_->Shutdown();
-  local_audio_source_ = nullptr;
   peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
@@ -863,26 +857,21 @@ void WebRTCEngine::AddTracks() {
     return;  // Already added tracks.
   }
 
-  // Audio track: select source based on --audio-source flag
+  // Audio track: create SHM source if requested, else ADM via pipeline
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
   std::string audio_source = absl::GetFlag(FLAGS_audio_source);
   if (audio_source == "shm") {
-    local_audio_source_ = ShmAudioCapturer::Create(
+    shm_source = ShmAudioCapturer::Create(
         shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!local_audio_source_) {
+    if (!shm_source)
       RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
-      local_audio_source_ =
-          factory_->CreateAudioSource(webrtc::AudioOptions());
-    }
-  } else {
-    local_audio_source_ =
-        factory_->CreateAudioSource(webrtc::AudioOptions());
   }
 
-  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
-      factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get()));
+  auto* audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
   auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
   if (!result_or_error.ok()) {
-    RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
+    RTC_LOG(LS_ERROR) << "Failed to add audio track: "
                       << result_or_error.error().message();
   }
 
