@@ -14,11 +14,6 @@
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
-#include "absl/flags/declare.h"
-#include "absl/flags/flag.h"
-
-ABSL_DECLARE_FLAG(std::string, audio_source);
-
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -99,80 +94,6 @@ class DummySetSessionDescriptionObserver
     RTC_LOG(LS_INFO) << __FUNCTION__ << " " << ToString(error.type()) << ": "
                      << error.message();
   }
-};
-
-std::unique_ptr<TestVideoCapturer> CreateCapturer(
-    webrtc::TaskQueueFactory& task_queue_factory,
-    int device_idx = -1) {
-  const size_t kWidth = 640;
-  const size_t kHeight = 480;
-  const size_t kFps = 30;
-  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
-      webrtc::VideoCaptureFactory::CreateDeviceInfo());
-  if (info) {
-    int num_devices = info->NumberOfDevices();
-    if (device_idx >= 0 && device_idx < num_devices) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, device_idx);
-      if (capturer) {
-        return capturer;
-      }
-    }
-    for (int i = 0; i < num_devices; ++i) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, i);
-      if (capturer) {
-        return capturer;
-      }
-    }
-  }
-  RTC_LOG(LS_WARNING)
-      << "No video capture device found; using synthetic video.";
-  auto frame_generator = webrtc::test::CreateSquareFrameGenerator(
-      kWidth, kHeight, std::nullopt, std::nullopt);
-  return std::make_unique<webrtc::test::FrameGeneratorCapturer>(
-      webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), kFps,
-      task_queue_factory);
-}
-
-class CapturerTrackSource : public webrtc::VideoTrackSource {
- public:
-  static webrtc::scoped_refptr<CapturerTrackSource> Create(
-      webrtc::TaskQueueFactory& task_queue_factory,
-      int device_idx = -1) {
-    std::unique_ptr<TestVideoCapturer> capturer =
-        CreateCapturer(task_queue_factory, device_idx);
-    if (capturer) {
-      capturer->Start();
-      return webrtc::make_ref_counted<CapturerTrackSource>(std::move(capturer));
-    }
-    return nullptr;
-  }
-
-  void SwapCapturer(std::unique_ptr<TestVideoCapturer> new_capturer) {
-    if (!new_capturer) return;
-    RTC_LOG(LS_INFO) << "Swapping video capturer";
-    {
-      std::lock_guard<std::mutex> lock(capturer_mutex_);
-      capturer_->Stop();
-      capturer_ = std::move(new_capturer);
-      capturer_->Start();
-    }
-  }
-
- protected:
-  explicit CapturerTrackSource(std::unique_ptr<TestVideoCapturer> capturer)
-      : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
-
-  ~CapturerTrackSource() override = default;
-
- private:
-  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
-    return capturer_.get();
-  }
-
-  std::mutex capturer_mutex_;
-  std::unique_ptr<TestVideoCapturer> capturer_;
 };
 
 // JSON escaping helper for data channel messages.
@@ -491,16 +412,8 @@ void WebRTCEngine::UnregisterObserver() {
 WebRTCEngine::~WebRTCEngine() {
   RTC_DCHECK(!peer_connection_);
 
-  // Stop ADM on worker thread if it exists.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (media_)
+    media_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -545,18 +458,9 @@ void WebRTCEngine::Shutdown() {
   StopLocalShmRenderer();
   StopRemoteShmRenderer();
   StopRemoteAudioShmRenderer();
-  local_audio_source_ = nullptr;
 
-  // Stop ADM on worker thread.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (media_)
+    media_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -657,14 +561,7 @@ void WebRTCEngine::SetAudioMuted(bool muted) {
 }
 
 void WebRTCEngine::SetAudioMutedImpl(bool muted) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (audio_device_module_) {
-    if (muted) {
-      audio_device_module_->StopRecording();
-    }
-    // Resume recording on unmute is left as a future enhancement.
-  }
+  media_->SetAudioMuted(muted);
 }
 
 void WebRTCEngine::SetVideoPaused(bool paused) {
@@ -676,18 +573,7 @@ void WebRTCEngine::SetVideoPaused(bool paused) {
 }
 
 void WebRTCEngine::SetVideoPausedImpl(bool paused) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
-  if (peer_connection_) {
-    auto senders = peer_connection_->GetSenders();
-    for (auto& sender : senders) {
-      if (sender->track() &&
-          sender->track()->kind() ==
-              webrtc::MediaStreamTrackInterface::kVideoKind) {
-        sender->track()->set_enabled(!paused);
-      }
-    }
-  }
+  media_->SetVideoPaused(paused, peer_connection_.get());
 }
 
 void WebRTCEngine::SendData(const std::string& text) {
@@ -718,96 +604,7 @@ void WebRTCEngine::QueryDevices() {
 }
 
 void WebRTCEngine::QueryDevicesImpl() {
-  // ADM is created by InitializePeerConnection() when a call starts.
-  // Don't create it here — PulseAudio init crashes in some environments.
-  if (!audio_device_module_ && worker_thread_) {
-    // Skip ADM creation; audio device list will be empty until first call.
-  }
-
-  Json::Value video_arr(Json::arrayValue);
-  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
-  if (info) {
-    int n = info->NumberOfDevices();
-    char name[256];
-    char id[256];
-    for (int i = 0; i < n; ++i) {
-      if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id)) == 0) {
-        Json::Value dev;
-        dev["idx"] = i;
-        dev["name"] = name;
-        video_arr.append(dev);
-      }
-    }
-  }
-  Json::StreamWriterBuilder factory;
-  factory["indentation"] = "";
-  Json::Value video_event;
-  video_event["event"] = "video_devices";
-  video_event["devices"] = video_arr;
-  if (observer_) observer_->OnEngineEvent(Json::writeString(factory, video_event));
-
-  Json::Value audio_arr(Json::arrayValue);
-  if (audio_device_module_ && worker_thread_) {
-    audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
-      Json::Value arr(Json::arrayValue);
-      int16_t n = audio_device_module_->RecordingDevices();
-      char name[webrtc::kAdmMaxDeviceNameSize];
-      char guid[webrtc::kAdmMaxGuidSize];
-      for (int16_t i = 0; i < n; ++i) {
-        if (audio_device_module_->RecordingDeviceName(i, name, guid) == 0) {
-          Json::Value dev;
-          dev["idx"] = i;
-          dev["name"] = name;
-          arr.append(dev);
-        }
-      }
-      return arr;
-    });
-  }
-  // Only emit ADM results if non-empty; otherwise fall through to ALSA
-  if (!audio_arr.empty()) {
-    Json::Value audio_event;
-    audio_event["event"] = "audio_input_devices";
-    audio_event["devices"] = audio_arr;
-    if (observer_) observer_->OnEngineEvent(Json::writeString(factory, audio_event));
-  }
-
-  // ALSA fallback: use arecord -l when ADM enumeration returns empty.
-  // ADM RecordingDevices requires InitRecording which crashes PulseAudio
-  // in some environments (safe_conversions overflow).
-  if (audio_arr.empty()) {
-    FILE* fp = popen("arecord -l 2>/dev/null", "r");
-    if (fp) {
-      Json::Value alsa_arr(Json::arrayValue);
-      char line[256];
-      int idx = 0;
-      while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "card ") == line && strstr(line, "device ")) {
-          char* desc_begin = strrchr(line, '[');
-          char* desc_end = desc_begin ? strrchr(line, ']') : nullptr;
-          char name[256];
-          if (desc_begin && desc_end && desc_end > desc_begin) {
-            size_t len = desc_end - desc_begin - 1;
-            snprintf(name, sizeof(name), "%.*s", (int)len, desc_begin + 1);
-          } else {
-            snprintf(name, sizeof(name), "Capture device %d", idx);
-          }
-          Json::Value dev;
-          dev["idx"] = idx;
-          dev["name"] = name;
-          alsa_arr.append(dev);
-          idx++;
-        }
-      }
-      pclose(fp);
-      if (!alsa_arr.empty()) {
-        Json::Value alsa_event;
-        alsa_event["event"] = "audio_input_devices";
-        alsa_event["devices"] = alsa_arr;
-        if (observer_) observer_->OnEngineEvent(Json::writeString(factory, alsa_event));
-      }
-    }
-  }
+  media_->QueryDevices();
 }
 
 void WebRTCEngine::SetVideoDevice(int device_idx) {
@@ -819,18 +616,7 @@ void WebRTCEngine::SetVideoDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  if (!local_video_source_) {
-    RTC_LOG(LS_WARNING) << "No local video source to swap";
-    return;
-  }
-  auto new_capturer = CreateCapturer(env_.task_queue_factory(), device_idx);
-  if (!new_capturer) {
-    RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
-    return;
-  }
-  auto* capturer_source = static_cast<CapturerTrackSource*>(local_video_source_.get());
-  capturer_source->SwapCapturer(std::move(new_capturer));
-  current_video_device_idx_ = device_idx;
+  media_->SetVideoDevice(device_idx);
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
@@ -842,21 +628,7 @@ void WebRTCEngine::SetAudioInputDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
-  current_audio_input_device_idx_ = device_idx;
-  if (!audio_device_module_) return;
-  // Apply device change. If not recording yet, recording will use this device
-  // when it starts via the factory. If already recording mid-call, restart.
-  worker_thread_->BlockingCall([this, device_idx] {
-    bool was_recording = audio_device_module_->Recording();
-    if (was_recording) {
-      audio_device_module_->StopRecording();
-      audio_device_module_->SetRecordingDevice(device_idx);
-      audio_device_module_->InitRecording();
-      audio_device_module_->StartRecording();
-    } else {
-      audio_device_module_->SetRecordingDevice(device_idx);
-    }
-  });
+  media_->SetAudioInputDevice(device_idx);
 }
 
 bool WebRTCEngine::connection_active() const {
@@ -997,9 +769,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     int saved_port = server_port_;
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
-    auto vs = std::move(local_video_source_);
-    auto adm = std::move(audio_device_module_);
-    auto las = std::move(local_audio_source_);
     StopLocalShmRenderer();
     StopRemoteShmRenderer();
     StopRemoteAudioShmRenderer();
@@ -1007,26 +776,16 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     peer_id_ = -1;
     loopback_ = false;
     signaling_client_.Close();
-    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
-                                  vs = std::move(vs), adm = std::move(adm),
-                                  las = std::move(las)]() mutable {
+    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
         pending_messages_.pop_front();
       }
-      // Stop ADM asynchronously — the worker thread handles it.
-      if (adm && worker_thread_) {
-        worker_thread_->PostTask([adm]() mutable {
-          if (adm->Playing()) adm->StopPlayout();
-          if (adm->Recording()) adm->StopRecording();
-          adm = nullptr;
-        });
-      }
+      if (media_)
+        media_->Shutdown();
       pc->Close();
       pc = nullptr;
       f = nullptr;
-      vs = nullptr;
-      las = nullptr;
     });
     // Auto-reconnect after cleanup (server has removed the old member entry).
     signaling_thread_->PostDelayedTask(
@@ -1235,15 +994,16 @@ bool WebRTCEngine::InitializePeerConnection() {
     }
   }
 
-  if (!audio_device_module_) {
-    // Pulse/ALSA ADM has thread-affinity checks, so create it on the same
-    // worker thread that will later initialize and drive it.
-    audio_device_module_ = worker_thread_->BlockingCall([this] {
-      return webrtc::CreateAudioDeviceModule(
-          env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+  if (!media_) {
+    media_ = std::make_unique<MediaManager>(env_, worker_thread_.get(),
+                                            signaling_thread_.get());
+    media_->SetEventCallback([this](const std::string& json) {
+      if (observer_) observer_->OnEngineEvent(json);
     });
+  }
 
-    if (!audio_device_module_) {
+  if (!media_->GetADM()) {
+    if (!media_->CreateAudioDeviceModule()) {
       RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
       return false;
     }
@@ -1254,7 +1014,7 @@ bool WebRTCEngine::InitializePeerConnection() {
   deps.worker_thread = worker_thread_.get();
   deps.signaling_thread = signaling_thread_.get();
   deps.env = env_;
-  deps.adm = audio_device_module_;
+  deps.adm = media_->GetADM();
   deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
   deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
   deps.video_encoder_factory =
@@ -1329,60 +1089,28 @@ void WebRTCEngine::DeletePeerConnection() {
   StopRemoteShmRenderer();
   StopRemoteAudioShmRenderer();
   data_channel_ = nullptr;
-  local_audio_source_ = nullptr;
   peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
-  local_video_source_ = nullptr;
   peer_id_ = -1;
   loopback_ = false;
 }
 
 void WebRTCEngine::AddTracks() {
-  if (!peer_connection_->GetSenders().empty()) {
-    return;  // Already added tracks.
-  }
+  if (!media_->AddTracks(factory_.get(), peer_connection_.get()))
+    return;
 
-  // Audio track: select source based on --audio-source flag
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    local_audio_source_ = ShmAudioSource::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!local_audio_source_) {
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioSource, falling back to ADM";
-      local_audio_source_ =
-          factory_->CreateAudioSource(webrtc::AudioOptions());
+  // Wire local SHM renderer to the video track created by MediaManager
+  auto senders = peer_connection_->GetSenders();
+  for (auto& sender : senders) {
+    if (sender->track() &&
+        sender->track()->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
+      auto* video_track =
+          static_cast<webrtc::VideoTrackInterface*>(sender->track().get());
+      StartLocalShmRenderer(video_track);
+      break;
     }
-  } else {
-    local_audio_source_ =
-        factory_->CreateAudioSource(webrtc::AudioOptions());
   }
-
-  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
-      factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get()));
-  auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
-  if (!result_or_error.ok()) {
-    RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
-                      << result_or_error.error().message();
-  }
-
-  local_video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
-  if (local_video_source_) {
-    webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
-        factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
-    StartLocalShmRenderer(video_track_.get());
-
-    result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
-    if (!result_or_error.ok()) {
-      RTC_LOG(LS_ERROR) << "Failed to add video track to PeerConnection: "
-                        << result_or_error.error().message();
-    }
-  } else {
-    RTC_LOG(LS_WARNING)
-        << "No local video track; proceeding without local video";
-  }
-
-  if (observer_) observer_->OnEngineEvent(R"({"event":"call_connected"})");
 }
 
 void WebRTCEngine::AddDataChannel() {

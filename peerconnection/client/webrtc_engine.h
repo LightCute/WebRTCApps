@@ -26,6 +26,7 @@
 #include "apps/peerconnection/client/shm_video_writer.h"
 #include "apps/peerconnection/client/shm_audio_writer.h"
 #include "apps/peerconnection/client/engine_controller.h"
+#include "apps/peerconnection/client/media_manager.h"
 #include "apps/peerconnection/client/shm_audio_reader.h"
 #include "rtc_base/thread.h"
 
@@ -214,11 +215,12 @@ class WebRTCEngine : public EngineController,
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
 
+  // Media manager (owns ADM + video/audio sources + device state)
+  std::unique_ptr<MediaManager> media_;
+
   // WebRTC objects
-  webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
-  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
   webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
 
   // Signaling client
@@ -230,7 +232,6 @@ class WebRTCEngine : public EngineController,
 
   // SHM audio
   std::unique_ptr<ShmAudioSink> remote_audio_sink_;
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
 
   // State
   int peer_id_ = -1;
@@ -239,10 +240,6 @@ class WebRTCEngine : public EngineController,
   std::string server_;
   int server_port_ = 8888;
   std::deque<std::string*> pending_messages_;
-
-  // Device state
-  int current_video_device_idx_ = -1;
-  int current_audio_input_device_idx_ = -1;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
