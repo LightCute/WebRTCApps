@@ -22,9 +22,8 @@ class MediaPipeline {
   bool CreateAudioDeviceModule();
   webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
 
-  // ---- Video source (capturer factory, Step 4a) ----
-  static webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
-  CreateVideoCapturer(const webrtc::Environment& env);
+  // ---- Video source ----
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
 
   // ---- Device management ----
   void SetVideoDevice(int device_idx,
@@ -48,6 +47,7 @@ class MediaPipeline {
   const webrtc::Environment& env_;
   webrtc::Thread* const worker_thread_;
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;
 
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;

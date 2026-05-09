@@ -119,8 +119,9 @@ bool MediaPipeline::CreateAudioDeviceModule() {
 // ---- Video source ----
 
 webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
-MediaPipeline::CreateVideoCapturer(const webrtc::Environment& env) {
-  return CapturerTrackSource::Create(env.task_queue_factory());
+MediaPipeline::CreateVideoSource() {
+  video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
+  return video_source_;
 }
 
 // ---- Device management ----
@@ -203,6 +204,7 @@ void MediaPipeline::Shutdown() {
   local_renderer_.reset();
   remote_renderer_.reset();
   remote_audio_renderer_.reset();
+  video_source_ = nullptr;
   if (adm_ && worker_thread_) {
     auto adm = std::move(adm_);
     adm_ = nullptr;

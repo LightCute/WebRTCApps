@@ -886,7 +886,7 @@ void WebRTCEngine::AddTracks() {
                       << result_or_error.error().message();
   }
 
-  local_video_source_ = MediaPipeline::CreateVideoCapturer(env_);
+  local_video_source_ = pipeline_->CreateVideoSource();
   if (local_video_source_) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
         factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
