@@ -9,6 +9,7 @@
  */
 
 #include "apps/peerconnection/client/webrtc_engine.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
@@ -252,7 +253,8 @@ WebRTCEngine::WebRTCEngine(const webrtc::Environment& env)
       safety_(webrtc::PendingTaskSafetyFlag::Create()),
       peer_id_(-1),
       loopback_(false) {
-  signaling_client_.RegisterObserver(this);
+  signaling_ = std::make_unique<PeerConnectionClient>();
+  signaling_->RegisterObserver(this);
 }
 
 void WebRTCEngine::RegisterObserver(EngineObserver* observer) {
@@ -315,7 +317,7 @@ bool WebRTCEngine::Init() {
 }
 
 void WebRTCEngine::Shutdown() {
-  signaling_client_.SignOut();
+  signaling_->SignOut();
   DeletePeerConnection();
 
   // Clean up pending messages.
@@ -366,11 +368,11 @@ void WebRTCEngine::ConnectToServer(const std::string& server, int port) {
 }
 
 void WebRTCEngine::ConnectToServerImpl(const std::string& server, int port) {
-  if (signaling_client_.is_connected())
+  if (signaling_->is_connected())
     return;
   server_ = server;
   server_port_ = port;
-  signaling_client_.Connect(server, port, GetPeerName());
+  signaling_->Connect(server, port, GetPeerName());
 }
 
 void WebRTCEngine::DisconnectFromServer() {
@@ -382,8 +384,8 @@ void WebRTCEngine::DisconnectFromServer() {
 }
 
 void WebRTCEngine::DisconnectFromServerImpl() {
-  if (signaling_client_.is_connected())
-    signaling_client_.SignOut();
+  if (signaling_->is_connected())
+    signaling_->SignOut();
 }
 
 void WebRTCEngine::ConnectToPeer(int peer_id) {
@@ -426,9 +428,9 @@ void WebRTCEngine::HangUpImpl() {
     // Server-mediated hangup: send /hangup to server, which sends
     // HANGUP_CONFIRM to both parties. Cleanup happens in OnPeerDisconnected
     // when HANGUP_CONFIRM arrives.
-    signaling_client_.SendHangUp(peer_id_);
+    signaling_->SendHangUp(peer_id_);
   }
-  //on_event_(BuildPeerListJson(signaling_client_.peers()));
+  //on_event_(BuildPeerListJson(signaling_->peers()));
 }
 
 void WebRTCEngine::SetAudioMuted(bool muted) {
@@ -742,7 +744,7 @@ void WebRTCEngine::OnSignedIn() {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   if (observer_) observer_->OnEngineEvent(R"({"event":"server_connected"})");
   // Also emit current peer list.
-  const Peers& peers = signaling_client_.peers();
+  const Peers& peers = signaling_->peers();
   if (!peers.empty()) {
     if (observer_) observer_->OnEngineEvent(BuildPeerListJson(peers));
   }
@@ -761,7 +763,7 @@ void WebRTCEngine::OnPeerConnected(int id, const std::string& name) {
   // Emit individual peer event + full peer list.
   if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"peer_online","peer":{"id":)") +
             std::to_string(id) + R"(,"name":")" + name + R"("}})");
-  if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
+  if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
 }
 
 void WebRTCEngine::OnPeerDisconnected(int id) {
@@ -769,9 +771,9 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
   if (id == peer_id_) {
     RTC_LOG(LS_INFO) << "Our peer disconnected";
     // Phase 2 confirmation — must be sent before cleanup.
-    signaling_client_.SendHangUpConfirm();
+    signaling_->SendHangUpConfirm();
     if (observer_) observer_->OnEngineEvent(R"({"event":"call_disconnected"})");
-    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
 
     // Sign out + reconnect: fully reset signaling state so the second
     // call starts from a clean slate (no residual call_partner / hangup
@@ -789,7 +791,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     data_channel_ = nullptr;
     peer_id_ = -1;
     loopback_ = false;
-    signaling_client_.Close();
+    signaling_->Close();
     signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
                                   vs = std::move(vs), adm = std::move(adm),
                                   las = std::move(las)]() mutable {
@@ -823,7 +825,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     // Emit individual offline event + refreshed peer list.
     if (observer_) observer_->OnEngineEvent(R"({"event":"peer_offline","peer_id":)" +
               std::to_string(id) + "}");
-    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_client_.peers()));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
   }
 }
 
@@ -844,7 +846,7 @@ void WebRTCEngine::OnMessageFromPeer(int peer_id,
 
     if (!InitializePeerConnection()) {
       RTC_LOG(LS_ERROR) << "Failed to initialize our PeerConnection instance";
-      signaling_client_.SignOut();
+      signaling_->SignOut();
       return;
     }
   } else if (peer_id != peer_id_) {
@@ -937,11 +939,11 @@ void WebRTCEngine::OnMessageSent(int err) {
 
   RTC_LOG(LS_INFO) << "OnMessageSent";
 
-  if (!pending_messages_.empty() && !signaling_client_.IsSendingMessage()) {
+  if (!pending_messages_.empty() && !signaling_->IsSendingMessage()) {
     std::string* msg = pending_messages_.front();
     pending_messages_.pop_front();
 
-    if (!signaling_client_.SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
+    if (!signaling_->SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
       RTC_LOG(LS_ERROR) << "SendToPeer failed";
       DisconnectFromServer();
     }
@@ -952,9 +954,9 @@ void WebRTCEngine::OnMessageSent(int err) {
     peer_id_ = -1;
 
   // If a hangup was deferred because the control socket was busy, send it now
-  if (pending_hangup_peer_id_ != -1 && !signaling_client_.IsSendingMessage()) {
+  if (pending_hangup_peer_id_ != -1 && !signaling_->IsSendingMessage()) {
     RTC_LOG(LS_INFO) << "Sending deferred BYE to peer " << pending_hangup_peer_id_;
-    signaling_client_.SendHangUp(pending_hangup_peer_id_);
+    signaling_->SendHangUp(pending_hangup_peer_id_);
     pending_hangup_peer_id_ = -1;
   }
 }
@@ -1203,10 +1205,10 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
   // If no message is currently being sent, pop and send the front now.
   // Otherwise, the pending message will be picked up by OnMessageSent when
   // the current send completes.
-  if (!signaling_client_.IsSendingMessage()) {
+  if (!signaling_->IsSendingMessage()) {
     msg = pending_messages_.front();
     pending_messages_.pop_front();
-    if (!signaling_client_.SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
+    if (!signaling_->SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
       RTC_LOG(LS_ERROR) << "SendToPeer failed";
       DisconnectFromServer();
     }

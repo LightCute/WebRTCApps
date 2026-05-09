@@ -23,10 +23,10 @@
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
 #include "apps/peerconnection/client/engine_controller.h"
-#include "apps/peerconnection/client/peer_connection_client.h"
 #include "apps/peerconnection/client/shm_audio_capturer.h"
 #include "apps/peerconnection/client/shm_audio_renderer.h"
 #include "apps/peerconnection/client/shm_video_renderer.h"
+#include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/thread.h"
 
 class WebRTCEngine : public EngineController,
@@ -145,8 +145,8 @@ class WebRTCEngine : public EngineController,
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
   webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
 
-  // Signaling client
-  PeerConnectionClient signaling_client_;
+  // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
+  std::unique_ptr<SignalingInterface> signaling_;
 
   // SHM renderers
   std::unique_ptr<ShmVideoRenderer> local_video_renderer_;

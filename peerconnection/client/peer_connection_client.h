@@ -12,32 +12,16 @@
 #define APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
 
 #include <cstddef>
-#include <map>
 #include <memory>
 #include <string>
 
 #include "api/async_dns_resolver.h"
 #include "api/task_queue/pending_task_safety_flag.h"
+#include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/socket.h"
 #include "rtc_base/socket_address.h"
 
-typedef std::map<int, std::string> Peers;
-
-struct PeerConnectionClientObserver {
-  virtual void OnSignedIn() = 0;  // Called when we're logged on.
-  virtual void OnDisconnected() = 0;
-  virtual void OnPeerConnected(int id, const std::string& name) = 0;
-  virtual void OnPeerDisconnected(int peer_id) = 0;
-  virtual void OnPeerBusy(int peer_id) = 0;
-  virtual void OnMessageFromPeer(int peer_id, const std::string& message) = 0;
-  virtual void OnMessageSent(int err) = 0;
-  virtual void OnServerConnectionFailure() = 0;
-
- protected:
-  virtual ~PeerConnectionClientObserver() {}
-};
-
-class PeerConnectionClient {
+class PeerConnectionClient : public SignalingInterface {
  public:
   enum State {
     NOT_CONNECTED,
@@ -51,23 +35,23 @@ class PeerConnectionClient {
   PeerConnectionClient();
   ~PeerConnectionClient();
 
-  int id() const;
-  bool is_connected() const;
-  const Peers& peers() const;
+  int id() const override;
+  bool is_connected() const override;
+  const Peers& peers() const override;
 
-  void RegisterObserver(PeerConnectionClientObserver* callback);
+  void RegisterObserver(PeerConnectionClientObserver* callback) override;
 
   void Connect(const std::string& server,
                int port,
-               const std::string& client_name);
+               const std::string& client_name) override;
 
-  bool SendToPeer(int peer_id, const std::string& message);
-  bool SendHangUp(int peer_id);
-  void SendHangUpConfirm();
-  bool IsSendingMessage();
+  bool SendToPeer(int peer_id, const std::string& message) override;
+  bool SendHangUp(int peer_id) override;
+  void SendHangUpConfirm() override;
+  bool IsSendingMessage() override;
 
-  bool SignOut();
-  void Close();
+  bool SignOut() override;
+  void Close() override;
 
  protected:
   void DoConnect();

@@ -21,6 +21,7 @@ rtc_executable("peerconnection_client") {
     "flag_defs.h",
     "peer_connection_client.cc",
     "peer_connection_client.h",
+    "signaling_interface.h",
     "shm_audio_capturer.cc",
     "shm_audio_capturer.h",
     "shm_audio_reader.cc",
