@@ -133,6 +133,9 @@ class WebRTCEngine : public EngineController,
   // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
   std::unique_ptr<SignalingInterface> signaling_;
 
+  // SHM audio source (renderers now in MediaPipeline)
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
+
   // State
   int peer_id_ = -1;
   int pending_hangup_peer_id_ = -1;

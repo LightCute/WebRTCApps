@@ -9,7 +9,6 @@
 #include <utility>
 
 #include "api/audio/create_audio_device_module.h"
-#include "api/audio_options.h"
 #include "api/make_ref_counted.h"
 #include "api/task_queue/task_queue_factory.h"
 #include "api/test/create_frame_generator.h"
@@ -117,23 +116,12 @@ bool MediaPipeline::CreateAudioDeviceModule() {
   return true;
 }
 
-// ---- Sources ----
+// ---- Video source ----
 
 webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
 MediaPipeline::CreateVideoSource() {
   video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
   return video_source_;
-}
-
-webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
-    webrtc::PeerConnectionFactoryInterface* factory,
-    webrtc::AudioSourceInterface* external_source) {
-  if (external_source) {
-    audio_source_ = external_source;
-  } else {
-    audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
-  }
-  return audio_source_.get();
 }
 
 // ---- Device management ----
@@ -217,7 +205,6 @@ void MediaPipeline::Shutdown() {
   remote_renderer_.reset();
   remote_audio_renderer_.reset();
   video_source_ = nullptr;
-  audio_source_ = nullptr;
   if (adm_ && worker_thread_) {
     auto adm = std::move(adm_);
     adm_ = nullptr;
