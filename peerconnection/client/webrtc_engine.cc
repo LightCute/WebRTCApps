@@ -167,11 +167,6 @@ void WebRTCEngine::Shutdown() {
     pending_messages_.pop_front();
   }
 
-  // Stop SHM renderers.
-  pipeline_->StopLocalRenderer();
-  pipeline_->StopRemoteRenderer();
-  pipeline_->StopRemoteAudioRenderer();
-
   if (pipeline_)
     pipeline_->Shutdown();
 
@@ -478,9 +473,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
     auto adm = pipeline_->adm();
-    pipeline_->StopLocalRenderer();
-    pipeline_->StopRemoteRenderer();
-    pipeline_->StopRemoteAudioRenderer();
+    pipeline_->Shutdown();
     dc_manager_->Shutdown();
     peer_id_ = -1;
     loopback_ = false;
@@ -735,9 +728,7 @@ void WebRTCEngine::DeletePeerConnection() {
     delete pending_messages_.front();
     pending_messages_.pop_front();
   }
-  pipeline_->StopLocalRenderer();
-  pipeline_->StopRemoteRenderer();
-  pipeline_->StopRemoteAudioRenderer();
+  pipeline_->Shutdown();
   dc_manager_->Shutdown();
   peer_connection_->Close();
   peer_connection_ = nullptr;
