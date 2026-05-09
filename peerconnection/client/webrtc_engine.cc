@@ -353,7 +353,7 @@ void WebRTCEngine::SetAudioMuted(bool muted) {
 void WebRTCEngine::SetAudioMutedImpl(bool muted) {
   // Stub: log and set internal state. Full implementation can follow.
   RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (pipeline_->adm()) {
+  if (pipeline_ && pipeline_->adm()) {
     if (muted) {
       pipeline_->adm()->StopRecording();
     }
@@ -409,7 +409,7 @@ void WebRTCEngine::QueryDevices() {
 void WebRTCEngine::QueryDevicesImpl() {
   // ADM is created by InitializePeerConnection() when a call starts.
   // Don't create it here — PulseAudio init crashes in some environments.
-  if (!pipeline_->adm() && worker_thread_) {
+  if (!pipeline_ || (!pipeline_->adm() && worker_thread_)) {
     // Skip ADM creation; audio device list will be empty until first call.
   }
 
@@ -436,7 +436,7 @@ void WebRTCEngine::QueryDevicesImpl() {
   if (observer_) observer_->OnEngineEvent(Json::writeString(factory, video_event));
 
   Json::Value audio_arr(Json::arrayValue);
-  if (pipeline_->adm() && worker_thread_) {
+  if (pipeline_ && pipeline_->adm() && worker_thread_) {
     audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
       Json::Value arr(Json::arrayValue);
       int16_t n = pipeline_->adm()->RecordingDevices();
@@ -532,7 +532,7 @@ void WebRTCEngine::SetAudioInputDevice(int device_idx) {
 
 void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
   current_audio_input_device_idx_ = device_idx;
-  if (!pipeline_->adm()) return;
+  if (!pipeline_ || !pipeline_->adm()) return;
   // Apply device change. If not recording yet, recording will use this device
   // when it starts via the factory. If already recording mid-call, restart.
   worker_thread_->BlockingCall([this, device_idx] {
@@ -896,7 +896,7 @@ bool WebRTCEngine::InitializePeerConnection() {
   if (!pipeline_) {
     pipeline_ = std::make_unique<MediaPipeline>(env_, worker_thread_.get());
   }
-  if (!pipeline_->adm()) {
+  if (!pipeline_ || !pipeline_->adm()) {
     if (!pipeline_->CreateAudioDeviceModule()) {
       return false;
     }
