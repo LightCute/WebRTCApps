@@ -19,6 +19,8 @@ rtc_executable("peerconnection_client") {
     "defaults.h",
     "engine_controller.h",
     "flag_defs.h",
+    "json_helpers.cc",
+    "json_helpers.h",
     "peer_connection_client.cc",
     "peer_connection_client.h",
     "signaling_interface.h",
