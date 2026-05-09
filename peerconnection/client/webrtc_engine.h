@@ -24,6 +24,7 @@
 #include "api/video/video_sink_interface.h"
 #include "apps/peerconnection/client/data_channel_manager.h"
 #include "apps/peerconnection/client/engine_controller.h"
+#include "apps/peerconnection/client/media_pipeline.h"
 #include "apps/peerconnection/client/shm_audio_capturer.h"
 #include "apps/peerconnection/client/shm_audio_renderer.h"
 #include "apps/peerconnection/client/shm_video_renderer.h"
@@ -131,8 +132,10 @@ class WebRTCEngine : public EngineController,
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
 
+  // Media pipeline (Step 1: owns ADM; later: renderers, sources, device state)
+  std::unique_ptr<MediaPipeline> pipeline_;
+
   // WebRTC objects
-  webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;

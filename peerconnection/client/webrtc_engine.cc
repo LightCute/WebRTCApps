@@ -201,16 +201,8 @@ void WebRTCEngine::UnregisterObserver() {
 WebRTCEngine::~WebRTCEngine() {
   RTC_DCHECK(!peer_connection_);
 
-  // Stop ADM on worker thread if it exists.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (pipeline_)
+    pipeline_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -257,16 +249,8 @@ void WebRTCEngine::Shutdown() {
   StopRemoteAudioShmRenderer();
   local_audio_source_ = nullptr;
 
-  // Stop ADM on worker thread.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (pipeline_)
+    pipeline_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -369,9 +353,9 @@ void WebRTCEngine::SetAudioMuted(bool muted) {
 void WebRTCEngine::SetAudioMutedImpl(bool muted) {
   // Stub: log and set internal state. Full implementation can follow.
   RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (audio_device_module_) {
+  if (pipeline_->adm()) {
     if (muted) {
-      audio_device_module_->StopRecording();
+      pipeline_->adm()->StopRecording();
     }
     // Resume recording on unmute is left as a future enhancement.
   }
@@ -425,7 +409,7 @@ void WebRTCEngine::QueryDevices() {
 void WebRTCEngine::QueryDevicesImpl() {
   // ADM is created by InitializePeerConnection() when a call starts.
   // Don't create it here — PulseAudio init crashes in some environments.
-  if (!audio_device_module_ && worker_thread_) {
+  if (!pipeline_->adm() && worker_thread_) {
     // Skip ADM creation; audio device list will be empty until first call.
   }
 
@@ -452,14 +436,14 @@ void WebRTCEngine::QueryDevicesImpl() {
   if (observer_) observer_->OnEngineEvent(Json::writeString(factory, video_event));
 
   Json::Value audio_arr(Json::arrayValue);
-  if (audio_device_module_ && worker_thread_) {
+  if (pipeline_->adm() && worker_thread_) {
     audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
       Json::Value arr(Json::arrayValue);
-      int16_t n = audio_device_module_->RecordingDevices();
+      int16_t n = pipeline_->adm()->RecordingDevices();
       char name[webrtc::kAdmMaxDeviceNameSize];
       char guid[webrtc::kAdmMaxGuidSize];
       for (int16_t i = 0; i < n; ++i) {
-        if (audio_device_module_->RecordingDeviceName(i, name, guid) == 0) {
+        if (pipeline_->adm()->RecordingDeviceName(i, name, guid) == 0) {
           Json::Value dev;
           dev["idx"] = i;
           dev["name"] = name;
@@ -548,18 +532,18 @@ void WebRTCEngine::SetAudioInputDevice(int device_idx) {
 
 void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
   current_audio_input_device_idx_ = device_idx;
-  if (!audio_device_module_) return;
+  if (!pipeline_->adm()) return;
   // Apply device change. If not recording yet, recording will use this device
   // when it starts via the factory. If already recording mid-call, restart.
   worker_thread_->BlockingCall([this, device_idx] {
-    bool was_recording = audio_device_module_->Recording();
+    bool was_recording = pipeline_->adm()->Recording();
     if (was_recording) {
-      audio_device_module_->StopRecording();
-      audio_device_module_->SetRecordingDevice(device_idx);
-      audio_device_module_->InitRecording();
-      audio_device_module_->StartRecording();
+      pipeline_->adm()->StopRecording();
+      pipeline_->adm()->SetRecordingDevice(device_idx);
+      pipeline_->adm()->InitRecording();
+      pipeline_->adm()->StartRecording();
     } else {
-      audio_device_module_->SetRecordingDevice(device_idx);
+      pipeline_->adm()->SetRecordingDevice(device_idx);
     }
   });
 }
@@ -689,7 +673,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
     auto vs = std::move(local_video_source_);
-    auto adm = std::move(audio_device_module_);
+    auto adm = pipeline_->adm();
     auto las = std::move(local_audio_source_);
     StopLocalShmRenderer();
     StopRemoteShmRenderer();
@@ -909,23 +893,18 @@ bool WebRTCEngine::InitializePeerConnection() {
     }
   }
 
-  if (!audio_device_module_) {
-    // Pulse/ALSA ADM has thread-affinity checks, so create it on the same
-    // worker thread that will later initialize and drive it.
-    audio_device_module_ = worker_thread_->BlockingCall([this] {
-      return webrtc::CreateAudioDeviceModule(
-          env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
-    });
-
-    if (!audio_device_module_) {
-      RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
+  if (!pipeline_) {
+    pipeline_ = std::make_unique<MediaPipeline>(env_, worker_thread_.get());
+  }
+  if (!pipeline_->adm()) {
+    if (!pipeline_->CreateAudioDeviceModule()) {
       return false;
     }
   }
 
   auto pc = PcFactory::Create(network_thread_.get(), worker_thread_.get(),
                                signaling_thread_.get(), env_,
-                               audio_device_module_.get(), this);
+                               pipeline_->adm(), this);
   if (!pc.factory || !pc.connection) {
     RTC_LOG(LS_ERROR) << "Failed to create PeerConnection";
     DeletePeerConnection();
