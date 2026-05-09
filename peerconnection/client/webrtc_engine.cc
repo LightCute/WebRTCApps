@@ -244,9 +244,9 @@ void WebRTCEngine::Shutdown() {
   }
 
   // Stop SHM renderers.
-  StopLocalShmRenderer();
-  StopRemoteShmRenderer();
-  StopRemoteAudioShmRenderer();
+  pipeline_->StopLocalRenderer();
+  pipeline_->StopRemoteRenderer();
+  pipeline_->StopRemoteAudioRenderer();
   local_audio_source_ = nullptr;
 
   if (pipeline_)
@@ -563,10 +563,10 @@ void WebRTCEngine::OnAddTrack(
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
-    StartRemoteShmRenderer(video_track);
+    pipeline_->StartRemoteRenderer(video_track);
   } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
     auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
-    StartRemoteAudioShmRenderer(audio_track);
+    pipeline_->StartRemoteAudioRenderer(audio_track);
   }
 }
 
@@ -576,9 +576,9 @@ void WebRTCEngine::OnRemoveTrack(
 
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
-    StopRemoteShmRenderer();
+    pipeline_->StopRemoteRenderer();
   } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    StopRemoteAudioShmRenderer();
+    pipeline_->StopRemoteAudioRenderer();
   }
 }
 
@@ -675,9 +675,9 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     auto vs = std::move(local_video_source_);
     auto adm = pipeline_->adm();
     auto las = std::move(local_audio_source_);
-    StopLocalShmRenderer();
-    StopRemoteShmRenderer();
-    StopRemoteAudioShmRenderer();
+    pipeline_->StopLocalRenderer();
+    pipeline_->StopRemoteRenderer();
+    pipeline_->StopRemoteAudioRenderer();
     dc_manager_->Shutdown();
     peer_id_ = -1;
     loopback_ = false;
@@ -932,9 +932,9 @@ void WebRTCEngine::DeletePeerConnection() {
     delete pending_messages_.front();
     pending_messages_.pop_front();
   }
-  StopLocalShmRenderer();
-  StopRemoteShmRenderer();
-  StopRemoteAudioShmRenderer();
+  pipeline_->StopLocalRenderer();
+  pipeline_->StopRemoteRenderer();
+  pipeline_->StopRemoteAudioRenderer();
   dc_manager_->Shutdown();
   local_audio_source_ = nullptr;
   peer_connection_->Close();
@@ -977,7 +977,7 @@ void WebRTCEngine::AddTracks() {
   if (local_video_source_) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
         factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
-    StartLocalShmRenderer(video_track_.get());
+    pipeline_->StartLocalRenderer(video_track_.get());
 
     result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
     if (!result_or_error.ok()) {
@@ -1011,64 +1011,6 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
       DisconnectFromServer();
     }
     delete msg;
-  }
-}
-
-// ==================== SHM Renderers ====================
-
-void WebRTCEngine::StartLocalShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (local_video_renderer_) {
-    RTC_LOG(LS_WARNING) << "Local SHM renderer already started";
-    return;
-  }
-  local_video_renderer_ = std::make_unique<ShmVideoRenderer>(shm_key_path() + "_local",
-                                                       SHM_PROJ_ID + 1);
-  track->AddOrUpdateSink(local_video_renderer_.get(), webrtc::VideoSinkWants());
-  RTC_LOG(LS_INFO) << "Local SHM renderer started";
-}
-
-void WebRTCEngine::StopLocalShmRenderer() {
-  if (local_video_renderer_) {
-    // The sink is removed from the track before destruction.
-    local_video_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Local SHM renderer stopped";
-  }
-}
-
-void WebRTCEngine::StartRemoteShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (remote_video_renderer_) {
-    RTC_LOG(LS_WARNING) << "Remote SHM renderer already started";
-    return;
-  }
-  remote_video_renderer_ = std::make_unique<ShmVideoRenderer>(shm_key_path() + "_remote",
-                                                        SHM_PROJ_ID + 2);
-  track->AddOrUpdateSink(remote_video_renderer_.get(), webrtc::VideoSinkWants());
-  RTC_LOG(LS_INFO) << "Remote SHM renderer started";
-}
-
-void WebRTCEngine::StopRemoteShmRenderer() {
-  if (remote_video_renderer_) {
-    remote_video_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Remote SHM renderer stopped";
-  }
-}
-
-void WebRTCEngine::StartRemoteAudioShmRenderer(
-    webrtc::AudioTrackInterface* track) {
-  if (remote_audio_renderer_) {
-    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
-    return;
-  }
-  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
-      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_renderer_.get());
-  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
-}
-
-void WebRTCEngine::StopRemoteAudioShmRenderer() {
-  if (remote_audio_renderer_) {
-    remote_audio_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
   }
 }
 

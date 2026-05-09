@@ -26,8 +26,6 @@
 #include "apps/peerconnection/client/engine_controller.h"
 #include "apps/peerconnection/client/media_pipeline.h"
 #include "apps/peerconnection/client/shm_audio_capturer.h"
-#include "apps/peerconnection/client/shm_audio_renderer.h"
-#include "apps/peerconnection/client/shm_video_renderer.h"
 #include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/thread.h"
 
@@ -112,16 +110,6 @@ class WebRTCEngine : public EngineController,
   void SetVideoDeviceImpl(int device_idx);
   void SetAudioInputDeviceImpl(int device_idx);
 
-  // SHM renderers
-  void StartLocalShmRenderer(webrtc::VideoTrackInterface* track);
-  void StopLocalShmRenderer();
-  void StartRemoteShmRenderer(webrtc::VideoTrackInterface* track);
-  void StopRemoteShmRenderer();
-
-  // Audio SHM renderer
-  void StartRemoteAudioShmRenderer(webrtc::AudioTrackInterface* track);
-  void StopRemoteAudioShmRenderer();
-
   EngineObserver* observer_ = nullptr;
   std::atomic<bool> connection_active_{false};
   const webrtc::Environment env_;
@@ -145,12 +133,7 @@ class WebRTCEngine : public EngineController,
   // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
   std::unique_ptr<SignalingInterface> signaling_;
 
-  // SHM renderers
-  std::unique_ptr<ShmVideoRenderer> local_video_renderer_;
-  std::unique_ptr<ShmVideoRenderer> remote_video_renderer_;
-
-  // SHM audio
-  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
+  // SHM audio source (renderers now in MediaPipeline)
   webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
 
   // State
