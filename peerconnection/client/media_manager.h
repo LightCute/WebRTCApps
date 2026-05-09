@@ -17,7 +17,8 @@ class MediaManager {
   using EventCallback = std::function<void(const std::string& json)>;
 
   MediaManager(const webrtc::Environment& env,
-               webrtc::Thread* worker_thread);
+               webrtc::Thread* worker_thread,
+               webrtc::Thread* signaling_thread);
   ~MediaManager();
 
   // ---- ADM lifecycle ----
@@ -25,10 +26,8 @@ class MediaManager {
   webrtc::AudioDeviceModule* GetADM() const;
 
   // ---- Track creation ----
-  // external_audio_source: if non-null, used instead of creating ADM source
   bool AddTracks(webrtc::PeerConnectionFactoryInterface* factory,
-                 webrtc::PeerConnectionInterface* pc,
-                 webrtc::AudioSourceInterface* external_audio_source = nullptr);
+                 webrtc::PeerConnectionInterface* pc);
 
   // ---- Device enumeration ----
   void QueryDevices();
@@ -50,6 +49,7 @@ class MediaManager {
  private:
   const webrtc::Environment& env_;
   webrtc::Thread* const worker_thread_;
+  webrtc::Thread* const signaling_thread_;
 
   webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;

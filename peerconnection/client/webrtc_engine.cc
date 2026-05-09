@@ -14,11 +14,6 @@
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
-#include "absl/flags/declare.h"
-#include "absl/flags/flag.h"
-
-ABSL_DECLARE_FLAG(std::string, audio_source);
-
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -1000,7 +995,8 @@ bool WebRTCEngine::InitializePeerConnection() {
   }
 
   if (!media_) {
-    media_ = std::make_unique<MediaManager>(env_, worker_thread_.get());
+    media_ = std::make_unique<MediaManager>(env_, worker_thread_.get(),
+                                            signaling_thread_.get());
     media_->SetEventCallback([this](const std::string& json) {
       if (observer_) observer_->OnEngineEvent(json);
     });
@@ -1101,20 +1097,7 @@ void WebRTCEngine::DeletePeerConnection() {
 }
 
 void WebRTCEngine::AddTracks() {
-  // Resolve audio source: SHM (shared memory) or ADM (default)
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_audio_source;
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    shm_audio_source = ShmAudioSource::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!shm_audio_source) {
-      RTC_LOG(LS_ERROR)
-          << "Failed to create ShmAudioSource, falling back to ADM";
-    }
-  }
-
-  if (!media_->AddTracks(factory_.get(), peer_connection_.get(),
-                         shm_audio_source.get()))
+  if (!media_->AddTracks(factory_.get(), peer_connection_.get()))
     return;
 
   // Wire local SHM renderer to the video track created by MediaManager
