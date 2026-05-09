@@ -171,7 +171,6 @@ void WebRTCEngine::Shutdown() {
   pipeline_->StopLocalRenderer();
   pipeline_->StopRemoteRenderer();
   pipeline_->StopRemoteAudioRenderer();
-  local_audio_source_ = nullptr;
 
   if (pipeline_)
     pipeline_->Shutdown();
@@ -432,7 +431,7 @@ void WebRTCEngine::SetVideoDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  pipeline_->SetVideoDevice(device_idx, local_video_source_.get());
+  pipeline_->SetVideoDevice(device_idx);
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
@@ -585,9 +584,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     int saved_port = server_port_;
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
-    auto vs = std::move(local_video_source_);
     auto adm = pipeline_->adm();
-    auto las = std::move(local_audio_source_);
     pipeline_->StopLocalRenderer();
     pipeline_->StopRemoteRenderer();
     pipeline_->StopRemoteAudioRenderer();
@@ -596,8 +593,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     loopback_ = false;
     signaling_->Close();
     signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
-                                  vs = std::move(vs), adm = std::move(adm),
-                                  las = std::move(las)]() mutable {
+                                  adm = std::move(adm)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
         pending_messages_.pop_front();
@@ -613,8 +609,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
       pc->Close();
       pc = nullptr;
       f = nullptr;
-      vs = nullptr;
-      las = nullptr;
     });
     // Auto-reconnect after cleanup (server has removed the old member entry).
     signaling_thread_->PostDelayedTask(
@@ -849,11 +843,9 @@ void WebRTCEngine::DeletePeerConnection() {
   pipeline_->StopRemoteRenderer();
   pipeline_->StopRemoteAudioRenderer();
   dc_manager_->Shutdown();
-  local_audio_source_ = nullptr;
   peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
-  local_video_source_ = nullptr;
   peer_id_ = -1;
   loopback_ = false;
 }
@@ -873,18 +865,18 @@ void WebRTCEngine::AddTracks() {
       RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
   }
 
-  local_audio_source_ = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
-  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get());
+  auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
   auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
   if (!result_or_error.ok()) {
     RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
                       << result_or_error.error().message();
   }
 
-  local_video_source_ = pipeline_->CreateVideoSource();
-  if (local_video_source_) {
+  auto video_source = pipeline_->CreateVideoSource();
+  if (video_source) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
-        factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
+        factory_->CreateVideoTrack(video_source, kVideoLabel));
     pipeline_->StartLocalRenderer(video_track_.get());
 
     result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});

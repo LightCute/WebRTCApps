@@ -126,15 +126,11 @@ class WebRTCEngine : public EngineController,
   // WebRTC objects
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
-  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
   // DataChannel manager
   std::unique_ptr<DataChannelManager> dc_manager_;
 
   // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
   std::unique_ptr<SignalingInterface> signaling_;
-
-  // SHM audio source (renderers now in MediaPipeline)
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
 
   // State
   int peer_id_ = -1;
