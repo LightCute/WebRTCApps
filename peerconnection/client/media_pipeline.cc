@@ -119,15 +119,15 @@ bool MediaPipeline::CreateAudioDeviceModule() {
 // ---- Video source ----
 
 webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
-MediaPipeline::CreateVideoCapturer(const webrtc::Environment& env) {
-  return CapturerTrackSource::Create(env.task_queue_factory());
+MediaPipeline::CreateVideoSource() {
+  video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
+  return video_source_;
 }
 
 // ---- Device management ----
 
-void MediaPipeline::SetVideoDevice(int device_idx,
-                                    webrtc::VideoTrackSourceInterface* video_source) {
-  if (!video_source) {
+void MediaPipeline::SetVideoDevice(int device_idx) {
+  if (!video_source_) {
     RTC_LOG(LS_WARNING) << "No local video source to swap";
     return;
   }
@@ -136,7 +136,7 @@ void MediaPipeline::SetVideoDevice(int device_idx,
     RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
     return;
   }
-  auto* capturer_source = static_cast<CapturerTrackSource*>(video_source);
+  auto* capturer_source = static_cast<CapturerTrackSource*>(video_source_.get());
   capturer_source->SwapCapturer(std::move(new_capturer));
   video_device_idx_ = device_idx;
 }
@@ -203,6 +203,7 @@ void MediaPipeline::Shutdown() {
   local_renderer_.reset();
   remote_renderer_.reset();
   remote_audio_renderer_.reset();
+  video_source_ = nullptr;
   if (adm_ && worker_thread_) {
     auto adm = std::move(adm_);
     adm_ = nullptr;
