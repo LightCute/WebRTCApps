@@ -1,7 +1,9 @@
 #ifndef APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
 #define APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
 
+#include <functional>
 #include <memory>
+#include <string>
 
 #include "api/audio/audio_device.h"
 #include "api/environment/environment.h"
@@ -29,8 +31,15 @@ class MediaPipeline {
       webrtc::PeerConnectionFactoryInterface* factory,
       webrtc::AudioSourceInterface* external_source = nullptr);
 
+  // ---- Events ----
+  using EventCallback = std::function<void(const std::string& json)>;
+  void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
+
   // ---- Device management ----
   void SetVideoDevice(int device_idx);
+  void SetAudioMuted(bool muted);
+  void SetVideoPaused(bool paused, webrtc::PeerConnectionInterface* pc);
+  void QueryDevices();
 
   void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
@@ -57,6 +66,7 @@ class MediaPipeline {
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;
   std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
 
+  EventCallback event_cb_;
   int video_device_idx_ = -1;
   int audio_input_device_idx_ = -1;
 };

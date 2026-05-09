@@ -274,14 +274,7 @@ void WebRTCEngine::SetAudioMuted(bool muted) {
 }
 
 void WebRTCEngine::SetAudioMutedImpl(bool muted) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (pipeline_ && pipeline_->adm()) {
-    if (muted) {
-      pipeline_->adm()->StopRecording();
-    }
-    // Resume recording on unmute is left as a future enhancement.
-  }
+  pipeline_->SetAudioMuted(muted);
 }
 
 void WebRTCEngine::SetVideoPaused(bool paused) {
@@ -293,18 +286,7 @@ void WebRTCEngine::SetVideoPaused(bool paused) {
 }
 
 void WebRTCEngine::SetVideoPausedImpl(bool paused) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
-  if (peer_connection_) {
-    auto senders = peer_connection_->GetSenders();
-    for (auto& sender : senders) {
-      if (sender->track() &&
-          sender->track()->kind() ==
-              webrtc::MediaStreamTrackInterface::kVideoKind) {
-        sender->track()->set_enabled(!paused);
-      }
-    }
-  }
+  pipeline_->SetVideoPaused(paused, peer_connection_.get());
 }
 
 void WebRTCEngine::SendData(const std::string& text) {
@@ -330,96 +312,7 @@ void WebRTCEngine::QueryDevices() {
 }
 
 void WebRTCEngine::QueryDevicesImpl() {
-  // ADM is created by InitializePeerConnection() when a call starts.
-  // Don't create it here — PulseAudio init crashes in some environments.
-  if (!pipeline_ || (!pipeline_->adm() && worker_thread_)) {
-    // Skip ADM creation; audio device list will be empty until first call.
-  }
-
-  Json::Value video_arr(Json::arrayValue);
-  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
-  if (info) {
-    int n = info->NumberOfDevices();
-    char name[256];
-    char id[256];
-    for (int i = 0; i < n; ++i) {
-      if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id)) == 0) {
-        Json::Value dev;
-        dev["idx"] = i;
-        dev["name"] = name;
-        video_arr.append(dev);
-      }
-    }
-  }
-  Json::StreamWriterBuilder factory;
-  factory["indentation"] = "";
-  Json::Value video_event;
-  video_event["event"] = "video_devices";
-  video_event["devices"] = video_arr;
-  if (observer_) observer_->OnEngineEvent(Json::writeString(factory, video_event));
-
-  Json::Value audio_arr(Json::arrayValue);
-  if (pipeline_ && pipeline_->adm() && worker_thread_) {
-    audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
-      Json::Value arr(Json::arrayValue);
-      int16_t n = pipeline_->adm()->RecordingDevices();
-      char name[webrtc::kAdmMaxDeviceNameSize];
-      char guid[webrtc::kAdmMaxGuidSize];
-      for (int16_t i = 0; i < n; ++i) {
-        if (pipeline_->adm()->RecordingDeviceName(i, name, guid) == 0) {
-          Json::Value dev;
-          dev["idx"] = i;
-          dev["name"] = name;
-          arr.append(dev);
-        }
-      }
-      return arr;
-    });
-  }
-  // Only emit ADM results if non-empty; otherwise fall through to ALSA
-  if (!audio_arr.empty()) {
-    Json::Value audio_event;
-    audio_event["event"] = "audio_input_devices";
-    audio_event["devices"] = audio_arr;
-    if (observer_) observer_->OnEngineEvent(Json::writeString(factory, audio_event));
-  }
-
-  // ALSA fallback: use arecord -l when ADM enumeration returns empty.
-  // ADM RecordingDevices requires InitRecording which crashes PulseAudio
-  // in some environments (safe_conversions overflow).
-  if (audio_arr.empty()) {
-    FILE* fp = popen("arecord -l 2>/dev/null", "r");
-    if (fp) {
-      Json::Value alsa_arr(Json::arrayValue);
-      char line[256];
-      int idx = 0;
-      while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "card ") == line && strstr(line, "device ")) {
-          char* desc_begin = strrchr(line, '[');
-          char* desc_end = desc_begin ? strrchr(line, ']') : nullptr;
-          char name[256];
-          if (desc_begin && desc_end && desc_end > desc_begin) {
-            size_t len = desc_end - desc_begin - 1;
-            snprintf(name, sizeof(name), "%.*s", (int)len, desc_begin + 1);
-          } else {
-            snprintf(name, sizeof(name), "Capture device %d", idx);
-          }
-          Json::Value dev;
-          dev["idx"] = idx;
-          dev["name"] = name;
-          alsa_arr.append(dev);
-          idx++;
-        }
-      }
-      pclose(fp);
-      if (!alsa_arr.empty()) {
-        Json::Value alsa_event;
-        alsa_event["event"] = "audio_input_devices";
-        alsa_event["devices"] = alsa_arr;
-        if (observer_) observer_->OnEngineEvent(Json::writeString(factory, alsa_event));
-      }
-    }
-  }
+  pipeline_->QueryDevices();
 }
 
 void WebRTCEngine::SetVideoDevice(int device_idx) {
@@ -802,6 +695,9 @@ bool WebRTCEngine::InitializePeerConnection() {
 
   if (!pipeline_) {
     pipeline_ = std::make_unique<MediaPipeline>(env_, worker_thread_.get());
+    pipeline_->SetEventCallback([this](const std::string& json) {
+      if (observer_) observer_->OnEngineEvent(json);
+    });
   }
   if (!pipeline_ || !pipeline_->adm()) {
     if (!pipeline_->CreateAudioDeviceModule()) {
