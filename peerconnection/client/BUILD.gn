@@ -140,3 +140,19 @@ rtc_executable("unix_socket_server_test") {
     "pthread",
   ]
 }
+
+rtc_executable("cli_runner_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/cli_runner_test.cc",
+    "cli_runner.cc",
+    "cli_runner.h",
+  ]
+
+  # cli_runner depends only on engine_controller.h (pure virtual, zero deps)
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
