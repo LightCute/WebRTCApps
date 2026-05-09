@@ -30,8 +30,7 @@ class MediaPipeline {
       webrtc::AudioSourceInterface* external_source = nullptr);
 
   // ---- Device management ----
-  void SetVideoDevice(int device_idx,
-                      webrtc::VideoTrackSourceInterface* video_source);
+  void SetVideoDevice(int device_idx);
 
   void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
