@@ -143,10 +143,6 @@ class WebRTCEngine : public EngineController,
   std::string server_;
   int server_port_ = 8888;
   std::deque<std::string*> pending_messages_;
-
-  // Device state
-  int current_video_device_idx_ = -1;
-  int current_audio_input_device_idx_ = -1;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_

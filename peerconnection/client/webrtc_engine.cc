@@ -519,7 +519,7 @@ void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
   }
   auto* capturer_source = static_cast<CapturerTrackSource*>(local_video_source_.get());
   capturer_source->SwapCapturer(std::move(new_capturer));
-  current_video_device_idx_ = device_idx;
+  if (pipeline_) pipeline_->set_video_device_idx(device_idx);
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
@@ -531,7 +531,7 @@ void WebRTCEngine::SetAudioInputDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
-  current_audio_input_device_idx_ = device_idx;
+  if (pipeline_) pipeline_->set_audio_input_device_idx(device_idx);
   if (!pipeline_ || !pipeline_->adm()) return;
   // Apply device change. If not recording yet, recording will use this device
   // when it starts via the factory. If already recording mid-call, restart.

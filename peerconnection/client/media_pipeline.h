@@ -22,6 +22,10 @@ class MediaPipeline {
   bool CreateAudioDeviceModule();
   webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
 
+  // ---- Device state ----
+  void set_video_device_idx(int idx) { video_device_idx_ = idx; }
+  void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
+
   // ---- Renderers ----
   void StartLocalRenderer(webrtc::VideoTrackInterface* track);
   void StopLocalRenderer();
@@ -41,6 +45,9 @@ class MediaPipeline {
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;
   std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
+
+  int video_device_idx_ = -1;
+  int audio_input_device_idx_ = -1;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
