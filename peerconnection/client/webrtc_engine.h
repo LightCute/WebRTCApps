@@ -22,11 +22,11 @@
 #include "api/task_queue/pending_task_safety_flag.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
-#include "apps/peerconnection/client/peer_connection_client.h"
-#include "apps/peerconnection/client/shm_video_writer.h"
-#include "apps/peerconnection/client/shm_audio_writer.h"
 #include "apps/peerconnection/client/engine_controller.h"
-#include "apps/peerconnection/client/shm_audio_reader.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
+#include "apps/peerconnection/client/shm_audio_capturer.h"
+#include "apps/peerconnection/client/shm_audio_renderer.h"
+#include "apps/peerconnection/client/shm_video_renderer.h"
 #include "rtc_base/thread.h"
 
 class WebRTCEngine : public EngineController,
@@ -128,82 +128,6 @@ class WebRTCEngine : public EngineController,
   void StartRemoteAudioShmRenderer(webrtc::AudioTrackInterface* track);
   void StopRemoteAudioShmRenderer();
 
-  // Inner class: VideoSink that writes frames to SHM via dedicated IO thread
-  class ShmVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
-   public:
-    ShmVideoSink(const std::string& key_path, int proj_id);
-    ~ShmVideoSink() override;
-    void OnFrame(const webrtc::VideoFrame& frame) override;
-
-   private:
-    struct FrameData {
-      std::vector<uint8_t> i420_data;
-      VideoFrameHead head;
-    };
-
-    void IoLoop();
-
-    std::unique_ptr<ShmVideoWriter> writer_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::optional<FrameData> pending_;
-    bool stopped_ = false;
-    std::thread io_thread_;
-  };
-
-  // Inner class: AudioSink that writes remote audio to SHM for Qt playback
-  class ShmAudioSink : public webrtc::AudioTrackSinkInterface {
-   public:
-    ShmAudioSink(const std::string& key_path, int proj_id);
-    ~ShmAudioSink() override;
-    void OnData(const void* audio_data, int bits_per_sample,
-                int sample_rate, size_t number_of_channels,
-                size_t number_of_frames,
-                std::optional<int64_t> absolute_capture_timestamp_ms) override;
-
-   private:
-    struct PendingAudio {
-      AudioFrameHead head;
-      std::vector<uint8_t> data;
-    };
-
-    void IoLoop();
-
-    std::unique_ptr<ShmAudioWriter> writer_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::optional<PendingAudio> pending_;
-    bool stopped_ = false;
-    std::thread io_thread_;
-  };
-
-  // Inner class: AudioSource that reads capture audio from SHM (Qt mic input)
-  class ShmAudioSource : public webrtc::AudioSourceInterface {
-   public:
-    static webrtc::scoped_refptr<ShmAudioSource> Create(
-        const std::string& key_path, int proj_id);
-    ~ShmAudioSource() override;
-
-    void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
-    void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;
-    void RegisterObserver(webrtc::ObserverInterface*) override {}
-    void UnregisterObserver(webrtc::ObserverInterface*) override {}
-    webrtc::MediaSourceInterface::SourceState state() const override {
-      return webrtc::MediaSourceInterface::kLive;
-    }
-    bool remote() const override { return false; }
-
-   protected:
-    ShmAudioSource() = default;
-    void CaptureLoop();
-
-    ShmAudioReader reader_;
-    std::mutex sinks_mutex_;
-    std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
-    std::thread capture_thread_;
-    std::atomic<bool> running_{false};
-  };
-
   EngineObserver* observer_ = nullptr;
   std::atomic<bool> connection_active_{false};
   const webrtc::Environment env_;
@@ -225,11 +149,11 @@ class WebRTCEngine : public EngineController,
   PeerConnectionClient signaling_client_;
 
   // SHM renderers
-  std::unique_ptr<ShmVideoSink> local_video_sink_;
-  std::unique_ptr<ShmVideoSink> remote_video_sink_;
+  std::unique_ptr<ShmVideoRenderer> local_video_renderer_;
+  std::unique_ptr<ShmVideoRenderer> remote_video_renderer_;
 
   // SHM audio
-  std::unique_ptr<ShmAudioSink> remote_audio_sink_;
+  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
   webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
 
   // State

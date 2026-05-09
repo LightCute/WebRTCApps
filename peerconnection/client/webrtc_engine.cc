@@ -245,223 +245,6 @@ const char* DataChannelStateToString(webrtc::DataChannelInterface::DataState s) 
 
 }  // namespace
 
-// ==================== ShmVideoSink ====================
-
-WebRTCEngine::ShmVideoSink::ShmVideoSink(const std::string& key_path,
-                                          int proj_id)
-    : writer_(std::make_unique<ShmVideoWriter>()),
-      io_thread_(&ShmVideoSink::IoLoop, this) {
-  if (!writer_->Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmVideoSink: ShmVideoWriter::Init failed for "
-                      << key_path;
-  }
-}
-
-WebRTCEngine::ShmVideoSink::~ShmVideoSink() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  cv_.notify_all();
-  if (io_thread_.joinable()) {
-    io_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmVideoSink::OnFrame(const webrtc::VideoFrame& frame) {
-  webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
-      frame.video_frame_buffer()->ToI420();
-  if (!i420) {
-    RTC_LOG(LS_WARNING) << "ShmVideoSink::OnFrame: ToI420 returned null";
-    return;
-  }
-
-  int width = i420->width();
-  int height = i420->height();
-  int half_width = (width + 1) / 2;
-  int y_size = i420->StrideY() * height;
-  int u_size = i420->StrideU() * ((height + 1) / 2);
-  int v_size = i420->StrideV() * ((height + 1) / 2);
-  int total_size = y_size + u_size + v_size;
-
-  FrameData fd;
-  fd.head.ntp_time_ms = frame.ntp_time_ms();
-  fd.head.width = static_cast<uint16_t>(width);
-  fd.head.height = static_cast<uint16_t>(height);
-  fd.head.frame_type = 0;
-  fd.head.rotation = frame.rotation();
-  fd.head.frame_len = static_cast<uint32_t>(total_size);
-  fd.i420_data.resize(total_size);
-
-  // Copy Y plane (respecting stride)
-  const uint8_t* src_y = i420->DataY();
-  uint8_t* dst = fd.i420_data.data();
-  for (int row = 0; row < height; ++row) {
-    std::memcpy(dst, src_y, width);
-    dst += width;
-    src_y += i420->StrideY();
-  }
-  // Copy U plane (respecting stride)
-  const uint8_t* src_u = i420->DataU();
-  for (int row = 0; row < (height + 1) / 2; ++row) {
-    std::memcpy(dst, src_u, half_width);
-    dst += half_width;
-    src_u += i420->StrideU();
-  }
-  // Copy V plane (respecting stride)
-  const uint8_t* src_v = i420->DataV();
-  for (int row = 0; row < (height + 1) / 2; ++row) {
-    std::memcpy(dst, src_v, half_width);
-    dst += half_width;
-    src_v += i420->StrideV();
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = std::move(fd);
-  }
-  cv_.notify_one();
-}
-
-void WebRTCEngine::ShmVideoSink::IoLoop() {
-  while (true) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
-    if (stopped_) {
-      return;
-    }
-    if (pending_.has_value()) {
-      FrameData fd = std::move(*pending_);
-      pending_.reset();
-      lock.unlock();
-      writer_->WriteFrame(fd.head, fd.i420_data.data());
-    }
-  }
-}
-
-// ==================== ShmAudioSink ====================
-
-WebRTCEngine::ShmAudioSink::ShmAudioSink(const std::string& key_path,
-                                          int proj_id)
-    : writer_(std::make_unique<ShmAudioWriter>()),
-      io_thread_(&ShmAudioSink::IoLoop, this) {
-  if (!writer_->Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioSink: ShmAudioWriter::Init failed for "
-                      << key_path;
-  }
-}
-
-WebRTCEngine::ShmAudioSink::~ShmAudioSink() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  cv_.notify_all();
-  if (io_thread_.joinable()) {
-    io_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmAudioSink::OnData(
-    const void* audio_data, int bits_per_sample, int sample_rate,
-    size_t number_of_channels, size_t number_of_frames,
-    std::optional<int64_t> absolute_capture_timestamp_ms) {
-  size_t byte_count =
-      number_of_frames * number_of_channels * (bits_per_sample / 8);
-  if (byte_count > AUDIO_FRAME_MAX_SIZE) {
-    RTC_LOG(LS_WARNING) << "ShmAudioSink: frame too large: " << byte_count;
-    return;
-  }
-
-  PendingAudio pending;
-  pending.head.ntp_time_ms = absolute_capture_timestamp_ms.value_or(0);
-  pending.head.frame_len = static_cast<uint32_t>(byte_count);
-  pending.head.sample_rate = static_cast<uint32_t>(sample_rate);
-  pending.head.channels = static_cast<uint16_t>(number_of_channels);
-  pending.head.bits_per_sample = static_cast<uint16_t>(bits_per_sample);
-  pending.data.assign(static_cast<const uint8_t*>(audio_data),
-                      static_cast<const uint8_t*>(audio_data) + byte_count);
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = std::move(pending);
-  }
-  cv_.notify_one();
-}
-
-void WebRTCEngine::ShmAudioSink::IoLoop() {
-  while (true) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
-    if (stopped_) {
-      return;
-    }
-    if (pending_.has_value()) {
-      auto pending = std::move(*pending_);
-      pending_.reset();
-      lock.unlock();
-      writer_->WriteFrame(pending.head, pending.data.data());
-    }
-  }
-}
-
-// ==================== ShmAudioSource ====================
-
-webrtc::scoped_refptr<WebRTCEngine::ShmAudioSource>
-WebRTCEngine::ShmAudioSource::Create(const std::string& key_path, int proj_id) {
-  auto source = webrtc::make_ref_counted<ShmAudioSource>();
-  if (!source->reader_.Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioSource: ShmAudioReader::Init failed for "
-                      << key_path;
-    return nullptr;
-  }
-  source->running_ = true;
-  source->capture_thread_ =
-      std::thread(&ShmAudioSource::CaptureLoop, source.get());
-  return source;
-}
-
-WebRTCEngine::ShmAudioSource::~ShmAudioSource() {
-  running_ = false;
-  reader_.RequestStop();
-  if (capture_thread_.joinable()) {
-    capture_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmAudioSource::AddSink(
-    webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.push_back(sink);
-}
-
-void WebRTCEngine::ShmAudioSource::RemoveSink(
-    webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.erase(std::remove(sinks_.begin(), sinks_.end(), sink), sinks_.end());
-}
-
-void WebRTCEngine::ShmAudioSource::CaptureLoop() {
-  std::vector<uint8_t> buf(AUDIO_FRAME_MAX_SIZE);
-  while (running_) {
-    AudioFrameHead head;
-    if (!reader_.ReadFrame(head, buf.data(), AUDIO_FRAME_MAX_SIZE)) {
-      break;
-    }
-
-    std::lock_guard<std::mutex> lock(sinks_mutex_);
-    for (auto* sink : sinks_) {
-      if (sink) {
-        sink->OnData(buf.data(), head.bits_per_sample,
-                     static_cast<int>(head.sample_rate), head.channels,
-                     head.frame_len /
-                         (head.channels * (head.bits_per_sample / 8)),
-                     head.ntp_time_ms);
-      }
-    }
-  }
-}
-
 // ==================== WebRTCEngine ====================
 
 WebRTCEngine::WebRTCEngine(const webrtc::Environment& env)
@@ -1346,10 +1129,10 @@ void WebRTCEngine::AddTracks() {
   // Audio track: select source based on --audio-source flag
   std::string audio_source = absl::GetFlag(FLAGS_audio_source);
   if (audio_source == "shm") {
-    local_audio_source_ = ShmAudioSource::Create(
+    local_audio_source_ = ShmAudioCapturer::Create(
         shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
     if (!local_audio_source_) {
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioSource, falling back to ADM";
+      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
       local_audio_source_ =
           factory_->CreateAudioSource(webrtc::AudioOptions());
     }
@@ -1434,57 +1217,57 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
 // ==================== SHM Renderers ====================
 
 void WebRTCEngine::StartLocalShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (local_video_sink_) {
+  if (local_video_renderer_) {
     RTC_LOG(LS_WARNING) << "Local SHM renderer already started";
     return;
   }
-  local_video_sink_ = std::make_unique<ShmVideoSink>(shm_key_path() + "_local",
+  local_video_renderer_ = std::make_unique<ShmVideoRenderer>(shm_key_path() + "_local",
                                                        SHM_PROJ_ID + 1);
-  track->AddOrUpdateSink(local_video_sink_.get(), webrtc::VideoSinkWants());
+  track->AddOrUpdateSink(local_video_renderer_.get(), webrtc::VideoSinkWants());
   RTC_LOG(LS_INFO) << "Local SHM renderer started";
 }
 
 void WebRTCEngine::StopLocalShmRenderer() {
-  if (local_video_sink_) {
+  if (local_video_renderer_) {
     // The sink is removed from the track before destruction.
-    local_video_sink_.reset();
+    local_video_renderer_.reset();
     RTC_LOG(LS_INFO) << "Local SHM renderer stopped";
   }
 }
 
 void WebRTCEngine::StartRemoteShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (remote_video_sink_) {
+  if (remote_video_renderer_) {
     RTC_LOG(LS_WARNING) << "Remote SHM renderer already started";
     return;
   }
-  remote_video_sink_ = std::make_unique<ShmVideoSink>(shm_key_path() + "_remote",
+  remote_video_renderer_ = std::make_unique<ShmVideoRenderer>(shm_key_path() + "_remote",
                                                         SHM_PROJ_ID + 2);
-  track->AddOrUpdateSink(remote_video_sink_.get(), webrtc::VideoSinkWants());
+  track->AddOrUpdateSink(remote_video_renderer_.get(), webrtc::VideoSinkWants());
   RTC_LOG(LS_INFO) << "Remote SHM renderer started";
 }
 
 void WebRTCEngine::StopRemoteShmRenderer() {
-  if (remote_video_sink_) {
-    remote_video_sink_.reset();
+  if (remote_video_renderer_) {
+    remote_video_renderer_.reset();
     RTC_LOG(LS_INFO) << "Remote SHM renderer stopped";
   }
 }
 
 void WebRTCEngine::StartRemoteAudioShmRenderer(
     webrtc::AudioTrackInterface* track) {
-  if (remote_audio_sink_) {
+  if (remote_audio_renderer_) {
     RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
     return;
   }
-  remote_audio_sink_ = std::make_unique<ShmAudioSink>(
+  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
       shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_sink_.get());
+  track->AddSink(remote_audio_renderer_.get());
   RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
 }
 
 void WebRTCEngine::StopRemoteAudioShmRenderer() {
-  if (remote_audio_sink_) {
-    remote_audio_sink_.reset();
+  if (remote_audio_renderer_) {
+    remote_audio_renderer_.reset();
     RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
   }
 }
