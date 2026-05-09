@@ -432,7 +432,7 @@ void WebRTCEngine::SetVideoDevice(int device_idx) {
 }
 
 void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  pipeline_->SetVideoDevice(device_idx, local_video_source_.get());
+  pipeline_->SetVideoDevice(device_idx);
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
@@ -585,7 +585,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     int saved_port = server_port_;
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
-    auto vs = std::move(local_video_source_);
     auto adm = pipeline_->adm();
     auto las = std::move(local_audio_source_);
     pipeline_->StopLocalRenderer();
@@ -596,7 +595,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     loopback_ = false;
     signaling_->Close();
     signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
-                                  vs = std::move(vs), adm = std::move(adm),
+                                  adm = std::move(adm),
                                   las = std::move(las)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
@@ -613,7 +612,6 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
       pc->Close();
       pc = nullptr;
       f = nullptr;
-      vs = nullptr;
       las = nullptr;
     });
     // Auto-reconnect after cleanup (server has removed the old member entry).
@@ -853,7 +851,6 @@ void WebRTCEngine::DeletePeerConnection() {
   peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
-  local_video_source_ = nullptr;
   peer_id_ = -1;
   loopback_ = false;
 }
@@ -886,10 +883,10 @@ void WebRTCEngine::AddTracks() {
                       << result_or_error.error().message();
   }
 
-  local_video_source_ = pipeline_->CreateVideoSource();
-  if (local_video_source_) {
+  auto video_source = pipeline_->CreateVideoSource();
+  if (video_source) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
-        factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
+        factory_->CreateVideoTrack(video_source, kVideoLabel));
     pipeline_->StartLocalRenderer(video_track_.get());
 
     result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
