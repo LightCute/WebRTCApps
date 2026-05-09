@@ -15,6 +15,8 @@ rtc_executable("peerconnection_client") {
     "main.cc",
     "cli_runner.cc",
     "cli_runner.h",
+    "data_channel_manager.cc",
+    "data_channel_manager.h",
     "defaults.cc",
     "defaults.h",
     "engine_controller.h",

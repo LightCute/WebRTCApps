@@ -22,6 +22,7 @@
 #include "api/task_queue/pending_task_safety_flag.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
+#include "apps/peerconnection/client/data_channel_manager.h"
 #include "apps/peerconnection/client/engine_controller.h"
 #include "apps/peerconnection/client/shm_audio_capturer.h"
 #include "apps/peerconnection/client/shm_audio_renderer.h"
@@ -32,8 +33,7 @@
 class WebRTCEngine : public EngineController,
                      public webrtc::PeerConnectionObserver,
                      public webrtc::CreateSessionDescriptionObserver,
-                     public PeerConnectionClientObserver,
-                     public webrtc::DataChannelObserver {
+                     public PeerConnectionClientObserver {
  public:
   WebRTCEngine(const webrtc::Environment& env);
   ~WebRTCEngine() override;
@@ -91,12 +91,6 @@ class WebRTCEngine : public EngineController,
   void OnMessageSent(int err) override;
   void OnServerConnectionFailure() override;
 
-  // DataChannelObserver
-  void OnStateChange() override;
-  void OnMessage(const webrtc::DataBuffer& buffer) override;
-  void OnBufferedAmountChange(uint64_t) override {}
-  bool IsOkToCallOnTheNetworkThread() override { return false; }
-
  private:
   // Internal helpers (ported from Conductor)
   bool InitializePeerConnection();
@@ -143,7 +137,8 @@ class WebRTCEngine : public EngineController,
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
+  // DataChannel manager
+  std::unique_ptr<DataChannelManager> dc_manager_;
 
   // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
   std::unique_ptr<SignalingInterface> signaling_;

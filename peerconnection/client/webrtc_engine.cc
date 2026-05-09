@@ -408,12 +408,7 @@ void WebRTCEngine::SendData(const std::string& text) {
 }
 
 void WebRTCEngine::SendDataImpl(const std::string& text) {
-  if (data_channel_ &&
-      data_channel_->state() == webrtc::DataChannelInterface::kOpen) {
-    data_channel_->Send(webrtc::DataBuffer(text));
-  } else {
-    RTC_LOG(LS_WARNING) << "SendData: data channel not open";
-  }
+  dc_manager_->Send(text);
 }
 
 // ==================== Device Management ====================
@@ -604,21 +599,7 @@ void WebRTCEngine::OnRemoveTrack(
 
 void WebRTCEngine::OnDataChannel(
     webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
-  if (!channel) {
-    RTC_LOG(LS_ERROR) << "OnDataChannel: Received null DataChannel";
-    return;
-  }
-  if (channel->label() != "chat") {
-    RTC_LOG(LS_WARNING) << "OnDataChannel: Unexpected label: " << channel->label();
-    return;
-  }
-  if (data_channel_) {
-    RTC_LOG(LS_WARNING) << "DataChannel already exists, replacing...";
-  }
-  data_channel_ = channel;
-  data_channel_->RegisterObserver(this);
-  RTC_LOG(LS_INFO) << "DataChannel received and observer registered"
-                   << " - label: " << data_channel_->label();
+  dc_manager_->OnRemoteDataChannel(channel);
 }
 
 void WebRTCEngine::OnIceConnectionChange(
@@ -712,7 +693,7 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     StopLocalShmRenderer();
     StopRemoteShmRenderer();
     StopRemoteAudioShmRenderer();
-    data_channel_ = nullptr;
+    dc_manager_->Shutdown();
     peer_id_ = -1;
     loopback_ = false;
     signaling_->Close();
@@ -892,24 +873,7 @@ void WebRTCEngine::OnServerConnectionFailure() {
             error_msg + R"("})");
 }
 
-// ==================== DataChannelObserver ====================
-
-void WebRTCEngine::OnStateChange() {
-  if (data_channel_) {
-    const char* state_str =
-        DataChannelStateToString(data_channel_->state());
-    RTC_LOG(LS_INFO) << "DataChannel state: " << state_str;
-    if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"data_channel_state","state":")") +
-              state_str + R"("})");
-  }
-}
-
-void WebRTCEngine::OnMessage(const webrtc::DataBuffer& buffer) {
-  RTC_LOG(LS_INFO) << "DataChannel message received";
-  std::string text(buffer.data.data<char>(), buffer.data.size());
-  if (observer_) observer_->OnEngineEvent(R"({"event":"data_received","text":")" +
-            EscapeJsonString(text) + R"("})");
-}
+// DataChannelObserver callbacks are handled by DataChannelManager
 
 // ==================== Private Helpers ====================
 
@@ -994,6 +958,11 @@ bool WebRTCEngine::InitializePeerConnection() {
   }
 
   AddTracks();
+
+  dc_manager_ = std::make_unique<DataChannelManager>();
+  dc_manager_->SetEventCallback([this](const std::string& json) {
+    if (observer_) observer_->OnEngineEvent(json);
+  });
   AddDataChannel();
 
   return peer_connection_ != nullptr;
@@ -1037,7 +1006,7 @@ void WebRTCEngine::DeletePeerConnection() {
   StopLocalShmRenderer();
   StopRemoteShmRenderer();
   StopRemoteAudioShmRenderer();
-  data_channel_ = nullptr;
+  dc_manager_->Shutdown();
   local_audio_source_ = nullptr;
   peer_connection_->Close();
   peer_connection_ = nullptr;
@@ -1095,31 +1064,7 @@ void WebRTCEngine::AddTracks() {
 }
 
 void WebRTCEngine::AddDataChannel() {
-  if (!peer_connection_) {
-    RTC_LOG(LS_WARNING) << "AddDataChannel: no peer connection";
-    return;
-  }
-  if (data_channel_) {
-    RTC_LOG(LS_WARNING) << "AddDataChannel: data channel already exists";
-    return;
-  }
-
-  webrtc::DataChannelInit config;
-  config.ordered = true;
-  config.negotiated = true;
-  config.id = 0;
-
-  auto dc_or_error = peer_connection_->CreateDataChannelOrError("chat", &config);
-  if (!dc_or_error.ok()) {
-    RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
-                      << dc_or_error.error().message();
-    return;
-  }
-
-  data_channel_ = std::move(dc_or_error.value());
-  data_channel_->RegisterObserver(this);
-  RTC_LOG(LS_INFO) << "DataChannel created - label: " << data_channel_->label()
-                   << " - state: " << data_channel_->state();
+  dc_manager_->Add(peer_connection_.get());
 }
 
 void WebRTCEngine::SendMessage(const std::string& json_object) {
