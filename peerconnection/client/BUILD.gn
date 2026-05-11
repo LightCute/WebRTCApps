@@ -223,3 +223,31 @@ rtc_executable("peer_connection_client_test") {
     "pthread",
   ]
 }
+
+rtc_executable("mpp_codec_test") {
+  testonly = true
+
+  sources = [
+    "../rk_mpp_test/mpp_codec_test.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+  ]
+
+  deps = [
+    "../../../api:scoped_refptr",
+    "../../../api/video:video_frame",
+    "../../../api/video:video_rtp_headers",
+    "../../../api/video_codecs:video_codecs_api",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:timeutils",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "dl",
+    "pthread",
+  ]
+}
