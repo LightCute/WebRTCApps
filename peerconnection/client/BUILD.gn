@@ -172,3 +172,54 @@ rtc_executable("cli_runner_test") {
     "pthread",
   ]
 }
+
+rtc_executable("data_channel_manager_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/data_channel_manager_test.cc",
+    "data_channel_manager.cc",
+    "data_channel_manager.h",
+    "json_helpers.cc",
+    "json_helpers.h",
+  ]
+
+  deps = [
+    "../../../api:data_channel_interface",
+    "../../../api:scoped_refptr",
+    "../../../rtc_base:logging",
+  ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
+
+rtc_executable("peer_connection_client_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/peer_connection_client_test.cc",
+    "peer_connection_client.cc",
+    "peer_connection_client.h",
+    "defaults.cc",
+    "defaults.h",
+  ]
+
+  deps = [
+    "../../../api:async_dns_resolver",
+    "../../../api/task_queue:pending_task_safety_flag",
+    "../../../rtc_base:async_dns_resolver",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:net_helpers",
+    "../../../rtc_base:socket",
+    "../../../rtc_base:socket_address",
+    "../../../rtc_base:threading",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
