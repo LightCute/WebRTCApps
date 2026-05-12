@@ -1,5 +1,6 @@
 // main.cc
 #include <cstdio>
+#include <dirent.h>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -40,11 +41,29 @@ int main(int argc, char* argv[]) {
   const char* rt_dir_env = getenv("WEBRTC_RUNTIME_DIR");
   std::string runtime_dir = rt_dir_env ? rt_dir_env : "/tmp/webrtc_runtime";
   mkdir(runtime_dir.c_str(), 0755);
-  webrtc::FileRotatingLogSink log_sink(runtime_dir, "daemon",
+
+  // Find next available log index so restarts don't overwrite crash logs
+  int log_index = 0;
+  {
+    DIR* dir = opendir(runtime_dir.c_str());
+    if (dir) {
+      struct dirent* ent;
+      while ((ent = readdir(dir))) {
+        int n = 0;
+        if (sscanf(ent->d_name, "daemon_%d.", &n) == 1 && n >= log_index)
+          log_index = n + 1;
+      }
+      closedir(dir);
+    }
+  }
+  std::string log_prefix = "daemon_" + std::to_string(log_index);
+  webrtc::FileRotatingLogSink log_sink(runtime_dir, log_prefix,
                                         10 * 1024 * 1024, 5);
   log_sink.Init();
+  log_sink.DisableBuffering();  // flush every line for crash triage
   webrtc::LogMessage::AddLogToStream(&log_sink, webrtc::LS_INFO);
-  RTC_LOG(LS_INFO) << "Logging to: " << runtime_dir << "/daemon.0.log";
+  RTC_LOG(LS_INFO) << "Logging to: " << runtime_dir << "/"
+                   << log_prefix << ".0.log";
 
   WebRTCEngine engine(env);
 

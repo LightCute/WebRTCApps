@@ -1,6 +1,6 @@
 import("../../../webrtc.gni")
 
-rtc_executable("peerconnection_server") {
+rtc_executable("signaling_server") {
   testonly = true
 
   sources = [

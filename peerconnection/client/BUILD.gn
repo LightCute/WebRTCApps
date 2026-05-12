@@ -28,6 +28,9 @@ rtc_executable("peerconnection_client") {
     "pc_factory.cc",
     "pc_factory.h",
     "peer_connection_client.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
     "peer_connection_client.h",
     "signaling_interface.h",
     "shm_audio_capturer.cc",
@@ -95,6 +98,8 @@ rtc_executable("peerconnection_client") {
     "../../../media:video_common",
     "../../../modules/audio_device",
     "../../../modules/video_capture:video_capture_module",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
     "../../../p2p:connection",
     "../../../p2p:port_allocator",
     "../../../pc:libjingle_peerconnection",
@@ -113,6 +118,7 @@ rtc_executable("peerconnection_client") {
     "../../../rtc_base:ssl_adapter",
     "../../../rtc_base:stringutils",
     "../../../rtc_base:threading",
+    "../../../rtc_base:timeutils",
     "../../../system_wrappers",
     "../../../test:frame_generator_capturer",
     "../../../test:platform_video_capturer",
@@ -130,7 +136,14 @@ rtc_executable("peerconnection_client") {
   ]
 
   cflags = [ "-Wno-deprecated-declarations" ]
+  include_dirs = [
+    "../mpp/inc",
+    "../mpp/osal/inc",
+    "../mpp/utils",
+    "../mpp/mpp/base/inc",
+  ]
   libs = [
+    "dl",
     "pthread",
   ]
 }
@@ -224,6 +237,37 @@ rtc_executable("peer_connection_client_test") {
   ]
 }
 
+rtc_executable("mpp_codec_debug") {
+  testonly = true
+
+  sources = [
+    "../rk_mpp_test/mpp_codec_debug.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
+  ]
+
+  deps = [
+    "../../../api:scoped_refptr",
+    "../../../api/video:video_frame",
+    "../../../api/video:video_rtp_headers",
+    "../../../api/video_codecs:video_codecs_api",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:timeutils",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  include_dirs = [
+    "../mpp/inc",
+    "../mpp/osal/inc",
+    "../mpp/utils",
+    "../mpp/mpp/base/inc",
+  ]
+  libs = [ "dl", "pthread" ]
+}
+
 rtc_executable("mpp_codec_test") {
   testonly = true
 
@@ -231,6 +275,7 @@ rtc_executable("mpp_codec_test") {
     "../rk_mpp_test/mpp_codec_test.cc",
     "rk_mpp_codec.cc",
     "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
   ]
 
   deps = [
@@ -245,6 +290,7 @@ rtc_executable("mpp_codec_test") {
     "../../../rtc_base:timeutils",
   ]
 
+  include_dirs = [ "../mpp/inc" ]
   cflags = [ "-Wno-deprecated-declarations" ]
   libs = [
     "dl",

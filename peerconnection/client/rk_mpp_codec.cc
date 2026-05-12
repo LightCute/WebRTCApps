@@ -7,7 +7,6 @@
 
 #include "apps/peerconnection/client/rk_mpp_codec.h"
 
-#include <dlfcn.h>
 #include <unistd.h>
 #include <cstring>
 #include <vector>
@@ -21,187 +20,33 @@
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
 
-// ── MPP types (self-contained, no system header deps) ─────────
-typedef int32_t MPP_RET;
-#define MPP_OK 0
-typedef void* MppCtx;
-typedef void* MppBufferGroup;
-typedef void* MppBuffer;
-typedef void* MppFrame;
-typedef void* MppPacket;
-typedef void* MppTask;
-typedef void* MppEncCfg;
-typedef void* MppParam;
-typedef uint32_t RK_U32;
-typedef uint32_t RK_S32;
-typedef int32_t  RK_S32_Signed;
-typedef uint32_t MppCodingType;
-typedef uint32_t MppFrameFormat;
-typedef uint32_t MppCtxType;
-typedef uint32_t MppPollType;
-typedef uint32_t MppPortType;
-typedef uint32_t MpiCmd;
+// ── Real MPP headers from SDK ─────────────────────────
+extern "C" {
+#include "mpp_buffer.h"
+#include "mpp_err.h"
+#include "mpp_frame.h"
+#include "mpp_meta.h"
+#include "mpp_packet.h"
+#include "rk_mpi.h"
+#include "rk_mpi_cmd.h"
+#include "rk_venc_cfg.h"
+#include "rk_venc_cmd.h"
+}
 
-enum {
-  MPP_VIDEO_CodingAVC = 7,
-  MPP_CTX_ENC         = 0,
-  MPP_CTX_DEC         = 1,
-  MPP_POLL_BLOCK      = 0,
-  MPP_BUFFER_TYPE_DRM = 0,
-  MPP_BUFFER_TYPE_ION = 1,
-  MPP_FMT_YUV420SP    = 0x00000100,
-};
 
-// ── MppApi function pointer table (field order matches rk_mpi.h) ──
-typedef struct MppApi_t {
-  RK_U32  size;
-  RK_U32  version;
-  MPP_RET (*decode)(MppCtx, MppPacket, MppFrame*);
-  MPP_RET (*decode_put_packet)(MppCtx, MppPacket);
-  MPP_RET (*decode_get_frame)(MppCtx, MppFrame*);
-  MPP_RET (*encode)(MppCtx, MppFrame, MppPacket*);
-  MPP_RET (*encode_put_frame)(MppCtx, MppFrame);
-  MPP_RET (*encode_get_packet)(MppCtx, MppPacket*);
-  MPP_RET (*isp)(MppCtx, MppFrame, MppFrame);
-  MPP_RET (*isp_put_frame)(MppCtx, MppFrame);
-  MPP_RET (*isp_get_frame)(MppCtx, MppFrame*);
-  MPP_RET (*poll)(MppCtx, MppPortType, MppPollType);
-  MPP_RET (*dequeue)(MppCtx, MppPortType, MppTask*);
-  MPP_RET (*enqueue)(MppCtx, MppPortType, MppTask);
-  MPP_RET (*reset)(MppCtx);
-  MPP_RET (*control)(MppCtx, MpiCmd, MppParam);
-  RK_U32 reserv[16];
-} MppApi_t;
-typedef MppApi_t* MppApi;
-
-// ── Function pointer types for standalone exports ─────────────
-typedef MPP_RET (*MppCreateFn)(MppCtx*, MppApi*);
-typedef MPP_RET (*MppInitFn)(MppCtx, MppCtxType, MppCodingType);
-typedef MPP_RET (*MppDestroyFn)(MppCtx);
-typedef MPP_RET (*MppBufGroupGetFn)(MppBufferGroup*, RK_U32, RK_S32, const char*, const char*);
-typedef MPP_RET (*MppBufGroupLimitFn)(MppBufferGroup, size_t, int);
-typedef MPP_RET (*MppBufGroupPutFn)(MppBufferGroup);
-typedef MPP_RET (*MppBufGetFn)(MppBufferGroup, MppBuffer*, size_t, const char*, const char*);
-typedef MPP_RET (*MppBufPutFn)(MppBuffer, const char*);
-typedef void*    (*MppBufGetPtrFn)(MppBuffer, const char*);
-typedef MPP_RET (*MppFrmInitFn)(MppFrame*);
-typedef MPP_RET (*MppFrmDeinitFn)(MppFrame);
-typedef MPP_RET (*MppFrmSetWidthFn)(MppFrame, RK_U32);
-typedef MPP_RET (*MppFrmSetHeightFn)(MppFrame, RK_U32);
-typedef MPP_RET (*MppFrmSetHorStrideFn)(MppFrame, RK_U32);
-typedef MPP_RET (*MppFrmSetVerStrideFn)(MppFrame, RK_U32);
-typedef MPP_RET (*MppFrmSetBufFn)(MppFrame, MppBuffer);
-typedef MPP_RET (*MppFrmSetFmtFn)(MppFrame, MppFrameFormat);
-typedef MPP_RET (*MppFrmSetEosFn)(MppFrame, RK_U32);
-typedef MppBuffer (*MppFrmGetBufFn)(MppFrame);
-typedef MPP_RET   (*MppFrmGetInfoChangeFn)(MppFrame);
-typedef RK_U32    (*MppFrmGetWidthFn)(MppFrame);
-typedef RK_U32    (*MppFrmGetHeightFn)(MppFrame);
-typedef RK_U32    (*MppFrmGetHorStrideFn)(MppFrame);
-typedef RK_U32    (*MppFrmGetVerStrideFn)(MppFrame);
-typedef size_t    (*MppFrmGetBufSizeFn)(MppFrame);
-typedef MPP_RET (*MppPktInitFn)(MppPacket*, void*, size_t);
-typedef MPP_RET (*MppPktDeinitFn)(MppPacket);
-typedef MPP_RET (*MppPktSetEosFn)(MppPacket);
-typedef size_t  (*MppPktGetLenFn)(MppPacket);
-typedef void*   (*MppPktGetPosFn)(MppPacket);
-typedef MPP_RET (*MppPktSetLenFn)(MppPacket, size_t);
-typedef MPP_RET (*MppEncCfgInitFn)(MppEncCfg*);
-typedef MPP_RET (*MppEncCfgDeinitFn)(MppEncCfg);
-typedef MPP_RET (*MppEncCfgSetS32Fn)(MppEncCfg, const char*, RK_S32_Signed);
-
-// ── Global function pointer table ─────────────────────────────
-static struct {
-  void* lib = nullptr;
-  MppCreateFn         mpp_create;
-  MppInitFn           mpp_init;
-  MppDestroyFn        mpp_destroy;
-  MppBufGroupGetFn    mpp_buffer_group_get;
-  MppBufGroupLimitFn  mpp_buffer_group_limit_config;
-  MppBufGroupPutFn    mpp_buffer_group_put;
-  MppBufGetFn         mpp_buffer_get_with_tag;
-  MppBufPutFn         mpp_buffer_put_with_caller;
-  MppBufGetPtrFn      mpp_buffer_get_ptr_with_caller;
-  MppFrmInitFn        mpp_frame_init;
-  MppFrmDeinitFn      mpp_frame_deinit;
-  MppFrmSetWidthFn    mpp_frame_set_width;
-  MppFrmSetHeightFn   mpp_frame_set_height;
-  MppFrmSetHorStrideFn mpp_frame_set_hor_stride;
-  MppFrmSetVerStrideFn mpp_frame_set_ver_stride;
-  MppFrmSetBufFn      mpp_frame_set_buffer;
-  MppFrmSetFmtFn      mpp_frame_set_fmt;
-  MppFrmSetEosFn      mpp_frame_set_eos;
-  MppFrmGetBufFn      mpp_frame_get_buffer;
-  MppFrmGetInfoChangeFn mpp_frame_get_info_change;
-  MppFrmGetWidthFn    mpp_frame_get_width;
-  MppFrmGetHeightFn   mpp_frame_get_height;
-  MppFrmGetHorStrideFn mpp_frame_get_hor_stride;
-  MppFrmGetVerStrideFn mpp_frame_get_ver_stride;
-  MppFrmGetBufSizeFn  mpp_frame_get_buf_size;
-  MppPktInitFn        mpp_packet_init;
-  MppPktDeinitFn      mpp_packet_deinit;
-  MppPktSetEosFn      mpp_packet_set_eos;
-  MppPktGetLenFn      mpp_packet_get_length;
-  MppPktGetPosFn      mpp_packet_get_pos;
-  MppPktSetLenFn      mpp_packet_set_length;
-  MppEncCfgInitFn     mpp_enc_cfg_init;
-  MppEncCfgDeinitFn   mpp_enc_cfg_deinit;
-  MppEncCfgSetS32Fn   mpp_enc_cfg_set_s32;
-} mpp;
-
-#define LOAD(fn) do { \
-    mpp.fn = (decltype(mpp.fn))dlsym(mpp.lib, #fn); \
-    if (!mpp.fn) { \
-      RTC_LOG(LS_ERROR) << "MPP dlsym failed: " #fn; \
-      dlclose(mpp.lib); mpp.lib = nullptr; \
-      return false; \
-    } \
-  } while(0)
+// ── Runtime MPP loading via dlsym (provided by rk_mpp_stubs.cc) ──
+bool MppLibLoad();
 
 static bool MppLoad() {
-  if (mpp.lib) return true;
-  mpp.lib = dlopen("librockchip_mpp.so.1", RTLD_NOW);
-  if (!mpp.lib) {
-    RTC_LOG(LS_WARNING) << "MPP not available, using software H264";
-    return false;
-  }
-  LOAD(mpp_create); LOAD(mpp_init); LOAD(mpp_destroy);
-  LOAD(mpp_buffer_group_get); LOAD(mpp_buffer_group_limit_config);
-  LOAD(mpp_buffer_group_put);
-  LOAD(mpp_buffer_get_with_tag); LOAD(mpp_buffer_put_with_caller);
-  LOAD(mpp_buffer_get_ptr_with_caller);
-  LOAD(mpp_frame_init); LOAD(mpp_frame_deinit);
-  LOAD(mpp_frame_set_width); LOAD(mpp_frame_set_height);
-  LOAD(mpp_frame_set_hor_stride); LOAD(mpp_frame_set_ver_stride);
-  LOAD(mpp_frame_set_buffer); LOAD(mpp_frame_set_fmt);
-  LOAD(mpp_frame_set_eos); LOAD(mpp_frame_get_buffer);
-  LOAD(mpp_frame_get_info_change);
-  LOAD(mpp_frame_get_width); LOAD(mpp_frame_get_height);
-  LOAD(mpp_frame_get_hor_stride); LOAD(mpp_frame_get_ver_stride);
-  LOAD(mpp_frame_get_buf_size);
-  LOAD(mpp_packet_init); LOAD(mpp_packet_deinit); LOAD(mpp_packet_set_eos);
-  LOAD(mpp_packet_get_length); LOAD(mpp_packet_get_pos);
-  LOAD(mpp_packet_set_length);
-  LOAD(mpp_enc_cfg_init); LOAD(mpp_enc_cfg_deinit);
-  LOAD(mpp_enc_cfg_set_s32);
-  RTC_LOG(LS_INFO) << "MPP loaded successfully";
-  return true;
+  return MppLibLoad();
 }
-#undef LOAD
+
+
 
 #define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
 #define MAX_RETRY 30
 
-// ── MpiCmd constants (from rk_mpi_cmd.h) ──────────────────────
-enum {
-  MPP_SET_OUTPUT_TIMEOUT         = 0,
-  MPP_DEC_SET_PARSER_SPLIT_MODE  = 65,
-  MPP_DEC_SET_EXT_BUF_GROUP      = 71,
-  MPP_DEC_SET_INFO_CHANGE_READY  = 72,
-  MPP_ENC_SET_CFG                = 121,
-  MPP_ENC_GET_HDR_SYNC           = 130,
-  MPP_ENC_SET_IDR_FRAME          = 138,
-};
+// MPP command values from rk_mpi_cmd.h — verified by official mpi_enc_test
 
 namespace webrtc {
 
@@ -219,13 +64,17 @@ std::vector<SdpVideoFormat> MppH264DecoderTemplateAdapter::SupportedFormats() {
 
 std::unique_ptr<VideoEncoder> MppH264EncoderTemplateAdapter::CreateEncoder(
     const Environment&, const SdpVideoFormat&) {
-  if (!MppLoad()) return nullptr;
+  RTC_LOG(LS_INFO) << "MppH264EncoderTemplateAdapter::CreateEncoder";
+  if (!MppLoad()) { RTC_LOG(LS_INFO) << "  CreateEncoder: MppLoad failed"; return nullptr; }
+  RTC_LOG(LS_INFO) << "  CreateEncoder: OK";
   return std::make_unique<MppH264Encoder>();
 }
 
 std::unique_ptr<VideoDecoder> MppH264DecoderTemplateAdapter::CreateDecoder(
     const Environment&, const SdpVideoFormat&) {
-  if (!MppLoad()) return nullptr;
+  RTC_LOG(LS_INFO) << "MppH264DecoderTemplateAdapter::CreateDecoder";
+  if (!MppLoad()) { RTC_LOG(LS_INFO) << "  CreateDecoder: MppLoad failed"; return nullptr; }
+  RTC_LOG(LS_INFO) << "  CreateDecoder: OK";
   return std::make_unique<MppH264Decoder>();
 }
 
@@ -233,88 +82,115 @@ std::unique_ptr<VideoDecoder> MppH264DecoderTemplateAdapter::CreateDecoder(
 
 struct MppH264Encoder::Impl {
   MppCtx ctx = nullptr;
-  MppApi mpi = nullptr;
+  MppApi* mpi = nullptr;
   MppBufferGroup buf_grp = nullptr;
   MppBuffer frm_buf = nullptr;
+  MppBuffer pkt_buf = nullptr;
   EncodedImageCallback* callback = nullptr;
   VideoCodec codec_config = {};
   size_t frame_size = 0;
   int w = 0, h = 0, hor_stride = 0, ver_stride = 0;
   bool ready = false;
+  bool needs_reinit = false;  // defer reinit to Encode() for dynamic resolution
   std::vector<uint8_t> sps_pps_;
 
-  ~Impl() { Release(); }
+  ~Impl() { RTC_LOG(LS_INFO) << "~Impl() enc"; Release(); }
 
   void Release() {
+    RTC_LOG(LS_INFO) << "  Release: start ready=" << ready;
     ready = false;
-    if (frm_buf) { mpp.mpp_buffer_put_with_caller(frm_buf, __func__); frm_buf = nullptr; }
-    if (buf_grp) { mpp.mpp_buffer_group_put(buf_grp); buf_grp = nullptr; }
-    if (ctx)     { mpp.mpp_destroy(ctx); ctx = nullptr; }
+    frm_buf = nullptr;
+    pkt_buf = nullptr;
+    if (ctx && mpi) {
+      RTC_LOG(LS_INFO) << "  Release: calling reset...";
+      mpi->reset(ctx);
+      RTC_LOG(LS_INFO) << "  Release: reset done";
+    }
+    if (buf_grp) {
+      RTC_LOG(LS_INFO) << "  Release: buf_grp_put...";
+      mpp_buffer_group_put(buf_grp);
+      buf_grp = nullptr;
+      RTC_LOG(LS_INFO) << "  Release: buf_grp_put done";
+    }
+    if (ctx) {
+      RTC_LOG(LS_INFO) << "  Release: mpp_destroy...";
+      mpp_destroy(ctx);
+      ctx = nullptr;
+      RTC_LOG(LS_INFO) << "  Release: mpp_destroy done";
+    }
+    RTC_LOG(LS_INFO) << "  Release: done";
   }
 
   bool InitEncoder() {
+    Release();  // free previous resources on reconfig
+    if (!MppLibLoad()) { RTC_LOG(LS_ERROR) << "MppLibLoad failed"; return false; }
+    RTC_LOG(LS_INFO) << "MPP InitEncoder start";
     MPP_RET ret;
-    ret = mpp.mpp_create(&ctx, &mpi);
-    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_create enc failed"; return false; }
-    ret = mpp.mpp_init(ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC);
-    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_init enc failed"; return false; }
 
     w = codec_config.width;
     h = codec_config.height;
     hor_stride = ALIGN(w, 8);
     ver_stride = ALIGN(h, 16);
     frame_size = hor_stride * ver_stride * 3 / 2;
+    RTC_LOG(LS_INFO) << "  frame " << w << "x" << h << " stride=" << hor_stride
+                     << "x" << ver_stride << " size=" << frame_size;
 
-    ret = mpp.mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_DRM, 0, "rk", __func__);
-    if (ret) ret = mpp.mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_ION, 0, "rk", __func__);
+    // Step 1: Create MPP context
+    RTC_LOG(LS_INFO) << "  [1/5] mpp_create...";
+    ret = mpp_create(&ctx, &mpi);
+    RTC_LOG(LS_INFO) << "  mpp_create ret=" << ret << " ctx=" << (void*)ctx << " mpi=" << (void*)mpi;
+    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_create enc failed"; return false; }
+
+    // Step 2: Init encoder
+    RTC_LOG(LS_INFO) << "  [2/5] mpp_init ENC AVC...";
+    ret = mpp_init(ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC);
+    RTC_LOG(LS_INFO) << "  mpp_init ret=" << ret;
+    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_init enc failed"; return false; }
+
+    // Step 3: Buffer group AFTER init (rk_h264_test order)
+    RTC_LOG(LS_INFO) << "  [3/5] buffer group DRM...";
+    ret = mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_DRM,
+                               MPP_BUFFER_INTERNAL, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  buf_grp DRM ret=" << ret << " grp=" << (void*)buf_grp;
+    if (ret) {
+      RTC_LOG(LS_INFO) << "  buf_grp try ION...";
+      ret = mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_ION,
+                                 MPP_BUFFER_INTERNAL, MODULE_TAG, __func__);
+      RTC_LOG(LS_INFO) << "  buf_grp ION ret=" << ret << " grp=" << (void*)buf_grp;
+    }
     if (!buf_grp) { RTC_LOG(LS_ERROR) << "buffer group failed"; return false; }
-    mpp.mpp_buffer_group_limit_config(buf_grp, frame_size, 4);
+    mpp_buffer_group_limit_config(buf_grp, frame_size, 4);
 
-    ret = mpp.mpp_buffer_get_with_tag(buf_grp, &frm_buf, frame_size, "rk", __func__);
+    RTC_LOG(LS_INFO) << "  getting frame buffer size=" << frame_size;
+    ret = mpp_buffer_get_with_tag(buf_grp, &frm_buf, frame_size, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  frm_buf ret=" << ret << " buf=" << (void*)frm_buf;
     if (ret) { RTC_LOG(LS_ERROR) << "frm_buf failed"; return false; }
 
-    MppEncCfg cfg = nullptr;
-    mpp.mpp_enc_cfg_init(&cfg);
+    // Output packet buffer (official mpi_enc_test pattern)
+    ret = mpp_buffer_get_with_tag(buf_grp, &pkt_buf, frame_size, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  pkt_buf ret=" << ret << " buf=" << (void*)pkt_buf;
+    if (ret) { RTC_LOG(LS_ERROR) << "pkt_buf failed"; return false; }
 
-    mpp.mpp_enc_cfg_set_s32(cfg, "prep:width", w);
-    mpp.mpp_enc_cfg_set_s32(cfg, "prep:height", h);
-    mpp.mpp_enc_cfg_set_s32(cfg, "prep:hor_stride", hor_stride);
-    mpp.mpp_enc_cfg_set_s32(cfg, "prep:ver_stride", ver_stride);
-    mpp.mpp_enc_cfg_set_s32(cfg, "prep:format", MPP_FMT_YUV420SP);
-
-    int bps = codec_config.maxBitrate * 1000;
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:mode", 1);  // CBR
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_max", bps * 12 / 10);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_min", bps / 2);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:fps_in_num", codec_config.maxFramerate);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:fps_in_denom", 1);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:fps_out_num", codec_config.maxFramerate);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:fps_out_denom", 1);
-    mpp.mpp_enc_cfg_set_s32(cfg, "rc:gop", codec_config.H264()->keyFrameInterval);
-
-    mpp.mpp_enc_cfg_set_s32(cfg, "codec:type", MPP_VIDEO_CodingAVC);
-    mpp.mpp_enc_cfg_set_s32(cfg, "h264:profile", 100);
-    mpp.mpp_enc_cfg_set_s32(cfg, "h264:level", 42);
-    mpp.mpp_enc_cfg_set_s32(cfg, "h264:cabac_en", 1);
-    mpp.mpp_enc_cfg_set_s32(cfg, "h264:trans8x8", 1);
-
-    ret = mpi->control(ctx, MPP_ENC_SET_CFG, cfg);
-    mpp.mpp_enc_cfg_deinit(cfg);
-    if (ret) { RTC_LOG(LS_ERROR) << "ENC_SET_CFG failed"; return false; }
-
-    // Get SPS/PPS header
-    MppPacket hdr_pkt = nullptr;
-    mpp.mpp_packet_init(&hdr_pkt, nullptr, 0);
-    ret = mpi->control(ctx, MPP_ENC_GET_HDR_SYNC, hdr_pkt);
-    if (ret == MPP_OK) {
-      void* ptr = mpp.mpp_packet_get_pos(hdr_pkt);
-      size_t len = mpp.mpp_packet_get_length(hdr_pkt);
-      if (ptr && len > 0) {
-        sps_pps_.assign((uint8_t*)ptr, (uint8_t*)ptr + len);
-      }
+    // Step 4: Try encoder with defaults only — ENC_SET_CFG returns -2
+    // on the board's older library. Set minimal config and move on.
+    RTC_LOG(LS_INFO) << "  [4/4] minimal config, skipping ENC_SET_CFG...";
+    {
+      MppEncCfg cfg = nullptr;
+      mpp_enc_cfg_init(&cfg);
+      mpp_enc_cfg_set_s32(cfg, "prep:width", w);
+      mpp_enc_cfg_set_s32(cfg, "prep:height", h);
+      mpp_enc_cfg_set_s32(cfg, "prep:hor_stride", hor_stride);
+      mpp_enc_cfg_set_s32(cfg, "prep:ver_stride", ver_stride);
+      mpp_enc_cfg_set_s32(cfg, "prep:format", MPP_FMT_YUV420SP);
+      int bps = codec_config.maxBitrate * 1000;
+      mpp_enc_cfg_set_s32(cfg, "rc:mode", 1);
+      mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
+      mpp_enc_cfg_set_s32(cfg, "rc:gop", 60);
+      mpp_enc_cfg_set_s32(cfg, "codec:type", MPP_VIDEO_CodingAVC);
+      MPP_RET cfg_ret = mpi->control(ctx, MPP_ENC_SET_CFG, cfg);
+      RTC_LOG(LS_INFO) << "  ENC_SET_CFG ret=" << cfg_ret;
+      mpp_enc_cfg_deinit(cfg);
     }
-    mpp.mpp_packet_deinit(hdr_pkt);
 
     ready = true;
     RTC_LOG(LS_INFO) << "MPP encoder ready " << w << "x" << h
@@ -324,12 +200,24 @@ struct MppH264Encoder::Impl {
 
   int32_t EncodeOne(const VideoFrame& frame,
                     const std::vector<VideoFrameType>* frame_types) {
+    RTC_LOG(LS_INFO) << "  EncodeOne: start";
+    // Only encode frames matching the configured resolution.
+    // Quality scaler may downscale frames that MPP can't handle at
+    // current bitrate; skip them rather than reconfiguring.
+    int fw = frame.width(), fh = frame.height();
+    if (fw != w || fh != h) {
+      RTC_LOG(LS_INFO) << "  EncodeOne: skip frame " << fw << "x" << fh
+                       << " (configured for " << w << "x" << h << ")";
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
     scoped_refptr<I420BufferInterface> i420 =
         frame.video_frame_buffer()->ToI420();
-    if (!i420) return WEBRTC_VIDEO_CODEC_ERROR;
+    if (!i420) { RTC_LOG(LS_ERROR) << "  ToI420 failed"; return WEBRTC_VIDEO_CODEC_ERROR; }
 
     int ys = w * h, uvs = ys / 4;
-    uint8_t* dst = (uint8_t*)mpp.mpp_buffer_get_ptr_with_caller(frm_buf, __func__);
+    RTC_LOG(LS_INFO) << "  EncodeOne: get buf ptr...";
+    uint8_t* dst = (uint8_t*)mpp_buffer_get_ptr_with_caller(frm_buf, __func__);
+    RTC_LOG(LS_INFO) << "  EncodeOne: buf ptr=" << (void*)dst << " ys=" << ys;
     memcpy(dst, i420->DataY(), ys);
     const uint8_t* u = i420->DataU();
     const uint8_t* v = i420->DataV();
@@ -337,48 +225,57 @@ struct MppH264Encoder::Impl {
       dst[ys + i*2]     = u[i];
       dst[ys + i*2 + 1] = v[i];
     }
+    RTC_LOG(LS_INFO) << "  EncodeOne: I420→NV12 done";
 
-    // Request IDR if signaled
-    if (frame_types) {
-      for (auto ft : *frame_types) {
-        if (ft == VideoFrameType::kVideoFrameKey) {
-          mpi->control(ctx, MPP_ENC_SET_IDR_FRAME, nullptr);
-          break;
-        }
-      }
-    }
+    // rk_h264_test doesn't call ENC_SET_IDR_FRAME; skip it
 
+    RTC_LOG(LS_INFO) << "  EncodeOne: frame init...";
     MppFrame frm = nullptr;
-    mpp.mpp_frame_init(&frm);
-    mpp.mpp_frame_set_width(frm, w);
-    mpp.mpp_frame_set_height(frm, h);
-    mpp.mpp_frame_set_hor_stride(frm, hor_stride);
-    mpp.mpp_frame_set_ver_stride(frm, ver_stride);
-    mpp.mpp_frame_set_fmt(frm, MPP_FMT_YUV420SP);
-    mpp.mpp_frame_set_buffer(frm, frm_buf);
+    mpp_frame_init(&frm);
+    mpp_frame_set_width(frm, w);
+    mpp_frame_set_height(frm, h);
+    mpp_frame_set_hor_stride(frm, hor_stride);
+    mpp_frame_set_ver_stride(frm, ver_stride);
+    mpp_frame_set_fmt(frm, MPP_FMT_YUV420SP);
+    mpp_frame_set_buffer(frm, frm_buf);
 
-    mpi->encode_put_frame(ctx, frm);
-    mpp.mpp_frame_deinit(frm);
-
+    // Official pattern: pre-allocated packet buffer, attach to frame metadata
     MppPacket pkt = nullptr;
-    mpp.mpp_packet_init(&pkt, nullptr, 0);
-    mpp.mpp_packet_set_length(pkt, 0);
+    mpp_packet_init_with_buffer(&pkt, pkt_buf);
+    mpp_packet_set_length(pkt, 0);
+    MppMeta meta = mpp_frame_get_meta(frm);
+    mpp_meta_set_packet(meta, KEY_OUTPUT_PACKET, pkt);
+
+    RTC_LOG(LS_INFO) << "  EncodeOne: put_frame...";
+    mpi->encode_put_frame(ctx, frm);
+    RTC_LOG(LS_INFO) << "  EncodeOne: put_frame done, deinit frame...";
+    mpp_frame_deinit(&frm);
+    RTC_LOG(LS_INFO) << "  EncodeOne: get packet loop (MAX_RETRY=" << MAX_RETRY << ")...";
 
     int tries = 0;
     for (; tries < MAX_RETRY; tries++) {
       MPP_RET ret = mpi->encode_get_packet(ctx, &pkt);
-      if (ret == MPP_OK && mpp.mpp_packet_get_length(pkt) > 0) break;
+      if (tries == 0) {
+        RTC_LOG(LS_INFO) << "  EncodeOne: 1st get_packet ret=" << ret
+                         << " pkt=" << (void*)pkt
+                         << " len=" << (pkt ? mpp_packet_get_length(pkt) : 0);
+      }
+      if (ret == MPP_OK && mpp_packet_get_length(pkt) > 0) break;
       usleep(1000);
     }
+    RTC_LOG(LS_INFO) << "  EncodeOne: tries=" << tries
+                     << " pkt=" << (void*)pkt
+                     << " len=" << (pkt ? mpp_packet_get_length(pkt) : 0);
     if (tries >= MAX_RETRY || !pkt) {
-      mpp.mpp_packet_deinit(pkt);
+      mpp_packet_deinit(&pkt);
+      RTC_LOG(LS_INFO) << "  EncodeOne: no output (dropped)";
       return WEBRTC_VIDEO_CODEC_OK;
     }
 
-    size_t len = mpp.mpp_packet_get_length(pkt);
-    void*  data = mpp.mpp_packet_get_pos(pkt);
+    size_t len = mpp_packet_get_length(pkt);
+    void*  data = mpp_packet_get_pos(pkt);
     if (!data || !len) {
-      mpp.mpp_packet_deinit(pkt);
+      mpp_packet_deinit(&pkt);
       return WEBRTC_VIDEO_CODEC_OK;
     }
 
@@ -393,8 +290,14 @@ struct MppH264Encoder::Impl {
     img._frameType = is_key ? VideoFrameType::kVideoFrameKey
                             : VideoFrameType::kVideoFrameDelta;
 
-    if (callback) callback->OnEncodedImage(img, nullptr);
-    mpp.mpp_packet_deinit(pkt);
+    if (callback) {
+      RTC_LOG(LS_INFO) << "  EncodeOne: calling callback...";
+      callback->OnEncodedImage(img, nullptr);
+      RTC_LOG(LS_INFO) << "  EncodeOne: callback done";
+    }
+    RTC_LOG(LS_INFO) << "  EncodeOne: deinit pkt...";
+    mpp_packet_deinit(&pkt);
+    RTC_LOG(LS_INFO) << "  EncodeOne: done, returning OK";
     return WEBRTC_VIDEO_CODEC_OK;
   }
 };
@@ -404,14 +307,32 @@ MppH264Encoder::~MppH264Encoder() = default;
 
 int32_t MppH264Encoder::InitEncode(const VideoCodec* c, const Settings&) {
   impl_->codec_config = *c;
+  if (impl_->ready) {
+    // Quality scaler changed resolution without Release() first.
+    // Defer reinit to next Encode() to avoid nested reinit in callback.
+    RTC_LOG(LS_INFO) << "InitEncode: defer reinit " << c->width << "x" << c->height;
+    impl_->needs_reinit = true;
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+  // Release() was called first (ready=false). Do full reinit now.
+  impl_->needs_reinit = false;
   if (!impl_->InitEncoder()) return WEBRTC_VIDEO_CODEC_ERROR;
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
 int32_t MppH264Encoder::Encode(const VideoFrame& f,
                                const std::vector<VideoFrameType>* frame_types) {
-  return impl_ && impl_->ready ? impl_->EncodeOne(f, frame_types)
-                               : WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  RTC_LOG(LS_INFO) << "Encode called, ready=" << (impl_ && impl_->ready);
+  if (impl_ && impl_->needs_reinit) {
+    RTC_LOG(LS_INFO) << "Encode: applying deferred reinit";
+    impl_->Release();
+    if (!impl_->InitEncoder()) return WEBRTC_VIDEO_CODEC_ERROR;
+    impl_->needs_reinit = false;
+  }
+  int32_t ret = impl_ && impl_->ready ? impl_->EncodeOne(f, frame_types)
+                                      : WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  RTC_LOG(LS_INFO) << "Encode returned " << ret;
+  return ret;
 }
 
 int32_t MppH264Encoder::RegisterEncodeCompleteCallback(
@@ -420,18 +341,22 @@ int32_t MppH264Encoder::RegisterEncodeCompleteCallback(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t MppH264Encoder::Release() { impl_.reset(); return WEBRTC_VIDEO_CODEC_OK; }
+int32_t MppH264Encoder::Release() {
+  RTC_LOG(LS_INFO) << "MppH264Encoder::Release() — deferred";
+  if (impl_) { impl_->ready = false; impl_->needs_reinit = true; }
+  return WEBRTC_VIDEO_CODEC_OK;
+}
 
 void MppH264Encoder::SetRates(const RateControlParameters& p) {
   if (!impl_ || !impl_->ctx || !impl_->mpi) return;
   int bps = p.bitrate.get_sum_kbps() * 1000;
   MppEncCfg cfg = nullptr;
-  mpp.mpp_enc_cfg_init(&cfg);
-  mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
-  mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_max", bps * 12 / 10);
-  mpp.mpp_enc_cfg_set_s32(cfg, "rc:bps_min", bps / 2);
+  mpp_enc_cfg_init(&cfg);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_max", bps * 12 / 10);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_min", bps / 2);
   impl_->mpi->control(impl_->ctx, MPP_ENC_SET_CFG, cfg);
-  mpp.mpp_enc_cfg_deinit(cfg);
+  mpp_enc_cfg_deinit(cfg);
 }
 
 VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
@@ -439,6 +364,12 @@ VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
   i.implementation_name = "RK3588 MPP H264";
   i.is_hardware_accelerated = true;
   i.scaling_settings = VideoEncoder::ScalingSettings::kOff;
+  // Prevent quality scaler from downscaling below configured resolution.
+  // MPP encoder needs reinit on resolution change; keeping it stable
+  // avoids the reconfiguration cascade.
+  if (impl_) {
+    i.scaling_settings.min_pixels_per_frame = impl_->w * impl_->h;
+  }
   return i;
 }
 
@@ -446,7 +377,7 @@ VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
 
 struct MppH264Decoder::Impl {
   MppCtx ctx = nullptr;
-  MppApi mpi = nullptr;
+  MppApi* mpi = nullptr;
   MppBufferGroup frm_grp = nullptr;
   int w = 0, h = 0, hor_stride = 0, ver_stride = 0;
   size_t buf_size = 0;
@@ -457,15 +388,18 @@ struct MppH264Decoder::Impl {
 
   void Release() {
     info_ready = false;
-    if (frm_grp) { mpp.mpp_buffer_group_put(frm_grp); frm_grp = nullptr; }
-    if (ctx)      { mpp.mpp_destroy(ctx); ctx = nullptr; }
+    if (ctx && mpi) { mpi->reset(ctx); }
+    if (frm_grp) { mpp_buffer_group_put(frm_grp); frm_grp = nullptr; }
+    if (ctx)      { mpp_destroy(ctx); ctx = nullptr; }
   }
 
   bool InitDecoder() {
+    Release();  // free previous resources on reconfig
+    if (!MppLibLoad()) { RTC_LOG(LS_ERROR) << "MppLibLoad failed"; return false; }
     MPP_RET ret;
-    ret = mpp.mpp_create(&ctx, &mpi);
+    ret = mpp_create(&ctx, &mpi);
     if (ret) { RTC_LOG(LS_ERROR) << "mpp_create dec failed"; return false; }
-    ret = mpp.mpp_init(ctx, MPP_CTX_DEC, MPP_VIDEO_CodingAVC);
+    ret = mpp_init(ctx, MPP_CTX_DEC, MPP_VIDEO_CodingAVC);
     if (ret) { RTC_LOG(LS_ERROR) << "mpp_init dec failed"; return false; }
 
     RK_U32 split = 1;
@@ -479,7 +413,7 @@ struct MppH264Decoder::Impl {
   int32_t DecodeOne(const EncodedImage& input_image, int64_t render_time_ms) {
     MPP_RET ret;
     MppPacket packet = nullptr;
-    mpp.mpp_packet_init(&packet, (void*)input_image.data(), input_image.size());
+    mpp_packet_init(&packet, (void*)input_image.data(), input_image.size());
 
     int pkt_done = 0;
     for (int tries = 0; tries < MAX_RETRY; tries++) {
@@ -487,7 +421,7 @@ struct MppH264Decoder::Impl {
       if (ret == MPP_OK) { pkt_done = 1; break; }
       usleep(1000);
     }
-    mpp.mpp_packet_deinit(packet);
+    mpp_packet_deinit(&packet);
     if (!pkt_done) return WEBRTC_VIDEO_CODEC_ERROR;
 
     MppFrame frame = nullptr;
@@ -498,46 +432,46 @@ struct MppH264Decoder::Impl {
     }
     if (!frame) return WEBRTC_VIDEO_CODEC_OK;
 
-    if (mpp.mpp_frame_get_info_change(frame)) {
-      w = mpp.mpp_frame_get_width(frame);
-      h = mpp.mpp_frame_get_height(frame);
-      hor_stride = mpp.mpp_frame_get_hor_stride(frame);
-      ver_stride = mpp.mpp_frame_get_ver_stride(frame);
-      buf_size = mpp.mpp_frame_get_buf_size(frame);
+    if (mpp_frame_get_info_change(frame)) {
+      w = mpp_frame_get_width(frame);
+      h = mpp_frame_get_height(frame);
+      hor_stride = mpp_frame_get_hor_stride(frame);
+      ver_stride = mpp_frame_get_ver_stride(frame);
+      buf_size = mpp_frame_get_buf_size(frame);
 
       RTC_LOG(LS_INFO) << "Decoder info change: " << w << "x" << h
                        << " stride=" << hor_stride << "x" << ver_stride
                        << " buf=" << buf_size;
 
-      if (frm_grp) mpp.mpp_buffer_group_put(frm_grp);
-      ret = mpp.mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_DRM, 0, "rk", __func__);
+      if (frm_grp) mpp_buffer_group_put(frm_grp);
+      ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_DRM, MPP_BUFFER_INTERNAL, "rk", __func__);
       if (ret)
-        ret = mpp.mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_ION, 0, "rk", __func__);
-      mpp.mpp_buffer_group_limit_config(frm_grp, buf_size, 24);
+        ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_ION, MPP_BUFFER_INTERNAL, "rk", __func__);
+      mpp_buffer_group_limit_config(frm_grp, buf_size, 24);
 
       mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, frm_grp);
       mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
       info_ready = true;
 
-      mpp.mpp_frame_deinit(frame);
+      mpp_frame_deinit(&frame);
       return WEBRTC_VIDEO_CODEC_OK;
     }
 
     if (!info_ready) {
-      mpp.mpp_frame_deinit(frame);
+      mpp_frame_deinit(&frame);
       return WEBRTC_VIDEO_CODEC_OK;
     }
 
-    MppBuffer dec_buf = mpp.mpp_frame_get_buffer(frame);
+    MppBuffer dec_buf = mpp_frame_get_buffer(frame);
     if (!dec_buf) {
-      mpp.mpp_frame_deinit(frame);
+      mpp_frame_deinit(&frame);
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
 
-    uint8_t* src = (uint8_t*)mpp.mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
+    uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
     scoped_refptr<I420Buffer> i420 = I420Buffer::Create(w, h);
     if (!i420) {
-      mpp.mpp_frame_deinit(frame);
+      mpp_frame_deinit(&frame);
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
 
@@ -558,7 +492,7 @@ struct MppH264Decoder::Impl {
       callback->Decoded(decoded_frame, render_time_ms);
     }
 
-    mpp.mpp_frame_deinit(frame);
+    mpp_frame_deinit(&frame);
     return WEBRTC_VIDEO_CODEC_OK;
   }
 };
@@ -583,7 +517,10 @@ int32_t MppH264Decoder::RegisterDecodeCompleteCallback(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t MppH264Decoder::Release() { impl_.reset(); return WEBRTC_VIDEO_CODEC_OK; }
+int32_t MppH264Decoder::Release() {
+  if (impl_) impl_->Release();  // clean up MPP resources, keep impl_ alive
+  return WEBRTC_VIDEO_CODEC_OK;
+}
 
 VideoDecoder::DecoderInfo MppH264Decoder::GetDecoderInfo() const {
   DecoderInfo i;

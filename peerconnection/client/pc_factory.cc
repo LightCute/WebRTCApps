@@ -24,6 +24,7 @@
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
 #include "apps/peerconnection/client/defaults.h"
+#include "apps/peerconnection/client/rk_mpp_codec.h"
 #include "rtc_base/logging.h"
 
 PcComponents PcFactory::Create(webrtc::Thread* network_thread,
@@ -44,12 +45,14 @@ PcComponents PcFactory::Create(webrtc::Thread* network_thread,
   deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
   deps.video_encoder_factory =
       std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+          //webrtc::MppH264EncoderTemplateAdapter,
           webrtc::LibvpxVp8EncoderTemplateAdapter,
           webrtc::LibvpxVp9EncoderTemplateAdapter,
           webrtc::OpenH264EncoderTemplateAdapter,
           webrtc::LibaomAv1EncoderTemplateAdapter>>();
   deps.video_decoder_factory =
       std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+          //webrtc::MppH264DecoderTemplateAdapter,
           webrtc::LibvpxVp8DecoderTemplateAdapter,
           webrtc::LibvpxVp9DecoderTemplateAdapter,
           webrtc::OpenH264DecoderTemplateAdapter,
