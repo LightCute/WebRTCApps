@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile mpp_codec_test for RK3588 ARM64
+# Cross-compile MPP tests for RK3588 ARM64
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,14 +20,19 @@ echo "=== Generating ARM64 build: ${OUT_DIR} ==="
 gn gen "${OUT_DIR}" \
   --root="${SRC_ROOT}" \
   --root-target=//apps/peerconnection/client:mpp_codec_test \
+  --root-target=//apps/peerconnection/client:mpp_codec_debug \
   --args="${GN_ARGS}"
+
+echo "=== Building mpp_codec_debug (with printf stepping) ==="
+ninja -C "${OUT_DIR}" mpp_codec_debug
 
 echo "=== Building mpp_codec_test ==="
 ninja -C "${OUT_DIR}" mpp_codec_test
 
 echo ""
-echo "=== Binary ==="
+echo "=== Binaries ==="
+file "${OUT_DIR}/mpp_codec_debug"
 file "${OUT_DIR}/mpp_codec_test"
 echo ""
-echo "Deploy: scp ${OUT_DIR}/mpp_codec_test root@192.168.6.226:/tmp/"
-echo "Run:    ssh root@192.168.6.226 /tmp/mpp_codec_test"
+echo "Deploy debug: scp ${OUT_DIR}/mpp_codec_debug root@192.168.6.226:/tmp/"
+echo "Run debug:    ssh root@192.168.6.226 /tmp/mpp_codec_debug"
