@@ -184,7 +184,13 @@ struct MppH264Encoder::Impl {
     uint8_t* dst = (uint8_t*)mpp.mpp_buffer_get_ptr(frm_buf);
     memcpy(dst, i420->DataY(), ys);
     const uint8_t* u = i420->DataU(); const uint8_t* v = i420->DataV();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
     for (int i = 0; i < uvs; i++) { dst[ys + i*2] = u[i]; dst[ys + i*2 + 1] = v[i]; }
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
 
     MppFrame f = nullptr; mpp.mpp_frame_init(&f);
     mpp.mpp_frame_set_width(f, w); mpp.mpp_frame_set_height(f, h);

@@ -1,0 +1,47 @@
+import("../../../../webrtc.gni")
+
+rtc_executable("video_decoder_shm") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "shm_video_reader.cc",
+    "shm_video_reader.h",
+    "../../client/shm_video_writer.cc",
+    "../../client/shm_video_writer.h",
+    "../../client/shm_common.cc",
+    "../../client/shm_common.h",
+    "../../client/rk_mpp_codec.cc",
+    "../../client/rk_mpp_codec.h",
+    "../../client/rk_mpp_stubs.cc",
+  ]
+
+  deps = [
+    "../../../../api/environment",
+    "../../../../api/environment:environment_factory",
+    "../../../../api/video:video_frame",
+    "../../../../api/video_codecs:builtin_video_decoder_factory",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../modules/video_coding:video_codec_interface",
+    "../../../../modules/video_coding:webrtc_h264",
+    "../../../../rtc_base:logging",
+    "../../../../system_wrappers:system_wrappers",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  cflags = [
+    "-Wno-deprecated-declarations",
+    "-Wno-unsafe-buffer-usage",
+  ]
+  include_dirs = [
+    "../../mpp/inc",
+    "../../mpp/osal/inc",
+    "../../mpp/utils",
+    "../../mpp/mpp/base/inc",
+  ]
+  libs = [
+    "dl",
+    "pthread",
+  ]
+}

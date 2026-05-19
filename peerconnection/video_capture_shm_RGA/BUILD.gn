@@ -1,0 +1,37 @@
+import("../../../webrtc.gni")
+
+rtc_executable("video_capture_shm_RGA") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "dma_buf_pool.cc",
+    "dma_buf_pool.h",
+    "dma_buf_server.cc",
+    "dma_buf_server.h",
+    "rga_video_converter.cc",
+    "rga_video_converter.h",
+    "../client/shm_common.cc",
+    "../client/shm_common.h",
+    "../client/shm_video_renderer.cc",
+    "../client/shm_video_renderer.h",
+    "../client/shm_video_writer.cc",
+    "../client/shm_video_writer.h",
+  ]
+
+  deps = [
+    "../../../api/video:video_frame",
+    "../../../modules/video_capture:video_capture_internal_impl",
+    "../../../modules/video_capture:video_capture_module",
+    "../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  include_dirs = [ "rga_headers" ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+    "dl",
+  ]
+}
