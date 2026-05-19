@@ -1,0 +1,38 @@
+import("../../../webrtc.gni")
+
+rtc_executable("video_capture_shm") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "../client/shm_video_renderer.cc",
+    "../client/shm_video_renderer.h",
+    "../client/shm_video_writer.cc",
+    "../client/shm_video_writer.h",
+    "../client/shm_common.cc",
+    "../client/shm_common.h",
+  ]
+
+  deps = [
+    "../../../api/environment",
+    "../../../api/environment:environment_factory",
+    "../../../api:create_frame_generator",
+    "../../../api/video:video_frame",
+    "../../../common_video:common_video",
+    "../../../modules/video_capture:video_capture_internal_impl",
+    "../../../modules/video_capture:video_capture_module",
+    "../../../rtc_base:logging",
+    "../../../system_wrappers:system_wrappers",
+    "../../../test:frame_generator_capturer",
+    "../../../test:platform_video_capturer",
+    "../../../test:test_video_capturer",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+    "dl",
+  ]
+}

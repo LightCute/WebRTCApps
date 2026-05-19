@@ -84,7 +84,7 @@ nc -U /tmp/webrtc_bob/webrtc_ctrl.sock
 Alice 终端4 >  {"id":1,"cmd":"connect","params":{"server":"127.0.0.1","port":8888}}
 Bob   终端5 >  {"id":1,"cmd":"connect","params":{"server":"127.0.0.1","port":8888}}
 ```
-
+{"id":1,"cmd":"connect","params":{"server":"120.79.210.6","port":8888}}
 双方都会收到：
 ```json
 {"id":1,"ok":true}
