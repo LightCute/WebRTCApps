@@ -1,291 +1,235 @@
-# 本地双客户端通话测试指南
+# WebRTC Daemon Unix Socket 测试指南
 
-在同一台机器上启动信令服务器 + 两个 WebRTC 守护进程，模拟完整的通话/挂断/重呼流程。
+通过 `nc` 连接 daemon 的 Unix socket，发送 JSON 命令进行所有操作。
 
-## 前置条件
-
-- 已编译 x64 daemon 二进制（`cd apps/peerconnection/client && ./build.sh`）
-- 已编译信令服务器（`cd apps/peerconnection/server && ./build.sh`）
-
-## 架构
-
-```
-┌─────────────────┐     ┌─────────────────┐
-│  Alice Daemon   │     │   Bob Daemon    │
-│  nc → /tmp/     │     │  nc → /tmp/     │
-│  alice/ctrl.sock│     │  bob/ctrl.sock  │
-└───────┬─────────┘     └───────┬─────────┘
-        │ ICE (P2P)             │
-        └───────────┬───────────┘
-                    │
-        ┌───────────┴───────────┐
-        │  Signaling Server     │
-        │  localhost:8888       │
-        └───────────────────────┘
-```
-
-## 一、启动信令服务器
+## 启动 daemon
 
 ```bash
-# 终端1：信令服务器
-cd apps/peerconnection/server
-./build.sh                          # 首次需要编译
-./out/signaling_server/peerconnection_server --port=8888
-
-# 输出: Server listening on port 8888
-# 日志: tail -f /tmp/webrtc_logs/signaling_server.log
-```
-
-## 二、启动 Alice 守护进程
-
-```bash
-# 终端2：Alice daemon
-mkdir -p /tmp/webrtc_alice
-WEBRTC_RUNTIME_DIR=/tmp/webrtc_alice \
+mkdir -p /tmp/webrtc_test
+WEBRTC_RUNTIME_DIR=/tmp/webrtc_test \
   ./out/apps_peerconnection_client/apps_peerconnection_client
-# 输出: WebRTC daemon started. Listening on /tmp/webrtc_alice/webrtc_ctrl.sock
+# 输出: WebRTC daemon started. Listening on /tmp/webrtc_test/webrtc_ctrl.sock
 ```
 
-## 三、启动 Bob 守护进程
+## 连接控制台
 
 ```bash
-# 终端3：Bob daemon
-mkdir -p /tmp/webrtc_bob
-WEBRTC_RUNTIME_DIR=/tmp/webrtc_bob \
-  ./out/apps_peerconnection_client/apps_peerconnection_client
-# 输出: WebRTC daemon started. Listening on /tmp/webrtc_bob/webrtc_ctrl.sock
+nc -U /tmp/webrtc_test/webrtc_ctrl.sock
 ```
 
-`WEBRTC_RUNTIME_DIR` 保证两个进程的 Unix socket 和 SHM 路径相互隔离。
+之后所有命令在此终端中逐行输入，回车发送。**nc 必须保持打开**才能收到异步事件。
 
-## 四、打开控制终端
+---
 
-终端4 和终端5 分别连接两个守护进程：
+## 命令参考
 
-```bash
-# 终端4：Alice 控制台
-nc -U /tmp/webrtc_alice/webrtc_ctrl.sock
-```
+通用格式：`{"id":<int>,"cmd":"<命令>"[, "params":{...}]}`
 
-```bash
-# 终端5：Bob 控制台
-nc -U /tmp/webrtc_bob/webrtc_ctrl.sock
-```
+每个命令返回 `{"id":<n>,"ok":true}`（同步确认），部分命令后续还有异步事件推送。
 
-**重要**：两个 nc 连接必须保持打开。所有后续命令在对应 nc 终端中逐行输入，回车发送。
-
-## 五、第一轮通话
-
-### 5.1 签到
-
-在两个 nc 终端中分别输入：
+### 1. connect — 连接信令服务器
 
 ```
-Alice 终端4 >  {"id":1,"cmd":"connect","params":{"server":"127.0.0.1","port":8888}}
-Bob   终端5 >  {"id":1,"cmd":"connect","params":{"server":"127.0.0.1","port":8888}}
+{"id":1,"cmd":"connect","params":{"server":"<IP>","port":<端口>}}
+```
+
+异步事件：
+- `{"event":"server_connected"}`
+- `{"event":"peer_online","peer":{"id":2,"name":"..."}}`
+- `{"event":"peer_list","peers":[...]}`
+
+示例：
 ```
 {"id":1,"cmd":"connect","params":{"server":"120.79.210.6","port":8888}}
-双方都会收到：
-```json
-{"id":1,"ok":true}
-{"event":"server_connected"}
-{"event":"peer_online","peer":{"id":2,"name":"Bob"}}
-{"event":"peer_list","peers":[{"id":2,"name":"Bob"}]}
 ```
 
-> 记下对方的 `peer_id`。Alice 看到 Bob 的 id，Bob 看到 Alice 的 id。
+### 2. disconnect — 断开信令服务器
 
-### 5.2 Alice 呼叫 Bob（第一轮）
-
-Alice 终端4：
 ```
-{"id":2,"cmd":"call","params":{"peer_id":2}}
-```
-(peer_id 改为 Bob 的实际 id)
-
-Alice 侧期望：
-```json
-{"id":2,"ok":true}
-{"event":"call_connected"}
-{"event":"ice_state","state":"checking"}
-{"event":"ice_state","state":"connected"}        ← 通话建立
-{"event":"data_channel_state","state":"open"}    ← DataChannel 就绪
+{"id":2,"cmd":"disconnect"}
 ```
 
-Bob 侧同时收到 `call_connected` 和 ICE 事件。
+异步事件：`{"event":"server_disconnected"}`
 
-### 5.3 发送 DataChannel 消息
+### 3. call — 呼叫对端
 
-Alice 终端4：
 ```
-{"id":3,"cmd":"send_data","params":{"text":"Hello Bob round 1"}}
-```
-
-Bob 终端5 会收到：
-```json
-{"event":"data_received","text":"Hello Bob round 1"}
+{"id":3,"cmd":"call","params":{"peer_id":<peer_id>}}
 ```
 
-### 5.4 挂断（第一轮）
+异步事件：
+- `{"event":"call_connected"}`
+- `{"event":"ice_state","state":"checking"}` → `"connected"`
+- `{"event":"data_channel_state","state":"open"}`
 
-Alice 终端4：
+示例：
+```
+{"id":3,"cmd":"call","params":{"peer_id":2}}
+```
+
+### 4. hangup — 挂断
+
 ```
 {"id":4,"cmd":"hangup"}
 ```
 
-双方都应收到：
-```json
-{"id":4,"ok":true}
-{"event":"call_disconnected"}
-{"event":"peer_list","peers":[...]}
+异步事件：`{"event":"call_disconnected"}` + `{"event":"peer_list",...}`
+
+### 5. send_data — 发送 DataChannel 消息
+
+```
+{"id":5,"cmd":"send_data","params":{"text":"<消息内容>"}}
 ```
 
-**验证点 1**：挂断后双方都收到 `call_disconnected` 事件 ✅
-**验证点 2**：挂断后 `peer_list` 正常刷新 ✅
+对端收到：`{"event":"data_received","text":"<消息内容>"}`
 
-## 六、第二轮通话（验证挂断后可重呼）
-
-挂断后等待 3 秒，然后：
-
-### 6.1 Alice 再次呼叫 Bob
-
-Alice 终端4：
+示例：
 ```
-{"id":5,"cmd":"call","params":{"peer_id":2}}
+{"id":5,"cmd":"send_data","params":{"text":"Hello from Alice"}}
 ```
 
-期望：与第一轮相同的 `call_connected` + `ice_state: connected`。
+### 6. set_mute — 静音/暂停视频
 
-### 6.2 发送消息
-
-Alice 终端4：
 ```
-{"id":6,"cmd":"send_data","params":{"text":"Hello Bob round 2"}}
+{"id":6,"cmd":"set_mute","params":{"audio":true,"video":false}}
 ```
 
-Bob 终端5 收到 `data_received`。
+`audio` 控制麦克风静音，`video` 控制视频暂停（不发送）。
 
-**验证点 3**：第二轮 DataChannel 正常工作 ✅
+### 7. query_devices — 查询设备列表
 
-### 6.3 挂断（第二轮）
-
-Bob 终端5（**这次由 Bob 挂断，测试被动挂断方**）：
 ```
-{"id":5,"cmd":"hangup"}
+{"id":7,"cmd":"query_devices"}
 ```
 
-双方收到 `call_disconnected` + `peer_list`。
+异步事件：
+- `{"event":"video_devices","devices":[{"idx":0,"name":"..."},...]}`
+- `{"event":"audio_input_devices","devices":[{"idx":0,"name":"..."},...]}`
 
-**验证点 4**：被动方挂断也正常 ✅
+### 8. set_video_device — 切换摄像头
 
-## 七、第三轮通话（Bob 主动呼叫 Alice）
-
-### 7.1 Bob 呼叫 Alice
-
-Bob 终端5：
 ```
-{"id":6,"cmd":"call","params":{"peer_id":1}}
-```
-(peer_id 改为 Alice 的实际 id)
-
-### 7.2 发送消息
-
-Bob 终端5：
-```
-{"id":7,"cmd":"send_data","params":{"text":"Hello Alice from Bob"}}
+{"id":8,"cmd":"set_video_device","params":{"device_idx":0}}
 ```
 
-Alice 终端4 收到 `data_received`。
+`device_idx` 来自 `query_devices` 返回的摄像头列表。
 
-### 7.3 Alice 挂断
+### 9. set_audio_input_device — 切换麦克风
 
-Alice 终端4：
 ```
-{"id":7,"cmd":"hangup"}
-```
-
-**验证点 5**：第三轮通话也正常 ✅
-
-## 八、跳过通话轮次的快速测试
-
-如果只想快速验证挂断/重呼逻辑，也可以用 Bob 自环（loopback）调用：
-
-```bash
-# Bob 连接自己不需要第二次签到，直接 call 自己即可
-# Bob 终端5：
-{"id":2,"cmd":"call","params":{"peer_id":<Bob自己的id>}}
+{"id":9,"cmd":"set_audio_input_device","params":{"device_idx":0}}
 ```
 
-但 loopback 模式依赖 `--autocall` 和 `loopback_` 变量，不如双进程测试全面。
+`device_idx` 来自 `query_devices` 返回的麦克风列表。
 
-## 九、清理
+### 10. get_local_sdp — 收集本地 SDP（验证编解码能力）
 
-```bash
-# 终端4、5：Ctrl+C 断开 nc
-
-# 关闭守护进程
-echo '{"id":99,"cmd":"shutdown"}' | nc -U -q 0 /tmp/webrtc_alice/webrtc_ctrl.sock
-echo '{"id":99,"cmd":"shutdown"}' | nc -U -q 0 /tmp/webrtc_bob/webrtc_ctrl.sock
-
-# 关闭信令服务器
-pkill peerconnection_server
-
-# 清理临时文件
-rm -rf /tmp/webrtc_alice /tmp/webrtc_bob
+```
+{"id":10,"cmd":"get_local_sdp"}
 ```
 
-## 验证清单
+无同步返回。异步事件：
+- `{"event":"local_sdp","sdp":"<SDP字符串>"}` — 成功，SDP 中包含完整编解码器列表
+- `{"event":"local_sdp_error","error":"..."}` — 失败（如已在通话中）
 
-| 序号 | 验证项 | 预期信号 | 状态 |
-|------|--------|---------|------|
-| V1 | 签到 | `server_connected` + `peer_list` | ☐ |
-| V2 | Alice 呼 Bob | `call_connected` → `ice_state: connected` → `data_channel_state: open` | ☐ |
-| V3 | DataChannel 消息 | Bob 收到 `data_received` | ☐ |
-| V4 | 第一轮挂断 | 双方收到 `call_disconnected` + `peer_list` | ☐ |
-| V5 | 第二轮呼叫 | `call_connected` → `ice_state: connected` → `data_channel_state: open` | ☐ |
-| V6 | 第二轮 DataChannel | 消息正常收发 | ☐ |
-| V7 | 第二轮挂断 | 双方收到 `call_disconnected` | ☐ |
-| V8 | 第三轮 (Bob 呼 Alice) | 通话建立成功 | ☐ |
-| V9 | 第三轮挂断 | 双方收到 `call_disconnected` | ☐ |
-| V10 | 守护进程不崩溃 | 测试结束后 daemon 正常响应 `shutdown` | ☐ |
+> **注意**：发送此命令前不要执行 `call`。如果已建立通话，会返回错误。
+
+### 11. shutdown — 关闭 daemon
+
+```
+{"id":99,"cmd":"shutdown"}
+```
+
+---
+
+## 事件参考
+
+daemon 主动推送的事件一览：
+
+| 事件 | 触发时机 | 关键字段 |
+|------|---------|---------|
+| `server_connected` | 信令服务器连接成功 | — |
+| `server_disconnected` | 与信令服务器断开 | — |
+| `server_connection_failed` | 连接信令服务器失败 | `error` |
+| `peer_online` | 有对端上线 | `peer.id`, `peer.name` |
+| `peer_offline` | 对端下线 | `peer_id` |
+| `peer_busy` | 对端正忙（已在通话中） | `peer_id` |
+| `peer_list` | 在线列表更新 | `peers[{id,name},...]` |
+| `call_connected` | 通话建立 | — |
+| `call_disconnected` | 通话结束 | — |
+| `ice_state` | ICE 连接状态变化 | `state` (checking/connected/disconnected/failed/closed) |
+| `data_channel_state` | DataChannel 状态变化 | `state` (open/closed) |
+| `data_received` | 收到 DataChannel 消息 | `text` |
+| `video_devices` | query_devices 结果 | `devices[{idx,name},...]` |
+| `audio_input_devices` | query_devices 结果 | `devices[{idx,name},...]` |
+| `local_sdp` | get_local_sdp 结果 | `sdp` |
+| `local_sdp_error` | get_local_sdp 失败 | `error` |
+
+---
+
+## 快速测试流程
+
+### 1. 验证 H264 编解码能力
+
+```
+{"id":1,"cmd":"get_local_sdp"}
+```
+
+等待 `local_sdp` 事件，检查 SDP video m-line 确认 H264 存在。预期可看到：
+
+```
+a=rtpmap:96 H264/90000
+a=fmtp:96 profile-level-id=42001f
+```
+
+### 2. 双人通话
+
+```
+# Alice
+{"id":1,"cmd":"connect","params":{"server":"120.79.210.6","port":8888}}
+# Bob
+{"id":1,"cmd":"connect","params":{"server":"120.79.210.6","port":8888}}
+# Alice 呼叫 Bob (peer_id 从 peer_list 获取)
+{"id":2,"cmd":"call","params":{"peer_id":2}}
+# 发送消息
+{"id":3,"cmd":"send_data","params":{"text":"Hello Bob"}}
+# 挂断
+{"id":4,"cmd":"hangup"}
+```
+
+### 3. 验证重呼
+
+挂断后等待 3 秒，再次 `call` 同一对端。预期正常建立通话。
+
+---
 
 ## 运行时文件布局
 
-整个进程的所有产物都在 `$WEBRTC_RUNTIME_DIR`（默认 `/tmp/webrtc_runtime`）下：
-
 ```
-/tmp/webrtc_alice/                    ← WEBRTC_RUNTIME_DIR=/tmp/webrtc_alice
-├── webrtc_ctrl.sock                  ← Unix socket
-├── shm_video_buf                     ← 共享内存
-├── shm_audio_cap                     ← 共享内存
-├── shm_audio_playout                 ← 共享内存
-├── daemon.0.log                      ← 日志 (轮转: 5文件 x 10MB)
+/tmp/webrtc_test/                       ← WEBRTC_RUNTIME_DIR
+├── webrtc_ctrl.sock                    ← Unix socket
+├── shm_video_buf                       ← 视频共享内存
+├── shm_audio_cap                       ← 音频采集共享内存
+├── shm_audio_playout                   ← 音频播放共享内存
+├── daemon.0.log                        ← 日志 (轮转: 5文件 x 10MB)
 └── daemon.1.log
 ```
 
-两个实例只需设置不同的 `WEBRTC_RUNTIME_DIR`，所有文件自动隔离：
-
-| 实例 | WEBRTC_RUNTIME_DIR | socket | 日志 |
-|------|-------------------|--------|------|
-| Alice | `/tmp/webrtc_alice` | `/tmp/webrtc_alice/webrtc_ctrl.sock` | `/tmp/webrtc_alice/daemon.0.log` |
-| Bob | `/tmp/webrtc_bob` | `/tmp/webrtc_bob/webrtc_ctrl.sock` | `/tmp/webrtc_bob/daemon.0.log` |
-
-信令服务器也同样支持 `WEBRTC_RUNTIME_DIR`，默认日志写入该目录下的 `server.log`。
-
-## 调试
-
-如果测试异常，查看日志：
+多实例只需设置不同的 `WEBRTC_RUNTIME_DIR` 实现完全隔离：
 
 ```bash
-# daemon 日志（Alice 和 Bob 分开）
-tail -f /tmp/webrtc_alice/daemon.0.log
-tail -f /tmp/webrtc_bob/daemon.0.log
+# Alice
+WEBRTC_RUNTIME_DIR=/tmp/webrtc_alice ./out/apps_peerconnection_client/apps_peerconnection_client
+# Bob
+WEBRTC_RUNTIME_DIR=/tmp/webrtc_bob ./out/apps_peerconnection_client/apps_peerconnection_client
+```
 
-# 信令服务器日志
-tail -f /tmp/webrtc_runtime/server.log
+## 清理
 
-# 实时监控挂断相关事件
-tail -f /tmp/webrtc_alice/daemon.0.log | grep -E "HangUp|OnPeer|OnHangingGet|HANGUP|call_disconnected|SendHangUpConfirm|OnClose"
+```bash
+# 通过 socket 关闭 daemon
+echo '{"id":99,"cmd":"shutdown"}' | socat - UNIX-CONNECT:/tmp/webrtc_test/webrtc_ctrl.sock
 
-# 三份日志对比（排查挂断流程问题必备）
-tail -f /tmp/webrtc_alice/daemon.0.log /tmp/webrtc_bob/daemon.0.log /tmp/webrtc_runtime/server.log
+# 清理临时文件
+rm -rf /tmp/webrtc_test
+```
