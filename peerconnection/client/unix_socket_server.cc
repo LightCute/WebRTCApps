@@ -60,12 +60,12 @@ void UnixSocketServer::Wait() {
 void UnixSocketServer::SendToClient(const std::string& json) {
   if (client_fd_ < 0) return;
   std::string line = json + "\n";
-  write(client_fd_, line.c_str(), line.size());
+  (void)write(client_fd_, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendJson(int fd, const std::string& json) {
   std::string line = json + "\n";
-  write(fd, line.c_str(), line.size());
+  (void)write(fd, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendResponse(int id, bool ok, const std::string& error) {
@@ -149,7 +149,8 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
     SendResponse(id, true);
   } else if (cmd == "get_local_sdp") {
     engine_->GetLocalSdp();
-    SendResponse(id, true);
+    // Response comes later via OnEngineEvent("local_sdp") or ("local_sdp_error")
+  } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }
 }
