@@ -5,12 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 OUT_DIR="${1:-${SRC_ROOT}/out/apps_peerconnection_client}"
 
-DEFAULT_GN_ARGS='is_debug=true 
-rtc_build_examples=false 
-rtc_build_tools=false 
-rtc_include_tests=true 
-rtc_include_pulse_audio=true 
-use_sysroot=true'
+DEFAULT_GN_ARGS='target_os="linux" target_cpu="x64"
+is_debug=true
+rtc_build_examples=false
+rtc_build_tools=false
+rtc_include_tests=false
+rtc_include_pulse_audio=true
+use_sysroot=true
+rtc_use_h264=true
+ffmpeg_branding="Chrome"'
 GN_ARGS="${GN_ARGS:-${DEFAULT_GN_ARGS}}"
 
 echo "Generating ${OUT_DIR}"
