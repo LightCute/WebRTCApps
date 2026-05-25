@@ -1,0 +1,308 @@
+import("../../../webrtc.gni")
+
+if (is_linux || is_chromeos) {
+  import("//build/config/linux/pkg_config.gni")
+}
+
+assert(is_linux || is_chromeos,
+       "apps/peerconnection/client currently supports Linux/ChromeOS only.")
+
+rtc_executable("peerconnection_client") {
+  testonly = true
+  output_name = "apps_peerconnection_client_arm64"
+
+  sources = [
+    "main.cc",
+    "media_pipeline.cc",
+    "media_pipeline.h",
+    "cli_runner.cc",
+    "cli_runner.h",
+    "data_channel_manager.cc",
+    "data_channel_manager.h",
+    "defaults.cc",
+    "defaults.h",
+    "engine_controller.h",
+    "flag_defs.h",
+    "json_helpers.cc",
+    "json_helpers.h",
+    "pc_factory.cc",
+    "pc_factory.h",
+    "peer_connection_client.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
+    "peer_connection_client.h",
+    "signaling_interface.h",
+    "shm_audio_capturer.cc",
+    "shm_audio_capturer.h",
+    "shm_audio_reader.cc",
+    "shm_audio_reader.h",
+    "shm_audio_renderer.cc",
+    "shm_audio_renderer.h",
+    "shm_audio_writer.cc",
+    "shm_audio_writer.h",
+    "shm_common.cc",
+    "shm_common.h",
+    "shm_video_renderer.cc",
+    "shm_video_renderer.h",
+    "shm_video_writer.cc",
+    "shm_video_writer.h",
+    "unix_socket_server.cc",
+    "unix_socket_server.h",
+    "rga_video_track_source.cc",
+    "rga_video_track_source.h",
+    "rga_decoded_sink.cc",
+    "rga_decoded_sink.h",
+    "dma_buf_pool.cc",
+    "dma_buf_pool.h",
+    "dma_buf_server.cc",
+    "dma_buf_server.h",
+    "webrtc_engine.cc",
+    "webrtc_engine.h",
+  ]
+
+  deps = [
+    "../../../api:async_dns_resolver",
+    "../../../api:audio_options_api",
+    "../../../api:create_frame_generator",
+    "../../../api:create_modular_peer_connection_factory",
+    "../../../api:data_channel_interface",
+    "../../../api:enable_media",
+    "../../../api:field_trials",
+    "../../../api:jsep",
+    "../../../api:make_ref_counted",
+    "../../../api:media_stream_interface",
+    "../../../api:peer_connection_interface",
+    "../../../api:rtc_error",
+    "../../../api:rtp_receiver_interface",
+    "../../../api:rtp_sender_interface",
+    "../../../api:scoped_refptr",
+    "../../../api/audio:audio_device",
+    "../../../api/audio:audio_mixer_api",
+    "../../../api/audio:audio_processing",
+    "../../../api/audio:create_audio_device_module",
+    "../../../api/audio_codecs:audio_codecs_api",
+    "../../../api/audio_codecs:builtin_audio_decoder_factory",
+    "../../../api/audio_codecs:builtin_audio_encoder_factory",
+    "../../../api/environment",
+    "../../../api/environment:environment_factory",
+    "../../../api/task_queue",
+    "../../../api/task_queue:pending_task_safety_flag",
+    "../../../api/units:time_delta",
+    "../../../api/video:video_frame",
+    "../../../api/video:video_rtp_headers",
+    "../../../api/video_codecs:video_codecs_api",
+    "../../../api/video_codecs:video_decoder_factory_template",
+    "../../../api/video_codecs:video_decoder_factory_template_dav1d_adapter",
+    "../../../api/video_codecs:video_decoder_factory_template_libvpx_vp8_adapter",
+    "../../../api/video_codecs:video_decoder_factory_template_libvpx_vp9_adapter",
+    "../../../api/video_codecs:video_decoder_factory_template_open_h264_adapter",
+    "../../../api/video_codecs:video_encoder_factory_template",
+    "../../../api/video_codecs:video_encoder_factory_template_libaom_av1_adapter",
+    "../../../api/video_codecs:video_encoder_factory_template_libvpx_vp8_adapter",
+    "../../../api/video_codecs:video_encoder_factory_template_libvpx_vp9_adapter",
+    "../../../api/video_codecs:video_encoder_factory_template_open_h264_adapter",
+    "../../../media:media_channel",
+    "../../../media:video_common",
+    "../../../modules/audio_device",
+    "../../../modules/video_capture:video_capture_module",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
+    "../../../p2p:connection",
+    "../../../p2p:port_allocator",
+    "../../../pc:libjingle_peerconnection",
+    "../../../pc:video_track_source",
+    "../../../rtc_base:async_dns_resolver",
+    "../../../rtc_base:buffer",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:log_sinks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:net_helpers",
+    "../../../rtc_base:refcount",
+    "../../../rtc_base:rtc_certificate_generator",
+    "../../../rtc_base:rtc_json",
+    "../../../rtc_base:socket",
+    "../../../rtc_base:socket_address",
+    "../../../rtc_base:ssl_adapter",
+    "../../../rtc_base:stringutils",
+    "../../../rtc_base:threading",
+    "../../../rtc_base:timeutils",
+    "../../../system_wrappers",
+    "../../../test:frame_generator_capturer",
+    "../../../test:platform_video_capturer",
+    "../../../test:rtp_test_utils",
+    "../../../test:test_video_capturer",
+    "../../../test:video_test_common",
+    "../../../media:rtc_audio_video",
+    "../../../modules/audio_processing",
+    "//third_party/abseil-cpp/absl/base:nullability",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+    "//third_party/abseil-cpp/absl/memory",
+    "//third_party/jsoncpp",
+    "//third_party/libyuv",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  include_dirs = [
+    "../mpp/inc",
+    "../mpp/osal/inc",
+    "../mpp/utils",
+    "../mpp/mpp/base/inc",
+    "rga_headers",
+  ]
+  libs = [
+    "dl",
+    "pthread",
+  ]
+}
+
+rtc_executable("unix_socket_server_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/unix_socket_server_test.cc",
+    "unix_socket_server.cc",
+    "unix_socket_server.h",
+  ]
+
+  deps = [
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "//third_party/jsoncpp",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
+
+rtc_executable("cli_runner_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/cli_runner_test.cc",
+    "cli_runner.cc",
+    "cli_runner.h",
+  ]
+
+  # cli_runner depends only on engine_controller.h (pure virtual, zero deps)
+  deps = []
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
+
+rtc_executable("data_channel_manager_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/data_channel_manager_test.cc",
+    "data_channel_manager.cc",
+    "data_channel_manager.h",
+    "json_helpers.cc",
+    "json_helpers.h",
+  ]
+
+  deps = [
+    "../../../api:data_channel_interface",
+    "../../../api:scoped_refptr",
+    "../../../rtc_base:logging",
+  ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
+
+rtc_executable("peer_connection_client_test") {
+  testonly = true
+
+  sources = [
+    "../test/EngineController/peer_connection_client_test.cc",
+    "peer_connection_client.cc",
+    "peer_connection_client.h",
+    "defaults.cc",
+    "defaults.h",
+  ]
+
+  deps = [
+    "../../../api:async_dns_resolver",
+    "../../../api/task_queue:pending_task_safety_flag",
+    "../../../rtc_base:async_dns_resolver",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:net_helpers",
+    "../../../rtc_base:socket",
+    "../../../rtc_base:socket_address",
+    "../../../rtc_base:threading",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+  ]
+}
+
+rtc_executable("mpp_codec_debug") {
+  testonly = true
+
+  sources = [
+    "../rk_mpp_test/mpp_codec_debug.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
+  ]
+
+  deps = [
+    "../../../api:scoped_refptr",
+    "../../../api/video:video_frame",
+    "../../../api/video:video_rtp_headers",
+    "../../../api/video_codecs:video_codecs_api",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:timeutils",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  include_dirs = [
+    "../mpp/inc",
+    "../mpp/osal/inc",
+    "../mpp/utils",
+    "../mpp/mpp/base/inc",
+  ]
+  libs = [ "dl", "pthread" ]
+}
+
+rtc_executable("mpp_codec_test") {
+  testonly = true
+
+  sources = [
+    "../rk_mpp_test/mpp_codec_test.cc",
+    "rk_mpp_codec.cc",
+    "rk_mpp_codec.h",
+    "rk_mpp_stubs.cc",
+  ]
+
+  deps = [
+    "../../../api:scoped_refptr",
+    "../../../api/video:video_frame",
+    "../../../api/video:video_rtp_headers",
+    "../../../api/video_codecs:video_codecs_api",
+    "../../../modules/video_coding:video_codec_interface",
+    "../../../modules/video_coding:webrtc_h264",
+    "../../../rtc_base:checks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:timeutils",
+  ]
+
+  include_dirs = [ "../mpp/inc" ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "dl",
+    "pthread",
+  ]
+}

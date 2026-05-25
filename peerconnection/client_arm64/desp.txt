@@ -1,0 +1,239 @@
+代码目录概览：核心音视频通话引擎
+这个目录是一个 进程分离的 WebRTC 音视频通话客户端核心。它的设计思路是：WebRTC 引擎运行在一个 daemon 进程中，Qt GUI 运行在另一个进程中，两者通过 Unix Socket (JSON IPC) + 共享内存 (视频/音频帧) 通信。
+
+文件清单与职责
+文件	职责	代码量
+main.cc	入口，双模式启动 (standalone / daemon)	85行
+webrtc_engine.cc	核心引擎，实现 PeerConnectionObserver 等 4 个接口	1392行
+peer_connection_client.cc	HTTP 信令客户端，与 room server 通信	600行
+cli_runner.cc	独立 CLI 交互模式	109行
+unix_socket_server.cc	Daemon 模式下的 Unix Socket + epoll JSON IPC	257行
+shm_common.h	共享内存数据结构（环形缓冲区、帧头）	101行
+shm_video_writer.h / .cc	向 SHM 写入视频帧	—
+shm_audio_writer.h / .cc	向 SHM 写入音频帧	—
+shm_audio_reader.h / .cc	从 SHM 读取音频帧（麦克风输入）	—
+defaults.h	默认服务器地址、STUN/TURN 配置	—
+flag_defs.h	absl 命令行 flag 定义	—
+架构全景图
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        main.cc                                   │
+│   ┌──────────────┐   ┌──────────────────────┐                   │
+│   │  CliRunner    │   │  UnixSocketServer     │                   │
+│   │  (standalone) │   │  (daemon mode)        │                   │
+│   └──────┬───────┘   └────────┬─────────────┘                   │
+│          │                    │                                  │
+│          └────────┬───────────┘                                  │
+│                   ▼                                              │
+│          ┌─────────────────────┐                                 │
+│          │    WebRTCEngine     │  ← 核心，实现4个Observer接口      │
+│          │                     │                                 │
+│          │  实现:              │                                 │
+│          │  PeerConnectionObserver                              │
+│          │  CreateSessionDescriptionObserver                    │
+│          │  PeerConnectionClientObserver                        │
+│          │  DataChannelObserver                                 │
+│          └───┬──────┬──────────┘                                │
+│              │      │                                           │
+│     ┌────────▼─┐  ┌─▼──────────────────┐                        │
+│     │Signaling │  │ PeerConnection      │                        │
+│     │Client    │  │ Factory             │                        │
+│     │(HTTP)    │  │  ├─ AudioTrack      │                        │
+│     └──────────┘  │  ├─ VideoTrack      │                        │
+│                   │  ├─ DataChannel     │                        │
+│                   │  └─ AudioDeviceModule                       │
+│                   └────────┬───────────┘                        │
+│                            │                                    │
+│          ┌─────────────────┼──────────────────┐                 │
+│          ▼                 ▼                  ▼                  │
+│   ShmVideoSink     ShmAudioSink         ShmAudioSource           │
+│   (本地+远端渲染)   (远端音频播放)       (MIC从Qt进程获取)         │
+└─────────────────────────────────────────────────────────────────┘
+执行流程：按时间线阅读
+阶段 1：进程启动与初始化
+阅读入口：[main.cc:24-56]
+
+
+main()
+ ├─ ParseCommandLine
+ ├─ CreateEnvironment (field trials)
+ ├─ 设置 WebRTC 主线程 (PhysicalSocketServer + Thread)
+ ├─ InitializeSSL
+ ├─ 配置日志 (FileRotatingLogSink)
+ ├─ 创建 WebRTCEngine 实例
+ └─ engine.Init()
+WebRTCEngine::Init() (webrtc_engine.cc:503-518) 做了最关键的事——创建三条 WebRTC 线程：
+
+线程	创建方式	职责
+signaling_thread_	CreateWithSocketServer()	PeerConnection 所有 API 调用
+worker_thread_	Create()	编解码、ADM 操作
+network_thread_	CreateWithSocketServer()	网络 IO
+这是 WebRTC 的三线程模型。signaling_thread 带 socket server 因为它还需要跑信令客户端。
+
+阶段 2：模式分支
+阅读入口：[main.cc:58-76]
+
+
+if (standalone)
+    CliRunner 接管 → 交互式命令行
+else
+    UnixSocketServer 接管 → daemon 模式，等待 Qt 进程连接
+Standalone 模式：CliRunner::Run() (cli_runner.cc:23-54) 注册 event callback 将 JSON 事件打印到 stdout，然后进入 InputLoop 等待用户输入。
+
+Daemon 模式：UnixSocketServer::Start() (unix_socket_server.cc:29-31) 启动一个 epoll IO 线程，监听 Unix domain socket，接收 JSON 命令。
+
+阶段 3：连接信令服务器
+阅读入口：webrtc_engine.cc:562-568 → peer_connection_client.cc:97-138
+
+
+ConnectToServer(server, port)
+  → PeerConnectionClient::Connect()
+    → DNS 解析 (AsyncDnsResolver)
+    → DoConnect()
+      → 创建 control_socket_ + hanging_get_ (两个 TCP socket)
+      → GET /sign_in?<name> HTTP/1.0
+      → 状态: SIGNING_IN
+关键设计：PeerConnectionClient 用了两个 TCP 长连接：
+
+control_socket_：发送命令 (sign_out, message, hangup)
+hanging_get_：服务器推送事件 (peer 上下线, 消息转发)，本质是 HTTP long-polling
+阅读信令流程的核心回调链：
+
+
+OnRead (control_socket_ 收到 HTTP 响应)
+  → ParseServerResponse → 提取 Pragma header 中的 peer_id
+  → 如果 SIGNING_IN: 解析已有 peer 列表 → OnSignedIn()
+  → 启动 hanging_get_ 连接: GET /wait?peer_id=X
+
+OnHangingGetRead (收到服务器推送)
+  → 解析通知类型:
+    ├─ 给自己: peer 上下线通知 → OnPeerConnected / OnPeerDisconnected
+    └─ 给别人的消息: 转发给 OnMessageFromPeer
+阶段 4：发起/接收呼叫 — 这是核心流程
+阅读入口：webrtc_engine.cc:575-591
+
+4A. 发起呼叫 (Caller)
+
+ConnectToPeer(peer_id)
+  → InitializePeerConnection()
+    ├─ 确保三个线程已启动
+    ├─ 在 worker_thread 上创建 AudioDeviceModule (BlockingCall)
+    ├─ 组装 PeerConnectionFactoryDependencies:
+    │   ├─ 三个线程指针
+    │   ├─ ADM
+    │   ├─ audio_encoder_factory / audio_decoder_factory (Builtin)
+    │   ├─ video_encoder_factory (VP8/VP9/H264/AV1)
+    │   └─ video_decoder_factory (VP8/VP9/H264/AV1/Dav1d)
+    ├─ EnableMedia(deps)  ← 必须调用!
+    ├─ CreateModularPeerConnectionFactory
+    ├─ CreatePeerConnection()
+    │   ├─ RTCConfiguration: UnifiedPlan + STUN + TURN
+    │   └─ factory_->CreatePeerConnectionOrError(config, deps)
+    ├─ AddTracks()
+    │   ├─ 创建 AudioTrack (ADM 或 SHM 麦克风)
+    │   ├─ 创建 VideoTrack (真实摄像头 或 合成视频)
+    │   ├─ 本地视频 → ShmVideoSink (写入 SHM 供 Qt 预览)
+    │   └─ peer_connection_->AddTrack() × 2
+    └─ AddDataChannel()
+        └─ CreateDataChannelOrError("chat", negotiated=true, id=0)
+  → peer_connection_->CreateOffer(this, options)
+4B. SDP Offer/Answer 交换
+这是 WebRTC 的核心信令流程：
+
+
+Caller                                    Callee
+  │                                         │
+  ├─ CreateOffer()                          │
+  │                                         │
+  ├─ OnSuccess(desc)                        │
+  │   ├─ SetLocalDescription(offer)         │
+  │   └─ SendMessage(offer JSON) ──────────→│
+  │                                    OnMessageFromPeer()
+  │                                      ├─ 解析 SDP type
+  │                                      ├─ CreateSessionDescription
+  │                                      ├─ SetRemoteDescription(offer)
+  │                                      └─ CreateAnswer()
+  │                                         │
+  │                                    OnSuccess(desc)
+  │                                      ├─ SetLocalDescription(answer)
+  │                                      └─ SendMessage(answer JSON)
+  │  ←──────────────────────────────────────│
+  │  OnMessageFromPeer()                    │
+  │    ├─ SetRemoteDescription(answer)      │
+  │    └─ (ICE 交换开始)                     │
+关键代码在 webrtc_engine.cc:837-855 和 webrtc_engine.cc:954-1049。
+
+4C. ICE Candidate 交换
+
+双方 SetLocalDescription 后开始 ICE 收集:
+
+OnIceCandidate(candidate)
+  → 序列化为 JSON {sdpMid, sdpMLineIndex, candidate}
+  → SendMessage(json) ──────────────→ 对方 OnMessageFromPeer()
+                                        → CreateIceCandidate()
+                                        → AddIceCandidate()
+SendMessage (webrtc_engine.cc:1315-1331) 使用了一个待发送队列机制：如果 control_socket 正在发送数据，新消息入队，等 OnMessageSent 回调出队。
+
+阶段 5：媒体流建立
+当远端媒体流到达时：
+
+
+OnAddTrack(receiver, streams)     [webrtc_engine.cc:769-783]
+  ├─ Video track → StartRemoteShmRenderer()
+  │   └─ 创建 ShmVideoSink → track->AddOrUpdateSink(sink)
+  │       └─ OnFrame() 回调: I420 转换 → 写入 SHM 环形缓冲区
+  └─ Audio track → StartRemoteAudioShmRenderer()
+      └─ 创建 ShmAudioSink → track->AddSink(sink)
+          └─ OnData() 回调: PCM 数据 → 写入 SHM 环形缓冲区
+阶段 6：通话结束
+
+HangUp()                          [webrtc_engine.cc:593-602]
+  → SendHangUp(peer_id)
+    → 服务器转发 HANGUP_CONFIRM 给双方
+
+OnPeerDisconnected(id)            [webrtc_engine.cc:885-946]
+  ├─ SendHangUpConfirm() (用原始阻塞 socket 发)
+  ├─ 停止所有 SHM renderer
+  ├─ peer_connection_->Close()
+  ├─ 释放 factory、video_source、ADM
+  └─ 2 秒后自动重连服务器
+建议的阅读路径
+按照执行流，我建议这个阅读顺序：
+
+第一遍：理解架构（3 个文件，约 1 小时）
+main.cc — 了解两种运行模式
+webrtc_engine.h — 类图式阅读：看它实现了哪些接口，有哪些成员
+peer_connection_client.h — 信令客户端的协议和状态机
+第二遍：跟踪呼叫流程（核心实现）
+webrtc_engine.cc:467-518 — 构造/析构/Init
+webrtc_engine.cc:1108-1192 — InitializePeerConnection() — 整个 Factory 创建链路
+webrtc_engine.cc:575-591 — ConnectToPeer() — 发起呼叫
+webrtc_engine.cc:837-855 — OnSuccess — SDP 创建完成
+webrtc_engine.cc:954-1049 — OnMessageFromPeer — 处理远端 SDP/ICE
+webrtc_engine.cc:823-833 — OnIceCandidate — ICE 交换
+webrtc_engine.cc:769-795 — OnAddTrack/OnRemoveTrack — 媒体流建立
+第三遍：周边机制
+peer_connection_client.cc — HTTP 长轮询实现
+webrtc_engine.cc:250-463 — SHM 三个内部类 (ShmVideoSink / ShmAudioSink / ShmAudioSource)
+unix_socket_server.cc — epoll + Unix socket IPC
+6 个关键设计要点
+1. 线程模型
+代码严格遵守 WebRTC 三线程模型。所有 peer_connection_->Xxx() 调用都发生在 signaling thread 上。UnixSocketServer 通过 engine_->signaling_thread()->PostTask(...) 将外部命令投递到 signaling thread。
+
+2. 引用计数
+全部使用 webrtc::scoped_refptr 管理 WebRTC 对象生命周期。CreateSessionDescriptionObserver 通过 make_ref_counted 创建 DummySetSessionDescriptionObserver。
+
+3. 信令协议
+信令服务器交互使用 HTTP/1.0 over TCP raw socket，不走标准 HTTP 库。两个长连接：control_socket (主动请求) + hanging_get (服务器推送 / long polling)。
+
+4. 进程间媒体传输
+媒体帧不经过网络序列化，而是通过 System V 共享内存环形缓冲区 在进程间零拷贝传递：
+
+视频：shm_video_buf — 8 帧环形缓冲，I420 格式
+音频输入 (mic)：shm_audio_cap — Qt 进程写入，WebRTC 引擎读出
+音频输出 (speaker)：shm_audio_playout — WebRTC 引擎写入，Qt 进程读出
+5. 视频源灵活性
+CapturerTrackSource 继承 VideoTrackSource，支持热切换：SwapCapturer() 可以在通话中途切换摄像头而不重建 PeerConnection。
+
+6. DataChannel 协商
+DataChannel 使用 negotiated=true, id=0，这意味着它是带内协商的，不需要额外的 SDP 交换。
