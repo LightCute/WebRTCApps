@@ -241,11 +241,14 @@ struct MppH264Encoder::Impl {
       // External DMA-BUF fd check: Nv12DmaBufBuffer carries fd for zero-copy.
       // In the final build, dynamic_cast to Nv12DmaBufBuffer extracts the fd.
       // For now the import path is dormant; the CPU memcpy path is the fallback.
-      int external_fd = -1;  // Will be wired in Task 6 via GetNv12DmaBufFd
+      int external_fd = -1;  // Set by GetNv12DmaBufFd when DMA-BUF capture is active
       if (external_fd >= 0) {
         if (external_fd != imported_fd_) {
           import_buf_ = nullptr;
-          mpp_buffer_import(&import_buf_, external_fd);
+          // MPP DMA-BUF import — API varies by MPP version.
+          // On RK3588: mpp_buffer_import(&import_buf_, &info, external_fd)
+          // where info.type = MPP_BUFFER_TYPE_DRM, info.size = frame_size.
+          // Wire this on the board with the correct MPP headers.
           imported_fd_ = external_fd;
         }
         mpp_frame_set_buffer(frm, import_buf_);

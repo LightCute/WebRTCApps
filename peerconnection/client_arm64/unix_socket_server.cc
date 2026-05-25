@@ -60,12 +60,12 @@ void UnixSocketServer::Wait() {
 void UnixSocketServer::SendToClient(const std::string& json) {
   if (client_fd_ < 0) return;
   std::string line = json + "\n";
-  write(client_fd_, line.c_str(), line.size());
+  (void)write(client_fd_, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendJson(int fd, const std::string& json) {
   std::string line = json + "\n";
-  write(fd, line.c_str(), line.size());
+  (void)write(fd, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendResponse(int id, bool ok, const std::string& error) {

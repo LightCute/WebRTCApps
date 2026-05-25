@@ -43,10 +43,11 @@ class Nv12DmaBufBuffer : public webrtc::NV12Buffer {
 // Extract NV12 dma-buf fd from a VideoFrame if backed by Nv12DmaBufBuffer.
 // Returns -1 for regular NV12Buffer (CPU path).
 int GetNv12DmaBufFd(const webrtc::VideoFrame& frame) {
-  auto* nv12 = frame.video_frame_buffer()->GetNV12();
-  if (!nv12) return -1;
-  auto* dma = dynamic_cast<const Nv12DmaBufBuffer*>(nv12);
-  return dma ? dma->fd() : -1;
+  // dynamic_cast unavailable with -fno-rtti. For the DMA-BUF capture→encode
+  // path, the MPP encoder import must be wired on the RK3588 board using a
+  // RTTI-free dispatch — either a side-channel fd map or a type-id in NV12Buffer.
+  (void)frame;
+  return -1;
 }
 
 RgaVideoTrackSource::RgaVideoTrackSource()

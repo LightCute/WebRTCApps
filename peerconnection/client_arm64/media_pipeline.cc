@@ -348,7 +348,7 @@ void MediaPipeline::StartRemoteRenderer(webrtc::VideoTrackInterface* track) {
             shm_video_remote_key_path() + "_socket",
             fds, DmaBufPool::kNumSlots);
         remote_rga_sink_->SetOutput(remote_dma_pool_.get(), remote_ctrl_);
-        MppH264Decoder::SetDecodedHook(remote_rga_sink_.get());
+        webrtc::MppH264Decoder::SetDecodedHook(remote_rga_sink_.get());
         RTC_LOG(LS_INFO) << "Remote DMA-BUF sink wired to MPP decoder";
         return;
       }
@@ -370,7 +370,7 @@ void MediaPipeline::StartRemoteRenderer(webrtc::VideoTrackInterface* track) {
 }
 
 void MediaPipeline::StopRemoteRenderer() {
-  MppH264Decoder::SetDecodedHook(nullptr);
+  webrtc::MppH264Decoder::SetDecodedHook(nullptr);
   if (remote_renderer_) {
     remote_renderer_.reset();
     RTC_LOG(LS_INFO) << "Remote SHM renderer stopped";
