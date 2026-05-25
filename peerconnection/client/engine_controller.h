@@ -30,6 +30,7 @@ class EngineController {
   virtual void QueryDevices() = 0;
   virtual void SetVideoDevice(int device_idx) = 0;
   virtual void SetAudioInputDevice(int device_idx) = 0;
+  virtual void GetLocalSdp() = 0;
 
   virtual bool connection_active() const = 0;
 };

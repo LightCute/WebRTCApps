@@ -348,6 +348,35 @@ void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
   });
 }
 
+void WebRTCEngine::GetLocalSdp() {
+  if (signaling_thread_->IsCurrent()) {
+    GetLocalSdpImpl();
+  } else {
+    signaling_thread_->PostTask([this] { GetLocalSdpImpl(); });
+  }
+}
+
+void WebRTCEngine::GetLocalSdpImpl() {
+  if (peer_connection_) {
+    RTC_LOG(LS_ERROR) << "GetLocalSdp: already in a call, hang up first";
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"Already in a call, hang up first"})");
+    return;
+  }
+  collecting_sdp_ = true;
+  if (!InitializePeerConnection()) {
+    collecting_sdp_ = false;
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"Failed to initialize PeerConnection"})");
+    return;
+  }
+  peer_connection_->CreateOffer(
+      this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
+  // OnSuccess will emit the SDP and clean up
+}
+
 bool WebRTCEngine::connection_active() const {
   return connection_active_.load(std::memory_order_acquire);
 }
@@ -409,11 +438,24 @@ void WebRTCEngine::OnIceCandidate(const webrtc::IceCandidate* candidate) {
 // ==================== CreateSessionDescriptionObserver ====================
 
 void WebRTCEngine::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
-  peer_connection_->SetLocalDescription(
-      DummySetSessionDescriptionObserver::Create().get(), desc);
-
   std::string sdp;
   desc->ToString(&sdp);
+
+  if (collecting_sdp_) {
+    collecting_sdp_ = false;
+    Json::Value j;
+    j["event"] = "local_sdp";
+    j["sdp"] = sdp;
+    Json::StreamWriterBuilder factory;
+    factory["indentation"] = "";
+    if (observer_) observer_->OnEngineEvent(Json::writeString(factory, j));
+    // Clean up — post to avoid re-entrancy in CreateOffer callback
+    signaling_thread_->PostTask([this] { DeletePeerConnection(); });
+    return;
+  }
+
+  peer_connection_->SetLocalDescription(
+      DummySetSessionDescriptionObserver::Create().get(), desc);
 
   Json::Value jmessage;
   jmessage[kSessionDescriptionTypeName] =
@@ -426,6 +468,13 @@ void WebRTCEngine::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 
 void WebRTCEngine::OnFailure(webrtc::RTCError error) {
   RTC_LOG(LS_ERROR) << ToString(error.type()) << ": " << error.message();
+  if (collecting_sdp_) {
+    collecting_sdp_ = false;
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"CreateOffer failed"})");
+    signaling_thread_->PostTask([this] { DeletePeerConnection(); });
+  }
 }
 
 // ==================== PeerConnectionClientObserver ====================

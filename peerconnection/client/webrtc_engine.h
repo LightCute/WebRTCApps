@@ -50,6 +50,7 @@ class WebRTCEngine : public EngineController,
   void QueryDevices() override;
   void SetVideoDevice(int device_idx) override;
   void SetAudioInputDevice(int device_idx) override;
+  void GetLocalSdp() override;
   bool connection_active() const override;
 
   // Lifecycle (called by main.cc, not part of EngineController)
@@ -109,6 +110,7 @@ class WebRTCEngine : public EngineController,
   void QueryDevicesImpl();
   void SetVideoDeviceImpl(int device_idx);
   void SetAudioInputDeviceImpl(int device_idx);
+  void GetLocalSdpImpl();
 
   EngineObserver* observer_ = nullptr;
   std::atomic<bool> connection_active_{false};
@@ -136,6 +138,7 @@ class WebRTCEngine : public EngineController,
   int peer_id_ = -1;
   int pending_hangup_peer_id_ = -1;
   bool loopback_ = false;
+  bool collecting_sdp_ = false;
   std::string server_;
   int server_port_ = 8888;
   std::deque<std::string*> pending_messages_;

@@ -147,7 +147,9 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
     }
     engine_->SetAudioInputDevice(idx);
     SendResponse(id, true);
-  } else {
+  } else if (cmd == "get_local_sdp") {
+    engine_->GetLocalSdp();
+    SendResponse(id, true);
     SendResponse(id, false, "Unknown command: " + cmd);
   }
 }
