@@ -816,7 +816,7 @@ void WebRTCEngine::AddTracks() {
         factory_->CreateVideoTrack(video_source, kVideoLabel));
     pipeline_->StartLocalRenderer(video_track_.get());
 
-    result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
+    auto result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
     if (!result_or_error.ok()) {
       RTC_LOG(LS_ERROR) << "Failed to add video track to PeerConnection: "
                         << result_or_error.error().message();
