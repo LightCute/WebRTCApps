@@ -394,9 +394,10 @@ void WebRTCEngine::OnAddTrack(
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
     pipeline_->StartRemoteRenderer(video_track);
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
-    pipeline_->StartRemoteAudioRenderer(audio_track);
+  // ── Audio render disabled for video-only test ──
+  // } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
+  //   auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
+  //   pipeline_->StartRemoteAudioRenderer(audio_track);
   }
 }
 
@@ -407,8 +408,9 @@ void WebRTCEngine::OnRemoveTrack(
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     pipeline_->StopRemoteRenderer();
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    pipeline_->StopRemoteAudioRenderer();
+  // ── Audio render disabled for video-only test ──
+  // } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
+  //   pipeline_->StopRemoteAudioRenderer();
   }
 }
 
@@ -882,23 +884,23 @@ void WebRTCEngine::AddTracks() {
     return;  // Already added tracks.
   }
 
-  // Audio track: create SHM source if requested, else ADM via pipeline
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    shm_source = ShmAudioCapturer::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!shm_source)
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
-  }
-
-  auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
-  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
-  auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
-  if (!result_or_error.ok()) {
-    RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
-                      << result_or_error.error().message();
-  }
+  // ── Audio track disabled for video-only hardware pipeline test ──
+  // TODO: re-enable after video encode/decode verified on RK3588
+  // webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
+  // std::string audio_source = absl::GetFlag(FLAGS_audio_source);
+  // if (audio_source == "shm") {
+  //   shm_source = ShmAudioCapturer::Create(
+  //       shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
+  //   if (!shm_source)
+  //     RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
+  // }
+  // auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  // auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
+  // auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
+  // if (!result_or_error.ok()) {
+  //   RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
+  //                     << result_or_error.error().message();
+  // }
 
   auto video_source = pipeline_->CreateVideoSource();
   if (video_source) {
