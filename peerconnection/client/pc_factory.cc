@@ -46,16 +46,16 @@ PcComponents PcFactory::Create(webrtc::Thread* network_thread,
   deps.video_encoder_factory =
       std::make_unique<webrtc::VideoEncoderFactoryTemplate<
           //webrtc::MppH264EncoderTemplateAdapter,
+          webrtc::OpenH264EncoderTemplateAdapter,
           webrtc::LibvpxVp8EncoderTemplateAdapter,
           webrtc::LibvpxVp9EncoderTemplateAdapter,
-          webrtc::OpenH264EncoderTemplateAdapter,
           webrtc::LibaomAv1EncoderTemplateAdapter>>();
   deps.video_decoder_factory =
       std::make_unique<webrtc::VideoDecoderFactoryTemplate<
           //webrtc::MppH264DecoderTemplateAdapter,
+          webrtc::OpenH264DecoderTemplateAdapter,
           webrtc::LibvpxVp8DecoderTemplateAdapter,
           webrtc::LibvpxVp9DecoderTemplateAdapter,
-          webrtc::OpenH264DecoderTemplateAdapter,
           webrtc::Dav1dDecoderTemplateAdapter>>();
   webrtc::EnableMedia(deps);
 

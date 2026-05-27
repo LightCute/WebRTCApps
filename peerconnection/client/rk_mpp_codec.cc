@@ -14,6 +14,7 @@
 #include "api/scoped_refptr.h"
 #include "api/video/encoded_image.h"
 #include "api/video/i420_buffer.h"
+#include "api/video/nv12_buffer.h"
 #include "api/video/video_frame.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
 #include "modules/video_coding/include/video_codec_interface.h"
@@ -210,22 +211,30 @@ struct MppH264Encoder::Impl {
                        << " (configured for " << w << "x" << h << ")";
       return WEBRTC_VIDEO_CODEC_OK;
     }
-    scoped_refptr<I420BufferInterface> i420 =
-        frame.video_frame_buffer()->ToI420();
-    if (!i420) { RTC_LOG(LS_ERROR) << "  ToI420 failed"; return WEBRTC_VIDEO_CODEC_ERROR; }
-
     int ys = w * h, uvs = ys / 4;
     RTC_LOG(LS_INFO) << "  EncodeOne: get buf ptr...";
     uint8_t* dst = (uint8_t*)mpp_buffer_get_ptr_with_caller(frm_buf, __func__);
     RTC_LOG(LS_INFO) << "  EncodeOne: buf ptr=" << (void*)dst << " ys=" << ys;
-    memcpy(dst, i420->DataY(), ys);
-    const uint8_t* u = i420->DataU();
-    const uint8_t* v = i420->DataV();
-    for (int i = 0; i < uvs; i++) {
-      dst[ys + i*2]     = u[i];
-      dst[ys + i*2 + 1] = v[i];
+
+    // NV12 fast-path: if input already NV12, skip CPU I420→NV12 conversion
+    auto* nv12_buf = frame.video_frame_buffer()->GetNV12();
+    if (nv12_buf) {
+      memcpy(dst, nv12_buf->DataY(), ys);
+      memcpy(dst + ys, nv12_buf->DataUV(), uvs * 2);
+      RTC_LOG(LS_INFO) << "  EncodeOne: NV12 fast-path";
+    } else {
+      scoped_refptr<I420BufferInterface> i420 =
+          frame.video_frame_buffer()->ToI420();
+      if (!i420) { RTC_LOG(LS_ERROR) << "  ToI420 failed"; return WEBRTC_VIDEO_CODEC_ERROR; }
+      memcpy(dst, i420->DataY(), ys);
+      const uint8_t* u = i420->DataU();
+      const uint8_t* v = i420->DataV();
+      for (int i = 0; i < uvs; i++) {
+        dst[ys + i*2]     = u[i];
+        dst[ys + i*2 + 1] = v[i];
+      }
+      RTC_LOG(LS_INFO) << "  EncodeOne: I420→NV12 done";
     }
-    RTC_LOG(LS_INFO) << "  EncodeOne: I420→NV12 done";
 
     // rk_h264_test doesn't call ENC_SET_IDR_FRAME; skip it
 
@@ -382,6 +391,7 @@ struct MppH264Decoder::Impl {
   int w = 0, h = 0, hor_stride = 0, ver_stride = 0;
   size_t buf_size = 0;
   bool info_ready = false;
+  int last_nv12_fd_ = -1;
   DecodedImageCallback* callback = nullptr;
 
   ~Impl() { Release(); }
@@ -468,22 +478,27 @@ struct MppH264Decoder::Impl {
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
 
-    uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
-    scoped_refptr<I420Buffer> i420 = I420Buffer::Create(w, h);
-    if (!i420) {
+    int ys = w * h;
+
+    // Export MPP dma-buf fd for zero-copy RGA source
+    last_nv12_fd_ = mpp_buffer_get_fd(dec_buf);
+
+    // Wrap MPP NV12 output in VideoFrame for WebRTC callback.
+    // If fd export worked, DecSink uses fd directly (zero-cpu).
+    // If fd failed, fill NV12Buffer as fallback for RGA virAddr path.
+    scoped_refptr<NV12Buffer> nv12 = NV12Buffer::Create(w, h);
+    if (!nv12) {
       mpp_frame_deinit(&frame);
       return WEBRTC_VIDEO_CODEC_ERROR;
     }
-
-    int ys = w * h, uvs = ys / 4;
-    memcpy(i420->MutableDataY(), src, ys);
-    for (int i = 0; i < uvs; i++) {
-      i420->MutableDataU()[i] = src[ys + i*2];
-      i420->MutableDataV()[i] = src[ys + i*2 + 1];
+    if (last_nv12_fd_ < 0) {
+      uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
+      memcpy(nv12->MutableDataY(), src, ys);
+      memcpy(nv12->MutableDataUV(), src + ys, ys / 2);
     }
 
     VideoFrame decoded_frame = VideoFrame::Builder()
-        .set_video_frame_buffer(i420)
+        .set_video_frame_buffer(nv12)
         .set_rtp_timestamp(input_image.RtpTimestamp())
         .set_ntp_time_ms(input_image.NtpTimeMs())
         .build();
@@ -499,6 +514,10 @@ struct MppH264Decoder::Impl {
 
 MppH264Decoder::MppH264Decoder() : impl_(std::make_unique<Impl>()) {}
 MppH264Decoder::~MppH264Decoder() = default;
+
+int MppH264Decoder::GetLastNV12Fd() const {
+  return impl_ ? impl_->last_nv12_fd_ : -1;
+}
 
 bool MppH264Decoder::Configure(const Settings&) {
   if (!impl_->InitDecoder()) return false;

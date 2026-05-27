@@ -26,9 +26,12 @@ extern "C" {
 // frame pipeline so MPP encoder can import it for zero-copy encoding.
 class Nv12DmaBufBuffer : public webrtc::NV12Buffer {
  public:
-  Nv12DmaBufBuffer(int width, int height, int fd)
-      : NV12Buffer(width, height, width, width), fd_(fd) {}
+  static constexpr uint32_t kMagic = 0xA3B52480;  // "DMA-BUF zero-copy"
 
+  Nv12DmaBufBuffer(int width, int height, int fd)
+      : NV12Buffer(width, height, width, width), magic_(kMagic), fd_(fd) {}
+
+  bool IsDmaBuf() const { return magic_ == kMagic; }
   int fd() const { return fd_; }
 
   static webrtc::scoped_refptr<Nv12DmaBufBuffer> Create(
@@ -37,16 +40,20 @@ class Nv12DmaBufBuffer : public webrtc::NV12Buffer {
   }
 
  private:
+  uint32_t magic_;
   int fd_;
 };
 
 // Extract NV12 dma-buf fd from a VideoFrame if backed by Nv12DmaBufBuffer.
 // Returns -1 for regular NV12Buffer (CPU path).
 int GetNv12DmaBufFd(const webrtc::VideoFrame& frame) {
-  // dynamic_cast unavailable with -fno-rtti. For the DMA-BUF capture→encode
-  // path, the MPP encoder import must be wired on the RK3588 board using a
-  // RTTI-free dispatch — either a side-channel fd map or a type-id in NV12Buffer.
-  (void)frame;
+  auto* buf = frame.video_frame_buffer().get();
+  if (buf && buf->type() == webrtc::VideoFrameBuffer::Type::kNV12) {
+    // Nv12DmaBufBuffer is in this same TU. Use magic cookie to safely
+    // identify DMA-BUF-backed buffers without RTTI.
+    auto* dma = static_cast<Nv12DmaBufBuffer*>(buf);
+    if (dma->IsDmaBuf() && dma->fd() >= 0) return dma->fd();
+  }
   return -1;
 }
 
@@ -141,6 +148,7 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
   webrtc::scoped_refptr<webrtc::NV12Buffer> nv12;
 
   // ── Zero-copy DMA-BUF capture path ──
+  int cap_fd = -1;
   if (capture_pool_ && capture_ctrl_) {
     pthread_mutex_lock(&capture_ctrl_->mtx);
     while (capture_ctrl_->frame_count >= RING_BUFFER_CNT) {
@@ -154,7 +162,7 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
     uint32_t cap_idx = capture_ctrl_->w_idx;
     pthread_mutex_unlock(&capture_ctrl_->mtx);
 
-    int cap_fd = capture_pool_->GetFd(cap_idx);
+    cap_fd = capture_pool_->GetFd(cap_idx);
 
     rga_info_t src{};
     memset(&src, 0, sizeof(src));
@@ -176,11 +184,13 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
 
     if (rga_blit_(&src, &dst, nullptr) == 0) {
       nv12 = Nv12DmaBufBuffer::Create(w, h, cap_fd);
+    } else {
+      cap_fd = -1;  // RGA failed, DMA-BUF data is invalid
     }
     // On RGA failure, nv12 stays null → fall through to CPU path below
   }
 
-  // ── CPU fallback path ──
+  // ── CPU fallback path (when DMA-BUF path was skipped or failed) ──
   if (!nv12) {
     size_t nv12_size = ys + uvs;
     if (nv12_buf_.size() < nv12_size) nv12_buf_.resize(nv12_size);
@@ -241,7 +251,14 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
 
     rga_info_t src2;
     memset(&src2, 0, sizeof(src2));
-    src2.virAddr = nv12_buf_.data();
+    // On the DMA-BUF path the camera data lives in cap_fd (GPU memory),
+    // not in nv12_buf_ (which is only filled on the CPU fallback path).
+    // Use the DMA-BUF fd directly as RGA source for zero-copy preview.
+    if (cap_fd >= 0) {
+      src2.fd = cap_fd;
+    } else {
+      src2.virAddr = nv12_buf_.data();
+    }
     src2.format = RK_FORMAT_YCbCr_420_SP;
     src2.rect.width = w; src2.rect.height = h;
     src2.rect.wstride = w; src2.rect.hstride = h;

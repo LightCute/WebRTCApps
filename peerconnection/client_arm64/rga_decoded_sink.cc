@@ -77,9 +77,12 @@ int32_t RgaDecodedSink::Decoded(webrtc::VideoFrame& frame) {
     src.fd = mpp_fd;
     src.format = RK_FORMAT_YCbCr_420_SP;
   } else {
-    // Priority 2: NV12 CPU buffer (MPP fd export failed or not available)
-    auto* nv12 = frame.video_frame_buffer()->GetNV12();
-    if (nv12) {
+    // Priority 2: NV12 CPU buffer (MPP fd export failed or not available).
+    // GetNV12() RTC_CHECKs type == kNV12 and aborts on non-NV12 frames.
+    // WebRTC may adapt the frame to I420, so check the type safely first.
+    auto buf = frame.video_frame_buffer();
+    if (buf->type() == webrtc::VideoFrameBuffer::Type::kNV12) {
+      auto* nv12 = static_cast<const webrtc::NV12BufferInterface*>(buf.get());
       src.virAddr = const_cast<uint8_t*>(nv12->DataY());
       src.format = RK_FORMAT_YCbCr_420_SP;
     } else {

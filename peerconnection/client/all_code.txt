@@ -4,21 +4,42 @@
   └─ blocking_queue.h
   └─ cli_runner.cc
   └─ cli_runner.h
+  └─ data_channel_manager.cc
+  └─ data_channel_manager.h
   └─ defaults.cc
   └─ defaults.h
+  └─ engine_controller.h
   └─ flag_defs.h
+  └─ json_helpers.cc
+  └─ json_helpers.h
   └─ main.cc
   └─ main_wnd.h
+  └─ media_pipeline.cc
+  └─ media_pipeline.h
+  └─ pc_factory.cc
+  └─ pc_factory.h
   └─ peer_connection_client.cc
   └─ peer_connection_client.h
+  └─ rk_mpp_codec.cc
+  └─ rk_mpp_codec.h
+  └─ rk_mpp_encoder.cc
+  └─ rk_mpp_encoder.h
+  └─ rk_mpp_stubs.cc
+  └─ shm_audio_capturer.cc
+  └─ shm_audio_capturer.h
   └─ shm_audio_reader.cc
   └─ shm_audio_reader.h
+  └─ shm_audio_renderer.cc
+  └─ shm_audio_renderer.h
   └─ shm_audio_writer.cc
   └─ shm_audio_writer.h
   └─ shm_common.cc
   └─ shm_common.h
+  └─ shm_video_renderer.cc
+  └─ shm_video_renderer.h
   └─ shm_video_writer.cc
   └─ shm_video_writer.h
+  └─ signaling_interface.h
   └─ unix_socket_server.cc
   └─ unix_socket_server.h
   └─ webrtc_engine.cc
@@ -27,6 +48,37 @@
 ==================================================
 ========== 所有代码文件内容 ==========
 
+
+========== ./pc_factory.h ==========
+Lines: 27
+
+#ifndef APPS_PEERCONNECTION_CLIENT_PC_FACTORY_H_
+#define APPS_PEERCONNECTION_CLIENT_PC_FACTORY_H_
+
+#include "api/environment/environment.h"
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
+#include "rtc_base/thread.h"
+
+// Returned by PcFactory::Create — the two core WebRTC objects.
+struct PcComponents {
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory;
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> connection;
+};
+
+// Pure factory: creates PeerConnectionFactory + PeerConnection
+// from threads + ADM. No state, no callbacks.
+class PcFactory {
+ public:
+  static PcComponents Create(webrtc::Thread* network_thread,
+                             webrtc::Thread* worker_thread,
+                             webrtc::Thread* signaling_thread,
+                             const webrtc::Environment& env,
+                             webrtc::AudioDeviceModule* adm,
+                             webrtc::PeerConnectionObserver* observer);
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_PC_FACTORY_H_
 
 ========== ./shm_video_writer.cc ==========
 Lines: 82
@@ -115,7 +167,7 @@ bool ShmVideoWriter::WriteFrame(const VideoFrameHead& head, const uint8_t* data)
 }
 
 ========== ./peer_connection_client.cc ==========
-Lines: 563
+Lines: 599
 
 /*
  *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
@@ -132,6 +184,10 @@ Lines: 563
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -326,6 +382,34 @@ bool PeerConnectionClient::SendHangUp(int peer_id) {
   return ConnectControlSocket();
 }
 
+void PeerConnectionClient::SendHangUpConfirm() {
+  RTC_LOG(LS_INFO) << "SendHangUpConfirm peer_id=" << my_id_
+                   << " state=" << state_;
+  if (state_ != CONNECTED) {
+    RTC_LOG(LS_WARNING) << "SendHangUpConfirm: not CONNECTED, state=" << state_;
+    return;
+  }
+  if (!is_connected()) {
+    RTC_LOG(LS_WARNING) << "SendHangUpConfirm: not connected";
+    return;
+  }
+  // Use a raw blocking socket — must complete before Close() kills the
+  // control socket.
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return;
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(server_address_.port());
+  addr.sin_addr.s_addr = inet_addr(server_address_.ipaddr().ToString().c_str());
+  if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+    char req[256];
+    int n = snprintf(req, sizeof(req),
+                     "GET /hangup_confirm?peer_id=%i HTTP/1.0\r\n\r\n", my_id_);
+    send(fd, req, n, 0);
+  }
+  close(fd);
+}
+
 bool PeerConnectionClient::IsSendingMessage() {
   return state_ == CONNECTED &&
          control_socket_->GetState() != webrtc::Socket::CS_CLOSED;
@@ -387,12 +471,16 @@ void PeerConnectionClient::OnConnect(webrtc::Socket* socket) {
 }
 
 void PeerConnectionClient::OnHangingGetConnect(webrtc::Socket* socket) {
+  RTC_LOG(LS_INFO) << __FUNCTION__ << " peer_id=" << my_id_;
   char buffer[1024];
   snprintf(buffer, sizeof(buffer), "GET /wait?peer_id=%i HTTP/1.0\r\n\r\n",
            my_id_);
   int len = static_cast<int>(strlen(buffer));
   int sent = socket->Send(buffer, len);
-  RTC_DCHECK(sent == len);
+  if (sent != len) {
+    RTC_LOG(LS_ERROR) << "Failed to send /wait request: " << sent << " != "
+                      << len;
+  }
 }
 
 void PeerConnectionClient::OnMessageFromPeer(int peer_id,
@@ -719,7 +807,7 @@ std::string GetTurnPassword();
 #endif  // APPS_PEERCONNECTION_CLIENT_DEFAULTS_H_
 
 ========== ./unix_socket_server.cc ==========
-Lines: 256
+Lines: 242
 
 // unix_socket_server.cc
 #include "unix_socket_server.h"
@@ -737,17 +825,21 @@ Lines: 256
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "apps/peerconnection/client/webrtc_engine.h"
+#include "apps/peerconnection/client/engine_controller.h"
 #include "json/reader.h"
 #include "json/value.h"
 #include "json/writer.h"
 #include "rtc_base/logging.h"
 
 UnixSocketServer::UnixSocketServer(const std::string& socket_path,
-                                   WebRTCEngine* engine)
+                                   EngineController* engine)
     : socket_path_(socket_path), engine_(engine) {}
 
 UnixSocketServer::~UnixSocketServer() { Stop(); }
+
+void UnixSocketServer::OnEngineEvent(const std::string& json) {
+  SendToClient(json);
+}
 
 void UnixSocketServer::Start() {
   running_ = true;
@@ -817,30 +909,22 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
       SendResponse(id, false, "Missing server or port");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, server, port] {
-          engine_->ConnectToServer(server, port);
-          SendResponse(id, true);
-      });
+    engine_->ConnectToServer(server, port);
+    SendResponse(id, true);
   } else if (cmd == "disconnect") {
-    engine_->signaling_thread()->PostTask([this, id] {
-        engine_->DisconnectFromServer();
-        SendResponse(id, true);
-      });
+    engine_->DisconnectFromServer();
+    SendResponse(id, true);
   } else if (cmd == "call") {
     int peer_id = root["params"].get("peer_id", -1).asInt();
     if (peer_id < 0) {
       SendResponse(id, false, "Invalid peer_id");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, peer_id] {
-        engine_->ConnectToPeer(peer_id);
-        SendResponse(id, true);
-      });
+    engine_->ConnectToPeer(peer_id);
+    SendResponse(id, true);
   } else if (cmd == "hangup") {
-    engine_->signaling_thread()->PostTask([this, id] {
-        engine_->HangUp();
-        SendResponse(id, true);
-      });
+    engine_->HangUp();
+    SendResponse(id, true);
   } else if (cmd == "shutdown") {
     SendResponse(id, true);
     running_ = false;
@@ -848,42 +932,32 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
   } else if (cmd == "set_mute") {
     bool audio_mute = root["params"].get("audio", false).asBool();
     bool video_mute = root["params"].get("video", false).asBool();
-    engine_->signaling_thread()->PostTask([this, audio_mute, video_mute] {
-        if (audio_mute) engine_->SetAudioMuted(true);
-        if (video_mute) engine_->SetVideoPaused(true);
-      });
+    if (audio_mute) engine_->SetAudioMuted(true);
+    if (video_mute) engine_->SetVideoPaused(true);
     SendResponse(id, true);
   } else if (cmd == "send_data") {
     std::string text = root["params"].get("text", "").asString();
-    engine_->signaling_thread()->PostTask([this, id, text] {
-        engine_->SendData(text);
-        SendResponse(id, true);
-      });
+    engine_->SendData(text);
+    SendResponse(id, true);
   } else if (cmd == "query_devices") {
-    engine_->signaling_thread()->PostTask([this, id] {
-      engine_->QueryDevices();
-      SendResponse(id, true);
-    });
+    engine_->QueryDevices();
+    SendResponse(id, true);
   } else if (cmd == "set_video_device") {
     int idx = root["params"].get("device_idx", -1).asInt();
     if (idx < 0) {
       SendResponse(id, false, "Missing device_idx");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, idx] {
-      engine_->SetVideoDevice(idx);
-      SendResponse(id, true);
-    });
+    engine_->SetVideoDevice(idx);
+    SendResponse(id, true);
   } else if (cmd == "set_audio_input_device") {
     int idx = root["params"].get("device_idx", -1).asInt();
     if (idx < 0) {
       SendResponse(id, false, "Missing device_idx");
       return;
     }
-    engine_->signaling_thread()->PostTask([this, id, idx] {
-      engine_->SetAudioInputDevice(idx);
-      SendResponse(id, true);
-    });
+    engine_->SetAudioInputDevice(idx);
+    SendResponse(id, true);
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }
@@ -1061,6 +1135,608 @@ public:
 
 };
 
+========== ./shm_audio_capturer.h ==========
+Lines: 43
+
+#ifndef APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
+#define APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
+
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "api/media_stream_interface.h"
+#include "api/scoped_refptr.h"
+#include "apps/peerconnection/client/shm_audio_reader.h"
+
+// Reads captured audio from shared memory (produced by an external Qt process).
+// Implements AudioSourceInterface so it can be used as a drop-in audio source
+// for PeerConnectionFactory::CreateAudioTrack().
+class ShmAudioCapturer : public webrtc::AudioSourceInterface {
+ public:
+  static webrtc::scoped_refptr<ShmAudioCapturer> Create(
+      const std::string& key_path, int proj_id);
+  ~ShmAudioCapturer() override;
+
+  void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
+  void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;
+  void RegisterObserver(webrtc::ObserverInterface*) override {}
+  void UnregisterObserver(webrtc::ObserverInterface*) override {}
+  webrtc::MediaSourceInterface::SourceState state() const override {
+    return webrtc::MediaSourceInterface::kLive;
+  }
+  bool remote() const override { return false; }
+
+ protected:
+  ShmAudioCapturer() = default;
+  void CaptureLoop();
+
+  ShmAudioReader reader_;
+  std::mutex sinks_mutex_;
+  std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
+  std::thread capture_thread_;
+  std::atomic<bool> running_{false};
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
+
+========== ./rk_mpp_codec.cc ==========
+Lines: 551
+
+// rk_mpp_codec.cc — RK3588 MPP H264 hardware encoder/decoder via dlopen
+
+// MPP memory operations (I420↔NV12 conversion) require raw buffer access.
+// Disable unsafe-buffer warnings for this file.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/client/rk_mpp_codec.h"
+
+#include <unistd.h>
+#include <cstring>
+#include <vector>
+
+#include "api/scoped_refptr.h"
+#include "api/video/encoded_image.h"
+#include "api/video/i420_buffer.h"
+#include "api/video/nv12_buffer.h"
+#include "api/video/video_frame.h"
+#include "modules/video_coding/codecs/h264/include/h264.h"
+#include "modules/video_coding/include/video_codec_interface.h"
+#include "modules/video_coding/include/video_error_codes.h"
+#include "rtc_base/logging.h"
+
+// ── Real MPP headers from SDK ─────────────────────────
+extern "C" {
+#include "mpp_buffer.h"
+#include "mpp_err.h"
+#include "mpp_frame.h"
+#include "mpp_meta.h"
+#include "mpp_packet.h"
+#include "rk_mpi.h"
+#include "rk_mpi_cmd.h"
+#include "rk_venc_cfg.h"
+#include "rk_venc_cmd.h"
+}
+
+
+// ── Runtime MPP loading via dlsym (provided by rk_mpp_stubs.cc) ──
+bool MppLibLoad();
+
+static bool MppLoad() {
+  return MppLibLoad();
+}
+
+
+
+#define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
+#define MAX_RETRY 30
+
+// MPP command values from rk_mpi_cmd.h — verified by official mpi_enc_test
+
+namespace webrtc {
+
+// ── SDP format / adapter helpers ──────────────────────────────
+
+std::vector<SdpVideoFormat> MppH264EncoderTemplateAdapter::SupportedFormats() {
+  return {CreateH264Format(H264Profile::kProfileBaseline, H264Level::kLevel3_1, "1"),
+          CreateH264Format(H264Profile::kProfileConstrainedBaseline, H264Level::kLevel3_1, "1")};
+}
+
+std::vector<SdpVideoFormat> MppH264DecoderTemplateAdapter::SupportedFormats() {
+  return {CreateH264Format(H264Profile::kProfileBaseline, H264Level::kLevel3_1, "1"),
+          CreateH264Format(H264Profile::kProfileConstrainedBaseline, H264Level::kLevel3_1, "1")};
+}
+
+std::unique_ptr<VideoEncoder> MppH264EncoderTemplateAdapter::CreateEncoder(
+    const Environment&, const SdpVideoFormat&) {
+  RTC_LOG(LS_INFO) << "MppH264EncoderTemplateAdapter::CreateEncoder";
+  if (!MppLoad()) { RTC_LOG(LS_INFO) << "  CreateEncoder: MppLoad failed"; return nullptr; }
+  RTC_LOG(LS_INFO) << "  CreateEncoder: OK";
+  return std::make_unique<MppH264Encoder>();
+}
+
+std::unique_ptr<VideoDecoder> MppH264DecoderTemplateAdapter::CreateDecoder(
+    const Environment&, const SdpVideoFormat&) {
+  RTC_LOG(LS_INFO) << "MppH264DecoderTemplateAdapter::CreateDecoder";
+  if (!MppLoad()) { RTC_LOG(LS_INFO) << "  CreateDecoder: MppLoad failed"; return nullptr; }
+  RTC_LOG(LS_INFO) << "  CreateDecoder: OK";
+  return std::make_unique<MppH264Decoder>();
+}
+
+// ── MppH264Encoder ────────────────────────────────────────────
+
+struct MppH264Encoder::Impl {
+  MppCtx ctx = nullptr;
+  MppApi* mpi = nullptr;
+  MppBufferGroup buf_grp = nullptr;
+  MppBuffer frm_buf = nullptr;
+  MppBuffer pkt_buf = nullptr;
+  EncodedImageCallback* callback = nullptr;
+  VideoCodec codec_config = {};
+  size_t frame_size = 0;
+  int w = 0, h = 0, hor_stride = 0, ver_stride = 0;
+  bool ready = false;
+  bool needs_reinit = false;  // defer reinit to Encode() for dynamic resolution
+  std::vector<uint8_t> sps_pps_;
+
+  ~Impl() { RTC_LOG(LS_INFO) << "~Impl() enc"; Release(); }
+
+  void Release() {
+    RTC_LOG(LS_INFO) << "  Release: start ready=" << ready;
+    ready = false;
+    frm_buf = nullptr;
+    pkt_buf = nullptr;
+    if (ctx && mpi) {
+      RTC_LOG(LS_INFO) << "  Release: calling reset...";
+      mpi->reset(ctx);
+      RTC_LOG(LS_INFO) << "  Release: reset done";
+    }
+    if (buf_grp) {
+      RTC_LOG(LS_INFO) << "  Release: buf_grp_put...";
+      mpp_buffer_group_put(buf_grp);
+      buf_grp = nullptr;
+      RTC_LOG(LS_INFO) << "  Release: buf_grp_put done";
+    }
+    if (ctx) {
+      RTC_LOG(LS_INFO) << "  Release: mpp_destroy...";
+      mpp_destroy(ctx);
+      ctx = nullptr;
+      RTC_LOG(LS_INFO) << "  Release: mpp_destroy done";
+    }
+    RTC_LOG(LS_INFO) << "  Release: done";
+  }
+
+  bool InitEncoder() {
+    Release();  // free previous resources on reconfig
+    if (!MppLibLoad()) { RTC_LOG(LS_ERROR) << "MppLibLoad failed"; return false; }
+    RTC_LOG(LS_INFO) << "MPP InitEncoder start";
+    MPP_RET ret;
+
+    w = codec_config.width;
+    h = codec_config.height;
+    hor_stride = ALIGN(w, 8);
+    ver_stride = ALIGN(h, 16);
+    frame_size = hor_stride * ver_stride * 3 / 2;
+    RTC_LOG(LS_INFO) << "  frame " << w << "x" << h << " stride=" << hor_stride
+                     << "x" << ver_stride << " size=" << frame_size;
+
+    // Step 1: Create MPP context
+    RTC_LOG(LS_INFO) << "  [1/5] mpp_create...";
+    ret = mpp_create(&ctx, &mpi);
+    RTC_LOG(LS_INFO) << "  mpp_create ret=" << ret << " ctx=" << (void*)ctx << " mpi=" << (void*)mpi;
+    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_create enc failed"; return false; }
+
+    // Step 2: Init encoder
+    RTC_LOG(LS_INFO) << "  [2/5] mpp_init ENC AVC...";
+    ret = mpp_init(ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC);
+    RTC_LOG(LS_INFO) << "  mpp_init ret=" << ret;
+    if (ret != MPP_OK) { RTC_LOG(LS_ERROR) << "mpp_init enc failed"; return false; }
+
+    // Step 3: Buffer group AFTER init (rk_h264_test order)
+    RTC_LOG(LS_INFO) << "  [3/5] buffer group DRM...";
+    ret = mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_DRM,
+                               MPP_BUFFER_INTERNAL, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  buf_grp DRM ret=" << ret << " grp=" << (void*)buf_grp;
+    if (ret) {
+      RTC_LOG(LS_INFO) << "  buf_grp try ION...";
+      ret = mpp_buffer_group_get(&buf_grp, MPP_BUFFER_TYPE_ION,
+                                 MPP_BUFFER_INTERNAL, MODULE_TAG, __func__);
+      RTC_LOG(LS_INFO) << "  buf_grp ION ret=" << ret << " grp=" << (void*)buf_grp;
+    }
+    if (!buf_grp) { RTC_LOG(LS_ERROR) << "buffer group failed"; return false; }
+    mpp_buffer_group_limit_config(buf_grp, frame_size, 4);
+
+    RTC_LOG(LS_INFO) << "  getting frame buffer size=" << frame_size;
+    ret = mpp_buffer_get_with_tag(buf_grp, &frm_buf, frame_size, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  frm_buf ret=" << ret << " buf=" << (void*)frm_buf;
+    if (ret) { RTC_LOG(LS_ERROR) << "frm_buf failed"; return false; }
+
+    // Output packet buffer (official mpi_enc_test pattern)
+    ret = mpp_buffer_get_with_tag(buf_grp, &pkt_buf, frame_size, MODULE_TAG, __func__);
+    RTC_LOG(LS_INFO) << "  pkt_buf ret=" << ret << " buf=" << (void*)pkt_buf;
+    if (ret) { RTC_LOG(LS_ERROR) << "pkt_buf failed"; return false; }
+
+    // Step 4: Try encoder with defaults only — ENC_SET_CFG returns -2
+    // on the board's older library. Set minimal config and move on.
+    RTC_LOG(LS_INFO) << "  [4/4] minimal config, skipping ENC_SET_CFG...";
+    {
+      MppEncCfg cfg = nullptr;
+      mpp_enc_cfg_init(&cfg);
+      mpp_enc_cfg_set_s32(cfg, "prep:width", w);
+      mpp_enc_cfg_set_s32(cfg, "prep:height", h);
+      mpp_enc_cfg_set_s32(cfg, "prep:hor_stride", hor_stride);
+      mpp_enc_cfg_set_s32(cfg, "prep:ver_stride", ver_stride);
+      mpp_enc_cfg_set_s32(cfg, "prep:format", MPP_FMT_YUV420SP);
+      int bps = codec_config.maxBitrate * 1000;
+      mpp_enc_cfg_set_s32(cfg, "rc:mode", 1);
+      mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
+      mpp_enc_cfg_set_s32(cfg, "rc:gop", 60);
+      mpp_enc_cfg_set_s32(cfg, "codec:type", MPP_VIDEO_CodingAVC);
+      MPP_RET cfg_ret = mpi->control(ctx, MPP_ENC_SET_CFG, cfg);
+      RTC_LOG(LS_INFO) << "  ENC_SET_CFG ret=" << cfg_ret;
+      mpp_enc_cfg_deinit(cfg);
+    }
+
+    ready = true;
+    RTC_LOG(LS_INFO) << "MPP encoder ready " << w << "x" << h
+                     << " SPS/PPS=" << sps_pps_.size() << "B";
+    return true;
+  }
+
+  int32_t EncodeOne(const VideoFrame& frame,
+                    const std::vector<VideoFrameType>* frame_types) {
+    RTC_LOG(LS_INFO) << "  EncodeOne: start";
+    // Only encode frames matching the configured resolution.
+    // Quality scaler may downscale frames that MPP can't handle at
+    // current bitrate; skip them rather than reconfiguring.
+    int fw = frame.width(), fh = frame.height();
+    if (fw != w || fh != h) {
+      RTC_LOG(LS_INFO) << "  EncodeOne: skip frame " << fw << "x" << fh
+                       << " (configured for " << w << "x" << h << ")";
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
+    int ys = w * h, uvs = ys / 4;
+    RTC_LOG(LS_INFO) << "  EncodeOne: get buf ptr...";
+    uint8_t* dst = (uint8_t*)mpp_buffer_get_ptr_with_caller(frm_buf, __func__);
+    RTC_LOG(LS_INFO) << "  EncodeOne: buf ptr=" << (void*)dst << " ys=" << ys;
+
+    // NV12 fast-path: if input already NV12, skip CPU I420→NV12 conversion
+    auto* nv12_buf = frame.video_frame_buffer()->GetNV12();
+    if (nv12_buf) {
+      memcpy(dst, nv12_buf->DataY(), ys);
+      memcpy(dst + ys, nv12_buf->DataUV(), uvs * 2);
+      RTC_LOG(LS_INFO) << "  EncodeOne: NV12 fast-path";
+    } else {
+      scoped_refptr<I420BufferInterface> i420 =
+          frame.video_frame_buffer()->ToI420();
+      if (!i420) { RTC_LOG(LS_ERROR) << "  ToI420 failed"; return WEBRTC_VIDEO_CODEC_ERROR; }
+      memcpy(dst, i420->DataY(), ys);
+      const uint8_t* u = i420->DataU();
+      const uint8_t* v = i420->DataV();
+      for (int i = 0; i < uvs; i++) {
+        dst[ys + i*2]     = u[i];
+        dst[ys + i*2 + 1] = v[i];
+      }
+      RTC_LOG(LS_INFO) << "  EncodeOne: I420→NV12 done";
+    }
+
+    // rk_h264_test doesn't call ENC_SET_IDR_FRAME; skip it
+
+    RTC_LOG(LS_INFO) << "  EncodeOne: frame init...";
+    MppFrame frm = nullptr;
+    mpp_frame_init(&frm);
+    mpp_frame_set_width(frm, w);
+    mpp_frame_set_height(frm, h);
+    mpp_frame_set_hor_stride(frm, hor_stride);
+    mpp_frame_set_ver_stride(frm, ver_stride);
+    mpp_frame_set_fmt(frm, MPP_FMT_YUV420SP);
+    mpp_frame_set_buffer(frm, frm_buf);
+
+    // Official pattern: pre-allocated packet buffer, attach to frame metadata
+    MppPacket pkt = nullptr;
+    mpp_packet_init_with_buffer(&pkt, pkt_buf);
+    mpp_packet_set_length(pkt, 0);
+    MppMeta meta = mpp_frame_get_meta(frm);
+    mpp_meta_set_packet(meta, KEY_OUTPUT_PACKET, pkt);
+
+    RTC_LOG(LS_INFO) << "  EncodeOne: put_frame...";
+    mpi->encode_put_frame(ctx, frm);
+    RTC_LOG(LS_INFO) << "  EncodeOne: put_frame done, deinit frame...";
+    mpp_frame_deinit(&frm);
+    RTC_LOG(LS_INFO) << "  EncodeOne: get packet loop (MAX_RETRY=" << MAX_RETRY << ")...";
+
+    int tries = 0;
+    for (; tries < MAX_RETRY; tries++) {
+      MPP_RET ret = mpi->encode_get_packet(ctx, &pkt);
+      if (tries == 0) {
+        RTC_LOG(LS_INFO) << "  EncodeOne: 1st get_packet ret=" << ret
+                         << " pkt=" << (void*)pkt
+                         << " len=" << (pkt ? mpp_packet_get_length(pkt) : 0);
+      }
+      if (ret == MPP_OK && mpp_packet_get_length(pkt) > 0) break;
+      usleep(1000);
+    }
+    RTC_LOG(LS_INFO) << "  EncodeOne: tries=" << tries
+                     << " pkt=" << (void*)pkt
+                     << " len=" << (pkt ? mpp_packet_get_length(pkt) : 0);
+    if (tries >= MAX_RETRY || !pkt) {
+      mpp_packet_deinit(&pkt);
+      RTC_LOG(LS_INFO) << "  EncodeOne: no output (dropped)";
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
+
+    size_t len = mpp_packet_get_length(pkt);
+    void*  data = mpp_packet_get_pos(pkt);
+    if (!data || !len) {
+      mpp_packet_deinit(&pkt);
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
+
+    EncodedImage img;
+    img.SetEncodedData(EncodedImageBuffer::Create((uint8_t*)data, len));
+    img.SetRtpTimestamp(frame.rtp_timestamp());
+    img.capture_time_ms_ = frame.render_time_ms();
+
+    bool is_key = frame_types &&
+        std::find(frame_types->begin(), frame_types->end(),
+                  VideoFrameType::kVideoFrameKey) != frame_types->end();
+    img._frameType = is_key ? VideoFrameType::kVideoFrameKey
+                            : VideoFrameType::kVideoFrameDelta;
+
+    if (callback) {
+      RTC_LOG(LS_INFO) << "  EncodeOne: calling callback...";
+      callback->OnEncodedImage(img, nullptr);
+      RTC_LOG(LS_INFO) << "  EncodeOne: callback done";
+    }
+    RTC_LOG(LS_INFO) << "  EncodeOne: deinit pkt...";
+    mpp_packet_deinit(&pkt);
+    RTC_LOG(LS_INFO) << "  EncodeOne: done, returning OK";
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+};
+
+MppH264Encoder::MppH264Encoder() : impl_(std::make_unique<Impl>()) {}
+MppH264Encoder::~MppH264Encoder() = default;
+
+int32_t MppH264Encoder::InitEncode(const VideoCodec* c, const Settings&) {
+  impl_->codec_config = *c;
+  if (impl_->ready) {
+    // Quality scaler changed resolution without Release() first.
+    // Defer reinit to next Encode() to avoid nested reinit in callback.
+    RTC_LOG(LS_INFO) << "InitEncode: defer reinit " << c->width << "x" << c->height;
+    impl_->needs_reinit = true;
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+  // Release() was called first (ready=false). Do full reinit now.
+  impl_->needs_reinit = false;
+  if (!impl_->InitEncoder()) return WEBRTC_VIDEO_CODEC_ERROR;
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+int32_t MppH264Encoder::Encode(const VideoFrame& f,
+                               const std::vector<VideoFrameType>* frame_types) {
+  RTC_LOG(LS_INFO) << "Encode called, ready=" << (impl_ && impl_->ready);
+  if (impl_ && impl_->needs_reinit) {
+    RTC_LOG(LS_INFO) << "Encode: applying deferred reinit";
+    impl_->Release();
+    if (!impl_->InitEncoder()) return WEBRTC_VIDEO_CODEC_ERROR;
+    impl_->needs_reinit = false;
+  }
+  int32_t ret = impl_ && impl_->ready ? impl_->EncodeOne(f, frame_types)
+                                      : WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  RTC_LOG(LS_INFO) << "Encode returned " << ret;
+  return ret;
+}
+
+int32_t MppH264Encoder::RegisterEncodeCompleteCallback(
+    EncodedImageCallback* cb) {
+  if (impl_) impl_->callback = cb;
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+int32_t MppH264Encoder::Release() {
+  RTC_LOG(LS_INFO) << "MppH264Encoder::Release() — deferred";
+  if (impl_) { impl_->ready = false; impl_->needs_reinit = true; }
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+void MppH264Encoder::SetRates(const RateControlParameters& p) {
+  if (!impl_ || !impl_->ctx || !impl_->mpi) return;
+  int bps = p.bitrate.get_sum_kbps() * 1000;
+  MppEncCfg cfg = nullptr;
+  mpp_enc_cfg_init(&cfg);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_max", bps * 12 / 10);
+  mpp_enc_cfg_set_s32(cfg, "rc:bps_min", bps / 2);
+  impl_->mpi->control(impl_->ctx, MPP_ENC_SET_CFG, cfg);
+  mpp_enc_cfg_deinit(cfg);
+}
+
+VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
+  EncoderInfo i;
+  i.implementation_name = "RK3588 MPP H264";
+  i.is_hardware_accelerated = true;
+  i.scaling_settings = VideoEncoder::ScalingSettings::kOff;
+  // Prevent quality scaler from downscaling below configured resolution.
+  // MPP encoder needs reinit on resolution change; keeping it stable
+  // avoids the reconfiguration cascade.
+  if (impl_) {
+    i.scaling_settings.min_pixels_per_frame = impl_->w * impl_->h;
+  }
+  return i;
+}
+
+// ── MppH264Decoder ────────────────────────────────────────────
+
+struct MppH264Decoder::Impl {
+  MppCtx ctx = nullptr;
+  MppApi* mpi = nullptr;
+  MppBufferGroup frm_grp = nullptr;
+  int w = 0, h = 0, hor_stride = 0, ver_stride = 0;
+  size_t buf_size = 0;
+  bool info_ready = false;
+  int last_nv12_fd_ = -1;
+  DecodedImageCallback* callback = nullptr;
+
+  ~Impl() { Release(); }
+
+  void Release() {
+    info_ready = false;
+    if (ctx && mpi) { mpi->reset(ctx); }
+    if (frm_grp) { mpp_buffer_group_put(frm_grp); frm_grp = nullptr; }
+    if (ctx)      { mpp_destroy(ctx); ctx = nullptr; }
+  }
+
+  bool InitDecoder() {
+    Release();  // free previous resources on reconfig
+    if (!MppLibLoad()) { RTC_LOG(LS_ERROR) << "MppLibLoad failed"; return false; }
+    MPP_RET ret;
+    ret = mpp_create(&ctx, &mpi);
+    if (ret) { RTC_LOG(LS_ERROR) << "mpp_create dec failed"; return false; }
+    ret = mpp_init(ctx, MPP_CTX_DEC, MPP_VIDEO_CodingAVC);
+    if (ret) { RTC_LOG(LS_ERROR) << "mpp_init dec failed"; return false; }
+
+    RK_U32 split = 1;
+    mpi->control(ctx, MPP_DEC_SET_PARSER_SPLIT_MODE, &split);
+
+    info_ready = false;
+    RTC_LOG(LS_INFO) << "MPP decoder ready";
+    return true;
+  }
+
+  int32_t DecodeOne(const EncodedImage& input_image, int64_t render_time_ms) {
+    MPP_RET ret;
+    MppPacket packet = nullptr;
+    mpp_packet_init(&packet, (void*)input_image.data(), input_image.size());
+
+    int pkt_done = 0;
+    for (int tries = 0; tries < MAX_RETRY; tries++) {
+      ret = mpi->decode_put_packet(ctx, packet);
+      if (ret == MPP_OK) { pkt_done = 1; break; }
+      usleep(1000);
+    }
+    mpp_packet_deinit(&packet);
+    if (!pkt_done) return WEBRTC_VIDEO_CODEC_ERROR;
+
+    MppFrame frame = nullptr;
+    for (int tries = 0; tries < MAX_RETRY; tries++) {
+      ret = mpi->decode_get_frame(ctx, &frame);
+      if (ret == MPP_OK && frame) break;
+      usleep(1000);
+    }
+    if (!frame) return WEBRTC_VIDEO_CODEC_OK;
+
+    if (mpp_frame_get_info_change(frame)) {
+      w = mpp_frame_get_width(frame);
+      h = mpp_frame_get_height(frame);
+      hor_stride = mpp_frame_get_hor_stride(frame);
+      ver_stride = mpp_frame_get_ver_stride(frame);
+      buf_size = mpp_frame_get_buf_size(frame);
+
+      RTC_LOG(LS_INFO) << "Decoder info change: " << w << "x" << h
+                       << " stride=" << hor_stride << "x" << ver_stride
+                       << " buf=" << buf_size;
+
+      if (frm_grp) mpp_buffer_group_put(frm_grp);
+      ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_DRM, MPP_BUFFER_INTERNAL, "rk", __func__);
+      if (ret)
+        ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_ION, MPP_BUFFER_INTERNAL, "rk", __func__);
+      mpp_buffer_group_limit_config(frm_grp, buf_size, 24);
+
+      mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, frm_grp);
+      mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
+      info_ready = true;
+
+      mpp_frame_deinit(&frame);
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
+
+    if (!info_ready) {
+      mpp_frame_deinit(&frame);
+      return WEBRTC_VIDEO_CODEC_OK;
+    }
+
+    MppBuffer dec_buf = mpp_frame_get_buffer(frame);
+    if (!dec_buf) {
+      mpp_frame_deinit(&frame);
+      return WEBRTC_VIDEO_CODEC_ERROR;
+    }
+
+    int ys = w * h;
+
+    // Export MPP dma-buf fd for zero-copy RGA source
+    last_nv12_fd_ = mpp_buffer_get_fd(dec_buf);
+
+    // Wrap MPP NV12 output in VideoFrame for WebRTC callback.
+    // If fd export worked, DecSink uses fd directly (zero-cpu).
+    // If fd failed, fill NV12Buffer as fallback for RGA virAddr path.
+    scoped_refptr<NV12Buffer> nv12 = NV12Buffer::Create(w, h);
+    if (!nv12) {
+      mpp_frame_deinit(&frame);
+      return WEBRTC_VIDEO_CODEC_ERROR;
+    }
+    if (last_nv12_fd_ < 0) {
+      uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
+      memcpy(nv12->MutableDataY(), src, ys);
+      memcpy(nv12->MutableDataUV(), src + ys, ys / 2);
+    }
+
+    VideoFrame decoded_frame = VideoFrame::Builder()
+        .set_video_frame_buffer(nv12)
+        .set_rtp_timestamp(input_image.RtpTimestamp())
+        .set_ntp_time_ms(input_image.NtpTimeMs())
+        .build();
+
+    if (callback) {
+      callback->Decoded(decoded_frame, render_time_ms);
+    }
+
+    mpp_frame_deinit(&frame);
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+};
+
+MppH264Decoder::MppH264Decoder() : impl_(std::make_unique<Impl>()) {}
+MppH264Decoder::~MppH264Decoder() = default;
+
+int MppH264Decoder::GetLastNV12Fd() const {
+  return impl_ ? impl_->last_nv12_fd_ : -1;
+}
+
+bool MppH264Decoder::Configure(const Settings&) {
+  if (!impl_->InitDecoder()) return false;
+  return true;
+}
+
+int32_t MppH264Decoder::Decode(const EncodedImage& input_image,
+                               int64_t render_time_ms) {
+  if (!impl_) return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  return impl_->DecodeOne(input_image, render_time_ms);
+}
+
+int32_t MppH264Decoder::RegisterDecodeCompleteCallback(
+    DecodedImageCallback* cb) {
+  if (impl_) impl_->callback = cb;
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+int32_t MppH264Decoder::Release() {
+  if (impl_) impl_->Release();  // clean up MPP resources, keep impl_ alive
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+VideoDecoder::DecoderInfo MppH264Decoder::GetDecoderInfo() const {
+  DecoderInfo i;
+  i.implementation_name = "RK3588 MPP H264";
+  i.is_hardware_accelerated = true;
+  return i;
+}
+
+}  // namespace webrtc
+
 ========== ./defaults.cc ==========
 Lines: 72
 
@@ -1137,8 +1813,340 @@ std::string GetPeerName() {
   return ret;
 }
 
+========== ./media_pipeline.cc ==========
+Lines: 328
+
+#include "apps/peerconnection/client/media_pipeline.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <memory>
+#include <mutex>
+#include <utility>
+
+#include "api/audio/create_audio_device_module.h"
+#include "api/audio_options.h"
+#include "api/make_ref_counted.h"
+#include "api/task_queue/task_queue_factory.h"
+#include "api/test/create_frame_generator.h"
+#include "api/video/video_sink_interface.h"
+#include "api/video/video_source_interface.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "json/json.h"
+#include "modules/video_capture/video_capture.h"
+#include "modules/video_capture/video_capture_factory.h"
+#include "pc/video_track_source.h"
+#include "rtc_base/logging.h"
+#include "system_wrappers/include/clock.h"
+#include "test/frame_generator_capturer.h"
+#include "test/platform_video_capturer.h"
+#include "test/test_video_capturer.h"
+
+namespace {
+
+using webrtc::test::TestVideoCapturer;
+
+std::unique_ptr<TestVideoCapturer> CreateCapturer(
+    webrtc::TaskQueueFactory& task_queue_factory,
+    int device_idx = -1) {
+  const size_t kWidth = 640;
+  const size_t kHeight = 480;
+  const size_t kFps = 30;
+  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
+      webrtc::VideoCaptureFactory::CreateDeviceInfo());
+  if (info) {
+    int num_devices = info->NumberOfDevices();
+    if (device_idx >= 0 && device_idx < num_devices) {
+      std::unique_ptr<TestVideoCapturer> capturer =
+          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, device_idx);
+      if (capturer) return capturer;
+    }
+    for (int i = 0; i < num_devices; ++i) {
+      std::unique_ptr<TestVideoCapturer> capturer =
+          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, i);
+      if (capturer) return capturer;
+    }
+  }
+  RTC_LOG(LS_WARNING) << "No video capture device found; using synthetic video.";
+  auto frame_generator = webrtc::test::CreateSquareFrameGenerator(
+      kWidth, kHeight, std::nullopt, std::nullopt);
+  return std::make_unique<webrtc::test::FrameGeneratorCapturer>(
+      webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), kFps,
+      task_queue_factory);
+}
+
+class CapturerTrackSource : public webrtc::VideoTrackSource {
+ public:
+  static webrtc::scoped_refptr<CapturerTrackSource> Create(
+      webrtc::TaskQueueFactory& task_queue_factory, int device_idx = -1) {
+    std::unique_ptr<TestVideoCapturer> capturer =
+        CreateCapturer(task_queue_factory, device_idx);
+    if (capturer) {
+      capturer->Start();
+      return webrtc::make_ref_counted<CapturerTrackSource>(std::move(capturer));
+    }
+    return nullptr;
+  }
+
+  void SwapCapturer(std::unique_ptr<TestVideoCapturer> new_capturer) {
+    if (!new_capturer) return;
+    RTC_LOG(LS_INFO) << "Swapping video capturer";
+    {
+      std::lock_guard<std::mutex> lock(capturer_mutex_);
+      capturer_->Stop();
+      capturer_ = std::move(new_capturer);
+      capturer_->Start();
+    }
+  }
+
+ protected:
+  explicit CapturerTrackSource(std::unique_ptr<TestVideoCapturer> capturer)
+      : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
+  ~CapturerTrackSource() override = default;
+
+ private:
+  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
+    return capturer_.get();
+  }
+  std::mutex capturer_mutex_;
+  std::unique_ptr<TestVideoCapturer> capturer_;
+};
+
+}  // namespace
+
+MediaPipeline::MediaPipeline(const webrtc::Environment& env,
+                             webrtc::Thread* worker_thread)
+    : env_(env), worker_thread_(worker_thread) {}
+
+MediaPipeline::~MediaPipeline() = default;
+
+// ---- ADM ----
+
+bool MediaPipeline::CreateAudioDeviceModule() {
+  adm_ = worker_thread_->BlockingCall([this] {
+    return webrtc::CreateAudioDeviceModule(
+        env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+  });
+  if (!adm_) {
+    RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
+    return false;
+  }
+  return true;
+}
+
+// ---- Sources ----
+
+webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
+MediaPipeline::CreateVideoSource() {
+  video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
+  return video_source_;
+}
+
+webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
+    webrtc::PeerConnectionFactoryInterface* factory,
+    webrtc::AudioSourceInterface* external_source) {
+  if (external_source) {
+    audio_source_ = external_source;
+  } else {
+    audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
+  }
+  return audio_source_.get();
+}
+
+// ---- Device management ----
+
+void MediaPipeline::SetVideoDevice(int device_idx) {
+  if (!video_source_) {
+    RTC_LOG(LS_WARNING) << "No local video source to swap";
+    return;
+  }
+  auto new_capturer = CreateCapturer(env_.task_queue_factory(), device_idx);
+  if (!new_capturer) {
+    RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
+    return;
+  }
+  auto* capturer_source = static_cast<CapturerTrackSource*>(video_source_.get());
+  capturer_source->SwapCapturer(std::move(new_capturer));
+  video_device_idx_ = device_idx;
+}
+
+void MediaPipeline::SetAudioMuted(bool muted) {
+  RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
+  if (adm_ && muted)
+    adm_->StopRecording();
+}
+
+void MediaPipeline::SetVideoPaused(bool paused,
+                                    webrtc::PeerConnectionInterface* pc) {
+  RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
+  if (!pc) return;
+  auto senders = pc->GetSenders();
+  for (auto& sender : senders) {
+    if (sender->track() &&
+        sender->track()->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
+      sender->track()->set_enabled(!paused);
+    }
+  }
+}
+
+void MediaPipeline::QueryDevices() {
+  Json::Value video_arr(Json::arrayValue);
+  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
+  if (info) {
+    int n = info->NumberOfDevices();
+    char name[256], id[256];
+    for (int i = 0; i < n; ++i) {
+      if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id)) == 0) {
+        Json::Value dev;
+        dev["idx"] = i; dev["name"] = name;
+        video_arr.append(dev);
+      }
+    }
+  }
+  Json::StreamWriterBuilder factory;
+  factory["indentation"] = "";
+  Json::Value video_event;
+  video_event["event"] = "video_devices";
+  video_event["devices"] = video_arr;
+  if (event_cb_) event_cb_(Json::writeString(factory, video_event));
+
+  Json::Value audio_arr(Json::arrayValue);
+  if (adm_ && worker_thread_) {
+    audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
+      Json::Value arr(Json::arrayValue);
+      int16_t n = adm_->RecordingDevices();
+      char name[webrtc::kAdmMaxDeviceNameSize];
+      char guid[webrtc::kAdmMaxGuidSize];
+      for (int16_t i = 0; i < n; ++i) {
+        if (adm_->RecordingDeviceName(i, name, guid) == 0) {
+          Json::Value dev;
+          dev["idx"] = i; dev["name"] = name;
+          arr.append(dev);
+        }
+      }
+      return arr;
+    });
+  }
+  if (!audio_arr.empty()) {
+    Json::Value audio_event;
+    audio_event["event"] = "audio_input_devices";
+    audio_event["devices"] = audio_arr;
+    if (event_cb_) event_cb_(Json::writeString(factory, audio_event));
+  }
+
+  if (audio_arr.empty()) {
+    FILE* fp = popen("arecord -l 2>/dev/null", "r");
+    if (fp) {
+      Json::Value alsa_arr(Json::arrayValue);
+      char line[256]; int idx = 0;
+      while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "card ") == line && strstr(line, "device ")) {
+          char* desc_begin = strrchr(line, '[');
+          char* desc_end = desc_begin ? strrchr(line, ']') : nullptr;
+          char name[256];
+          if (desc_begin && desc_end && desc_end > desc_begin) {
+            size_t len = desc_end - desc_begin - 1;
+            snprintf(name, sizeof(name), "%.*s", (int)len, desc_begin + 1);
+          } else {
+            snprintf(name, sizeof(name), "Capture device %d", idx);
+          }
+          Json::Value dev;
+          dev["idx"] = idx; dev["name"] = name;
+          alsa_arr.append(dev); idx++;
+        }
+      }
+      pclose(fp);
+      if (!alsa_arr.empty()) {
+        Json::Value alsa_event;
+        alsa_event["event"] = "audio_input_devices";
+        alsa_event["devices"] = alsa_arr;
+        if (event_cb_) event_cb_(Json::writeString(factory, alsa_event));
+      }
+    }
+  }
+}
+
+// ---- Renderers ----
+
+void MediaPipeline::StartLocalRenderer(webrtc::VideoTrackInterface* track) {
+  if (local_renderer_) {
+    RTC_LOG(LS_WARNING) << "Local SHM renderer already started";
+    return;
+  }
+  local_renderer_ = std::make_unique<ShmVideoRenderer>(
+      shm_key_path() + "_local", SHM_PROJ_ID + 1);
+  track->AddOrUpdateSink(local_renderer_.get(), webrtc::VideoSinkWants());
+  RTC_LOG(LS_INFO) << "Local SHM renderer started";
+}
+
+void MediaPipeline::StopLocalRenderer() {
+  if (local_renderer_) {
+    local_renderer_.reset();
+    RTC_LOG(LS_INFO) << "Local SHM renderer stopped";
+  }
+}
+
+void MediaPipeline::StartRemoteRenderer(webrtc::VideoTrackInterface* track) {
+  if (remote_renderer_) {
+    RTC_LOG(LS_WARNING) << "Remote SHM renderer already started";
+    return;
+  }
+  remote_renderer_ = std::make_unique<ShmVideoRenderer>(
+      shm_key_path() + "_remote", SHM_PROJ_ID + 2);
+  track->AddOrUpdateSink(remote_renderer_.get(), webrtc::VideoSinkWants());
+  RTC_LOG(LS_INFO) << "Remote SHM renderer started";
+}
+
+void MediaPipeline::StopRemoteRenderer() {
+  if (remote_renderer_) {
+    remote_renderer_.reset();
+    RTC_LOG(LS_INFO) << "Remote SHM renderer stopped";
+  }
+}
+
+void MediaPipeline::StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track) {
+  if (remote_audio_renderer_) {
+    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
+    return;
+  }
+  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
+      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
+  track->AddSink(remote_audio_renderer_.get());
+  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
+}
+
+void MediaPipeline::StopRemoteAudioRenderer() {
+  if (remote_audio_renderer_) {
+    remote_audio_renderer_.reset();
+    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
+  }
+}
+
+// ---- Lifecycle ----
+
+void MediaPipeline::Shutdown() {
+  local_renderer_.reset();
+  remote_renderer_.reset();
+  remote_audio_renderer_.reset();
+  video_source_ = nullptr;
+  audio_source_ = nullptr;
+  if (adm_ && worker_thread_) {
+    auto adm = std::move(adm_);
+    adm_ = nullptr;
+    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
+      if (adm->Playing()) adm->StopPlayout();
+      if (adm->Recording()) adm->StopRecording();
+      adm = nullptr;
+    });
+  }
+}
+
+#pragma GCC diagnostic pop
+
 ========== ./unix_socket_server.h ==========
-Lines: 41
+Lines: 46
 
 // unix_socket_server.h
 #ifndef APPS_PEERCONNECTION_CLIENT_UNIX_SOCKET_SERVER_H_
@@ -1151,17 +2159,22 @@ Lines: 41
 #include <string>
 #include <thread>
 
-class WebRTCEngine;
+#include "apps/peerconnection/client/engine_controller.h"
 
-class UnixSocketServer {
+class EngineController;
+
+class UnixSocketServer : public EngineObserver {
  public:
-  UnixSocketServer(const std::string& socket_path, WebRTCEngine* engine);
+  UnixSocketServer(const std::string& socket_path, EngineController* engine);
   ~UnixSocketServer();
 
   void Start();
   void Stop();
   void Wait();                       // Block until shutdown
   void SendToClient(const std::string& json);
+
+  // EngineObserver
+  void OnEngineEvent(const std::string& json) override;
 
  private:
   void IoLoop();
@@ -1170,7 +2183,7 @@ class UnixSocketServer {
   void SendResponse(int id, bool ok, const std::string& error = "");
 
   std::string socket_path_;
-  WebRTCEngine* engine_;             // non-owning
+  EngineController* engine_;             // non-owning
   int listen_fd_ = -1;
   int client_fd_ = -1;
 
@@ -1181,6 +2194,103 @@ class UnixSocketServer {
 };
 
 #endif
+
+========== ./data_channel_manager.cc ==========
+Lines: 93
+
+#include "apps/peerconnection/client/data_channel_manager.h"
+
+#include <string>
+
+#include "apps/peerconnection/client/json_helpers.h"
+#include "rtc_base/logging.h"
+
+DataChannelManager::DataChannelManager() = default;
+DataChannelManager::~DataChannelManager() = default;
+
+void DataChannelManager::SetEventCallback(EventCallback cb) {
+  event_cb_ = std::move(cb);
+}
+
+bool DataChannelManager::Add(webrtc::PeerConnectionInterface* pc) {
+  if (!pc) {
+    RTC_LOG(LS_WARNING) << "DataChannelManager::Add: no peer connection";
+    return false;
+  }
+  if (channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannelManager::Add: channel already exists";
+    return false;
+  }
+
+  webrtc::DataChannelInit config;
+  config.ordered = true;
+  config.negotiated = true;
+  config.id = 0;
+
+  auto dc_or_error = pc->CreateDataChannelOrError("chat", &config);
+  if (!dc_or_error.ok()) {
+    RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
+                      << dc_or_error.error().message();
+    return false;
+  }
+
+  channel_ = std::move(dc_or_error.value());
+  channel_->RegisterObserver(this);
+  RTC_LOG(LS_INFO) << "DataChannel created - label: " << channel_->label()
+                   << " - state: " << channel_->state();
+  return true;
+}
+
+void DataChannelManager::OnRemoteDataChannel(
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
+  if (!channel) {
+    RTC_LOG(LS_ERROR) << "DataChannelManager: received null DataChannel";
+    return;
+  }
+  if (channel->label() != "chat") {
+    RTC_LOG(LS_WARNING) << "DataChannelManager: unexpected label: "
+                        << channel->label();
+    return;
+  }
+  if (channel_) {
+    RTC_LOG(LS_WARNING) << "DataChannelManager: channel already exists, replacing";
+  }
+  channel_ = channel;
+  channel_->RegisterObserver(this);
+  RTC_LOG(LS_INFO) << "DataChannel received and observer registered"
+                   << " - label: " << channel_->label();
+}
+
+void DataChannelManager::Send(const std::string& text) {
+  if (channel_ && channel_->state() == webrtc::DataChannelInterface::kOpen) {
+    channel_->Send(webrtc::DataBuffer(text));
+  } else {
+    RTC_LOG(LS_WARNING) << "DataChannelManager::Send: channel not open";
+  }
+}
+
+void DataChannelManager::Shutdown() {
+  channel_ = nullptr;
+}
+
+void DataChannelManager::OnStateChange() {
+  if (channel_) {
+    const char* state_str =
+        DataChannelStateToString(channel_->state());
+    RTC_LOG(LS_INFO) << "DataChannel state: " << state_str;
+    if (event_cb_)
+      event_cb_(std::string(R"({"event":"data_channel_state","state":")") +
+                state_str + R"("})");
+  }
+}
+
+void DataChannelManager::OnMessage(const webrtc::DataBuffer& buffer) {
+  RTC_LOG(LS_INFO) << "DataChannel message received";
+  std::string text(buffer.data.data<char>(), buffer.data.size());
+  if (event_cb_)
+    event_cb_(R"({"event":"data_received","text":")" +
+              EscapeJsonString(text) + R"("})");
+}
 
 ========== ./shm_video_writer.h ==========
 Lines: 22
@@ -1420,6 +2530,86 @@ inline constexpr size_t SHM_AUDIO_CTRL_BLOCK_SIZE = sizeof(ShmAudioCtrlBlock);
 int init_shm_sync(ShmCtrlBlock* shm);         // 0 on success, -1 on failure
 int init_shm_audio_sync(ShmAudioCtrlBlock* shm);
 
+========== ./shm_audio_renderer.cc ==========
+Lines: 76
+
+#include "apps/peerconnection/client/shm_audio_renderer.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <cstddef>
+#include <utility>
+
+#include "rtc_base/logging.h"
+
+ShmAudioRenderer::ShmAudioRenderer(const std::string& key_path,
+                                     int proj_id)
+    : writer_(std::make_unique<ShmAudioWriter>()),
+      io_thread_(&ShmAudioRenderer::IoLoop, this) {
+  if (!writer_->Init(key_path, proj_id)) {
+    RTC_LOG(LS_ERROR) << "ShmAudioRenderer: ShmAudioWriter::Init failed for "
+                      << key_path;
+  }
+}
+
+ShmAudioRenderer::~ShmAudioRenderer() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopped_ = true;
+  }
+  cv_.notify_all();
+  if (io_thread_.joinable()) {
+    io_thread_.join();
+  }
+}
+
+void ShmAudioRenderer::OnData(
+    const void* audio_data, int bits_per_sample, int sample_rate,
+    size_t number_of_channels, size_t number_of_frames,
+    std::optional<int64_t> absolute_capture_timestamp_ms) {
+  size_t byte_count =
+      number_of_frames * number_of_channels * (bits_per_sample / 8);
+  if (byte_count > AUDIO_FRAME_MAX_SIZE) {
+    RTC_LOG(LS_WARNING) << "ShmAudioRenderer: frame too large: " << byte_count;
+    return;
+  }
+
+  PendingAudio pending;
+  pending.head.ntp_time_ms = absolute_capture_timestamp_ms.value_or(0);
+  pending.head.frame_len = static_cast<uint32_t>(byte_count);
+  pending.head.sample_rate = static_cast<uint32_t>(sample_rate);
+  pending.head.channels = static_cast<uint16_t>(number_of_channels);
+  pending.head.bits_per_sample = static_cast<uint16_t>(bits_per_sample);
+  pending.data.assign(static_cast<const uint8_t*>(audio_data),
+                      static_cast<const uint8_t*>(audio_data) + byte_count);
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ = std::move(pending);
+  }
+  cv_.notify_one();
+}
+
+void ShmAudioRenderer::IoLoop() {
+  while (true) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
+    if (stopped_) {
+      return;
+    }
+    if (pending_.has_value()) {
+      auto pending = std::move(*pending_);
+      pending_.reset();
+      lock.unlock();
+      writer_->WriteFrame(pending.head, pending.data.data());
+    }
+  }
+}
+
+#pragma GCC diagnostic pop
+
 ========== ./shm_audio_reader.h ==========
 Lines: 24
 
@@ -1447,6 +2637,372 @@ class ShmAudioReader {
   bool m_inited{false};
   std::atomic<bool> stop_requested_{false};
 };
+
+========== ./rk_mpp_codec.h ==========
+Lines: 68
+
+#ifndef APPS_PEERCONNECTION_CLIENT_RK_MPP_CODEC_H_
+#define APPS_PEERCONNECTION_CLIENT_RK_MPP_CODEC_H_
+
+#include <memory>
+#include <vector>
+
+#include "api/environment/environment.h"
+#include "api/video_codecs/sdp_video_format.h"
+#include "api/video_codecs/video_decoder.h"
+#include "api/video_codecs/video_encoder.h"
+
+namespace webrtc {
+
+struct MppH264EncoderTemplateAdapter {
+  static std::vector<SdpVideoFormat> SupportedFormats();
+  static std::unique_ptr<VideoEncoder> CreateEncoder(
+      const Environment& env, const SdpVideoFormat& format);
+  static bool IsScalabilityModeSupported(ScalabilityMode) { return false; }
+};
+
+struct MppH264DecoderTemplateAdapter {
+  static std::vector<SdpVideoFormat> SupportedFormats();
+  static std::unique_ptr<VideoDecoder> CreateDecoder(
+      const Environment& env, const SdpVideoFormat& format);
+};
+
+class MppH264Encoder : public VideoEncoder {
+ public:
+  MppH264Encoder();
+  ~MppH264Encoder() override;
+
+  int32_t InitEncode(const VideoCodec* codec_settings,
+                     const Settings& settings) override;
+  int32_t Encode(const VideoFrame& frame,
+                 const std::vector<VideoFrameType>* frame_types) override;
+  int32_t RegisterEncodeCompleteCallback(
+      EncodedImageCallback* callback) override;
+  int32_t Release() override;
+  void SetRates(const RateControlParameters& parameters) override;
+  EncoderInfo GetEncoderInfo() const override;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+class MppH264Decoder : public VideoDecoder {
+ public:
+  MppH264Decoder();
+  ~MppH264Decoder() override;
+
+  bool Configure(const Settings& settings) override;
+  int32_t Decode(const EncodedImage& input_image,
+                 int64_t render_time_ms) override;
+  int32_t RegisterDecodeCompleteCallback(
+      DecodedImageCallback* callback) override;
+  int32_t Release() override;
+  DecoderInfo GetDecoderInfo() const override;
+  int GetLastNV12Fd() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace webrtc
+
+#endif  // APPS_PEERCONNECTION_CLIENT_RK_MPP_CODEC_H_
+
+========== ./engine_controller.h ==========
+Lines: 37
+
+#ifndef APPS_PEERCONNECTION_CLIENT_ENGINE_CONTROLLER_H_
+#define APPS_PEERCONNECTION_CLIENT_ENGINE_CONTROLLER_H_
+
+#include <string>
+
+// Events emitted by the engine. All callbacks fire on the signaling thread.
+// Implementations must return quickly (non-blocking).
+class EngineObserver {
+ public:
+  virtual ~EngineObserver() = default;
+  virtual void OnEngineEvent(const std::string& json) = 0;
+};
+
+// Thread-safe control interface for the WebRTC engine.
+// All methods may be called from any thread; the engine dispatches internally.
+class EngineController {
+ public:
+  virtual ~EngineController() = default;
+
+  virtual void RegisterObserver(EngineObserver* observer) = 0;
+  virtual void UnregisterObserver() = 0;
+
+  virtual void ConnectToServer(const std::string& server, int port) = 0;
+  virtual void DisconnectFromServer() = 0;
+  virtual void ConnectToPeer(int peer_id) = 0;
+  virtual void HangUp() = 0;
+  virtual void SetAudioMuted(bool muted) = 0;
+  virtual void SetVideoPaused(bool paused) = 0;
+  virtual void SendData(const std::string& text) = 0;
+  virtual void QueryDevices() = 0;
+  virtual void SetVideoDevice(int device_idx) = 0;
+  virtual void SetAudioInputDevice(int device_idx) = 0;
+
+  virtual bool connection_active() const = 0;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_ENGINE_CONTROLLER_H_
+
+========== ./rk_mpp_encoder.cc ==========
+Lines: 249
+
+// rk_mpp_encoder.cc — RK3588 MPP H264 encoder (dlopen, no link-time dep)
+#include "apps/peerconnection/client/rk_mpp_encoder.h"
+
+#include <dlfcn.h>
+#include <cstring>
+#include <vector>
+
+#include "api/video_codecs/video_encoder.h"
+#include "api/video/i420_buffer.h"
+#include "modules/video_coding/codecs/h264/include/h264.h"
+#include "modules/video_coding/include/video_codec_interface.h"
+#include "modules/video_coding/include/video_error_codes.h"
+#include "rtc_base/logging.h"
+
+// ── MPP types (self-contained, no system header deps) ──────
+typedef int32_t MPP_RET;
+#define MPP_OK 0
+typedef void* MppCtx;
+typedef struct { void* opaque; }* MppApi;
+typedef void* MppBufferGroup;
+typedef void* MppBuffer;
+typedef void* MppFrame;
+typedef void* MppPacket;
+typedef uint32_t RK_U32;
+typedef uint32_t MppCodingType;
+typedef uint32_t MppFrameFormat;
+typedef uint32_t MppPollType;
+typedef uint32_t MppEncRcMode;
+typedef uint32_t MppEncRcQuality;
+
+enum { MPP_VIDEO_CodingAVC = 7, MPP_CTX_ENC = 0, MPP_POLL_BLOCK = 0 };
+enum { MPP_BUFFER_TYPE_DRM = 0, MPP_BUFFER_TYPE_ION = 1 };
+enum { MPP_FMT_YUV420SP = 0x00000100 };
+enum { MPP_ENC_RC_MODE_CBR = 1, MPP_ENC_RC_QUALITY_MEDIUM = 2 };
+
+enum MppEncCfgChange {
+  MPP_ENC_H264_CFG_CHANGE_PROFILE = (1<<1),
+  MPP_ENC_PREP_CFG_CHANGE_INPUT = (1<<0),
+  MPP_ENC_RC_CFG_CHANGE_ALL = 0xFFFFFFFF,
+  MPP_ENC_RC_CFG_CHANGE_BPS = (1<<0),
+};
+
+struct MppEncCodecCfg_t { RK_U32 change; MppCodingType coding; struct { RK_U32 change; int32_t profile, level; } h264; };
+struct MppEncPrepCfg_t { RK_U32 change; RK_U32 width, height, hor_stride, ver_stride; MppFrameFormat format; };
+struct MppEncRcCfg_t { RK_U32 change; MppEncRcMode rc_mode; MppEncRcQuality quality;
+  int bps_target, bps_max, bps_min; int fps_in_flex, fps_in_num, fps_in_denom;
+  int fps_out_flex, fps_out_num, fps_out_denom; int gop; };
+
+enum MppEncCfg { MPP_ENC_SET_CODEC_CFG=0, MPP_ENC_SET_PREP_CFG=1, MPP_ENC_SET_RC_CFG=2 };
+enum MppCfg { MPP_SET_OUTPUT_TIMEOUT=0 };
+
+// ── Function pointer types ─────────────────────────────────
+typedef MPP_RET (*MppCreateFn)(MppCtx*, MppApi*);
+typedef MPP_RET (*MppInitFn)(MppCtx, MppCodingType, MppCodingType);
+typedef MPP_RET (*MppDestroyFn)(MppCtx);
+typedef MPP_RET (*MppCtrlFn)(MppCtx, uint32_t, void*);
+typedef MPP_RET (*MppBufGroupGetFn)(MppBufferGroup*, uint32_t);
+typedef MPP_RET (*MppBufGroupLimitFn)(MppBufferGroup, size_t, int);
+typedef MPP_RET (*MppBufGetFn)(MppBufferGroup, MppBuffer*, size_t);
+typedef MPP_RET (*MppBufPutFn)(MppBuffer);
+typedef void* (*MppBufGetPtrFn)(MppBuffer);
+typedef MPP_RET (*MppFrmInitFn)(MppFrame*);
+typedef MPP_RET (*MppFrmDeinitFn)(MppFrame);
+typedef MPP_RET (*MppFrmSetIntFn)(MppFrame, int);
+typedef MPP_RET (*MppFrmSetBufFn)(MppFrame, MppBuffer);
+typedef MPP_RET (*MppFrmSetFmtFn)(MppFrame, MppFrameFormat);
+typedef MPP_RET (*MppPktDeinitFn)(MppPacket);
+typedef size_t (*MppPktGetLenFn)(MppPacket);
+typedef void* (*MppPktGetDataFn)(MppPacket);
+typedef MPP_RET (*MppEncPutFrameFn)(MppCtx, MppApi*, MppFrame);
+typedef MPP_RET (*MppEncGetPacketFn)(MppCtx, MppApi*, MppPacket*);
+
+static struct {
+  void* lib = nullptr;
+  MppCreateFn mpp_create;
+  MppInitFn mpp_init;
+  MppDestroyFn mpp_destroy;
+  MppCtrlFn control;
+  MppBufGroupGetFn mpp_buffer_group_get_internal;
+  MppBufGroupLimitFn mpp_buffer_group_limit_config;
+  MppBufGetFn mpp_buffer_get;
+  MppBufPutFn mpp_buffer_put;
+  MppBufPutFn mpp_buffer_group_put;
+  MppBufGetPtrFn mpp_buffer_get_ptr;
+  MppFrmInitFn mpp_frame_init;
+  MppFrmDeinitFn mpp_frame_deinit;
+  MppFrmSetIntFn mpp_frame_set_width, mpp_frame_set_height, mpp_frame_set_hor_stride, mpp_frame_set_ver_stride;
+  MppFrmSetBufFn mpp_frame_set_buffer;
+  MppFrmSetFmtFn mpp_frame_set_fmt;
+  MppPktDeinitFn mpp_packet_deinit;
+  MppPktGetLenFn mpp_packet_get_length;
+  MppPktGetDataFn mpp_packet_get_data;
+  MppEncPutFrameFn encode_put_frame;
+  MppEncGetPacketFn encode_get_packet;
+} mpp;
+
+#define LOAD(fn) mpp.fn = (decltype(mpp.fn))dlsym(mpp.lib, #fn)
+static bool MppLoad() {
+  if (mpp.lib) return true;
+  mpp.lib = dlopen("librockchip_mpp.so.1", RTLD_NOW);
+  if (!mpp.lib) { RTC_LOG(LS_WARNING) << "MPP not available, using software H264"; return false; }
+  LOAD(mpp_create); LOAD(mpp_init); LOAD(mpp_destroy); LOAD(control);
+  LOAD(mpp_buffer_group_get_internal); LOAD(mpp_buffer_group_limit_config);
+  LOAD(mpp_buffer_get); LOAD(mpp_buffer_put); LOAD(mpp_buffer_group_put); LOAD(mpp_buffer_get_ptr);
+  LOAD(mpp_frame_init); LOAD(mpp_frame_deinit);
+  LOAD(mpp_frame_set_width); LOAD(mpp_frame_set_height);
+  LOAD(mpp_frame_set_hor_stride); LOAD(mpp_frame_set_ver_stride);
+  LOAD(mpp_frame_set_buffer); LOAD(mpp_frame_set_fmt);
+  LOAD(mpp_packet_deinit); LOAD(mpp_packet_get_length); LOAD(mpp_packet_get_data);
+  LOAD(encode_put_frame); LOAD(encode_get_packet);
+  RTC_LOG(LS_INFO) << "MPP loaded successfully";
+  return true;
+}
+#undef LOAD
+
+#define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
+
+namespace webrtc {
+
+std::vector<SdpVideoFormat> MppH264EncoderTemplateAdapter::SupportedFormats() {
+  return {CreateH264Format(H264Profile::kProfileBaseline, H264Level::kLevel3_1, "1", false),
+          CreateH264Format(H264Profile::kProfileBaseline, H264Level::kLevel3_1, "0", false),
+          CreateH264Format(H264Profile::kProfileConstrainedBaseline, H264Level::kLevel3_1, "1", false)};
+}
+
+std::unique_ptr<VideoEncoder> MppH264EncoderTemplateAdapter::CreateEncoder(
+    const Environment&, const SdpVideoFormat&) {
+  if (!MppLoad()) return nullptr;  // fallback to next adapter
+  return std::make_unique<MppH264Encoder>();
+}
+
+struct MppH264Encoder::Impl {
+  MppCtx ctx = nullptr;
+  MppApi mpi = nullptr;
+  MppBufferGroup buf_grp = nullptr;
+  MppBuffer frm_buf = nullptr;
+  EncodedImageCallback* callback = nullptr;
+  VideoCodec codec_config = {};
+  size_t frame_size = 0;
+  int w = 0, h = 0;
+  bool ready = false;
+
+  ~Impl() { Release(); }
+
+  bool InitEncoder() {
+    if (mpp.mpp_create(&ctx, &mpi) != MPP_OK) return false;
+    if (mpp.mpp_init(ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC) != MPP_OK) return false;
+    w = codec_config.width; h = codec_config.height;
+    frame_size = w * ALIGN(h, 16) * 3 / 2;
+
+    if (mpp.mpp_buffer_group_get_internal(&buf_grp, MPP_BUFFER_TYPE_DRM) != MPP_OK)
+      mpp.mpp_buffer_group_get_internal(&buf_grp, MPP_BUFFER_TYPE_ION);
+    if (!buf_grp) return false;
+    mpp.mpp_buffer_group_limit_config(buf_grp, frame_size, 4);
+    if (mpp.mpp_buffer_get(buf_grp, &frm_buf, frame_size) != MPP_OK) return false;
+
+    MppEncCodecCfg_t cc = {}; cc.coding = MPP_VIDEO_CodingAVC;
+    cc.h264.change = MPP_ENC_H264_CFG_CHANGE_PROFILE; cc.h264.profile = 100; cc.h264.level = 42;
+    mpp.control(ctx, MPP_ENC_SET_CODEC_CFG, &cc);
+
+    MppEncPrepCfg_t pc = {}; pc.change = MPP_ENC_PREP_CFG_CHANGE_INPUT;
+    pc.width = w; pc.height = h; pc.hor_stride = w; pc.ver_stride = ALIGN(h, 16);
+    pc.format = MPP_FMT_YUV420SP;
+    mpp.control(ctx, MPP_ENC_SET_PREP_CFG, &pc);
+
+    MppEncRcCfg_t rc = {}; rc.change = MPP_ENC_RC_CFG_CHANGE_ALL;
+    rc.rc_mode = MPP_ENC_RC_MODE_CBR; rc.quality = MPP_ENC_RC_QUALITY_MEDIUM;
+    rc.bps_target = codec_config.maxBitrate * 1000;
+    rc.bps_max = rc.bps_target * 1.2; rc.bps_min = codec_config.minBitrate * 1000;
+    rc.fps_in_num = codec_config.maxFramerate; rc.fps_in_denom = 1;
+    rc.fps_out_num = codec_config.maxFramerate; rc.fps_out_denom = 1;
+    rc.gop = codec_config.H264()->keyFrameInterval;
+    mpp.control(ctx, MPP_ENC_SET_RC_CFG, &rc);
+
+    ready = true;
+    RTC_LOG(LS_INFO) << "MPP encoder ready " << w << "x" << h;
+    return true;
+  }
+
+  int32_t EncodeOne(const VideoFrame& frame) {
+    auto i420 = frame.video_frame_buffer()->ToI420();
+    if (!i420) return WEBRTC_VIDEO_CODEC_ERROR;
+    int ys = w * h, uvs = ys / 4;
+    uint8_t* dst = (uint8_t*)mpp.mpp_buffer_get_ptr(frm_buf);
+    memcpy(dst, i420->DataY(), ys);
+    const uint8_t* u = i420->DataU(); const uint8_t* v = i420->DataV();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+    for (int i = 0; i < uvs; i++) { dst[ys + i*2] = u[i]; dst[ys + i*2 + 1] = v[i]; }
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+    MppFrame f = nullptr; mpp.mpp_frame_init(&f);
+    mpp.mpp_frame_set_width(f, w); mpp.mpp_frame_set_height(f, h);
+    mpp.mpp_frame_set_hor_stride(f, w); mpp.mpp_frame_set_ver_stride(f, ALIGN(h, 16));
+    mpp.mpp_frame_set_fmt(f, MPP_FMT_YUV420SP); mpp.mpp_frame_set_buffer(f, frm_buf);
+    mpp.encode_put_frame(ctx, &mpi, f);
+
+    MppPacket pkt = nullptr; mpp.encode_get_packet(ctx, &mpi, &pkt);
+    if (!pkt) return WEBRTC_VIDEO_CODEC_OK;
+
+    size_t len = mpp.mpp_packet_get_length(pkt); void* data = mpp.mpp_packet_get_data(pkt);
+    if (!data || !len) { mpp.mpp_packet_deinit(pkt); return WEBRTC_VIDEO_CODEC_OK; }
+
+    EncodedImage img;
+    img.SetEncodedData(EncodedImageBuffer::Create((uint8_t*)data, len));
+    img._frameType = VideoFrameType::kVideoFrameDelta;
+    img.SetRtpTimestamp(frame.rtp_timestamp());
+    img.capture_time_ms_ = frame.render_time_ms();
+    if (callback) callback->OnEncodedImage(img, nullptr);
+    mpp.mpp_packet_deinit(pkt);
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+
+  void Release() {
+    if (frm_buf) { mpp.mpp_buffer_put(frm_buf); frm_buf = nullptr; }
+    if (buf_grp) { mpp.mpp_buffer_group_put(buf_grp); buf_grp = nullptr; }
+    if (ctx) { mpp.mpp_destroy(ctx); ctx = nullptr; }
+    ready = false;
+  }
+};
+
+MppH264Encoder::~MppH264Encoder() = default;
+
+int32_t MppH264Encoder::InitEncode(const VideoCodec* c, const Settings&) {
+  impl_ = std::make_unique<Impl>(); impl_->codec_config = *c;
+  if (!impl_->InitEncoder()) return WEBRTC_VIDEO_CODEC_ERROR;
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+int32_t MppH264Encoder::Encode(const VideoFrame& f, const std::vector<VideoFrameType>*) {
+  return impl_ && impl_->ready ? impl_->EncodeOne(f) : WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+}
+int32_t MppH264Encoder::RegisterEncodeCompleteCallback(EncodedImageCallback* cb) {
+  if (impl_) impl_->callback = cb; return WEBRTC_VIDEO_CODEC_OK;
+}
+int32_t MppH264Encoder::Release() { impl_.reset(); return WEBRTC_VIDEO_CODEC_OK; }
+void MppH264Encoder::SetRates(const RateControlParameters& p) {
+  if (impl_ && impl_->ctx) { MppEncRcCfg_t rc = {}; rc.change = MPP_ENC_RC_CFG_CHANGE_BPS;
+    rc.bps_target = p.bitrate.get_sum_kbps() * 1000; mpp.control(impl_->ctx, MPP_ENC_SET_RC_CFG, &rc); }
+}
+VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
+  EncoderInfo i; i.implementation_name = "RK3588 MPP H264";
+  i.is_hardware_accelerated = true; i.scaling_settings = VideoEncoder::ScalingSettings::kOff;
+  return i;
+}
+
+}  // namespace webrtc
 
 ========== ./flag_defs.h ==========
 Lines: 55
@@ -1719,8 +3275,57 @@ class MainWnd : public MainWindow {
 
 #endif  // APPS_PEERCONNECTION_CLIENT_MAIN_WND_H_
 
+========== ./rk_mpp_encoder.h ==========
+Lines: 45
+
+// rk_mpp_encoder.h — Rockchip MPP H264 hardware encoder adapter
+#ifndef APPS_PEERCONNECTION_CLIENT_RK_MPP_ENCODER_H_
+#define APPS_PEERCONNECTION_CLIENT_RK_MPP_ENCODER_H_
+
+#include <memory>
+#include <vector>
+
+#include "api/video_codecs/sdp_video_format.h"
+#include "api/video_codecs/video_encoder.h"
+#include "api/environment/environment.h"
+
+namespace webrtc {
+
+// Factory template adapter — registered in VideoEncoderFactoryTemplate
+struct MppH264EncoderTemplateAdapter {
+  static std::vector<SdpVideoFormat> SupportedFormats();
+  static std::unique_ptr<VideoEncoder> CreateEncoder(
+      const Environment& env, const SdpVideoFormat& format);
+  static bool IsScalabilityModeSupported(ScalabilityMode) { return false; }
+};
+
+// Actual MPP encoder implementation
+class MppH264Encoder : public VideoEncoder {
+ public:
+  MppH264Encoder() = default;
+  ~MppH264Encoder() override;
+
+  int32_t InitEncode(const VideoCodec* codec_settings,
+                     const Settings& settings) override;
+  int32_t Encode(const VideoFrame& frame,
+                 const std::vector<VideoFrameType>* frame_types) override;
+  int32_t RegisterEncodeCompleteCallback(
+      EncodedImageCallback* callback) override;
+  int32_t Release() override;
+  void SetRates(const RateControlParameters& parameters) override;
+  EncoderInfo GetEncoderInfo() const override;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace webrtc
+
+#endif  // APPS_PEERCONNECTION_CLIENT_RK_MPP_ENCODER_H_
+
 ========== ./webrtc_engine.cc ==========
-Lines: 1340
+Lines: 804
 
 /*
  *  Copyright 2026 The WebRTC Project Authors. All rights reserved.
@@ -1733,6 +3338,9 @@ Lines: 1340
  */
 
 #include "apps/peerconnection/client/webrtc_engine.h"
+#include "apps/peerconnection/client/json_helpers.h"
+#include "apps/peerconnection/client/pc_factory.h"
+#include "apps/peerconnection/client/peer_connection_client.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
@@ -1801,17 +3409,6 @@ ABSL_DECLARE_FLAG(std::string, audio_source);
 
 namespace {
 
-using webrtc::test::TestVideoCapturer;
-
-// Names used for a IceCandidate JSON object.
-const char kCandidateSdpMidName[] = "sdpMid";
-const char kCandidateSdpMlineIndexName[] = "sdpMLineIndex";
-const char kCandidateSdpName[] = "candidate";
-
-// Names used for a SessionDescription JSON object.
-const char kSessionDescriptionTypeName[] = "type";
-const char kSessionDescriptionSdpName[] = "sdp";
-
 class DummySetSessionDescriptionObserver
     : public webrtc::SetSessionDescriptionObserver {
  public:
@@ -1825,392 +3422,40 @@ class DummySetSessionDescriptionObserver
   }
 };
 
-std::unique_ptr<TestVideoCapturer> CreateCapturer(
-    webrtc::TaskQueueFactory& task_queue_factory,
-    int device_idx = -1) {
-  const size_t kWidth = 640;
-  const size_t kHeight = 480;
-  const size_t kFps = 30;
-  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
-      webrtc::VideoCaptureFactory::CreateDeviceInfo());
-  if (info) {
-    int num_devices = info->NumberOfDevices();
-    if (device_idx >= 0 && device_idx < num_devices) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, device_idx);
-      if (capturer) {
-        return capturer;
-      }
-    }
-    for (int i = 0; i < num_devices; ++i) {
-      std::unique_ptr<TestVideoCapturer> capturer =
-          webrtc::test::CreateVideoCapturer(kWidth, kHeight, kFps, i);
-      if (capturer) {
-        return capturer;
-      }
-    }
-  }
-  RTC_LOG(LS_WARNING)
-      << "No video capture device found; using synthetic video.";
-  auto frame_generator = webrtc::test::CreateSquareFrameGenerator(
-      kWidth, kHeight, std::nullopt, std::nullopt);
-  return std::make_unique<webrtc::test::FrameGeneratorCapturer>(
-      webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), kFps,
-      task_queue_factory);
-}
-
-class CapturerTrackSource : public webrtc::VideoTrackSource {
- public:
-  static webrtc::scoped_refptr<CapturerTrackSource> Create(
-      webrtc::TaskQueueFactory& task_queue_factory,
-      int device_idx = -1) {
-    std::unique_ptr<TestVideoCapturer> capturer =
-        CreateCapturer(task_queue_factory, device_idx);
-    if (capturer) {
-      capturer->Start();
-      return webrtc::make_ref_counted<CapturerTrackSource>(std::move(capturer));
-    }
-    return nullptr;
-  }
-
-  void SwapCapturer(std::unique_ptr<TestVideoCapturer> new_capturer) {
-    if (!new_capturer) return;
-    RTC_LOG(LS_INFO) << "Swapping video capturer";
-    {
-      std::lock_guard<std::mutex> lock(capturer_mutex_);
-      capturer_->Stop();
-      capturer_ = std::move(new_capturer);
-      capturer_->Start();
-    }
-  }
-
- protected:
-  explicit CapturerTrackSource(std::unique_ptr<TestVideoCapturer> capturer)
-      : VideoTrackSource(/*remote=*/false), capturer_(std::move(capturer)) {}
-
-  ~CapturerTrackSource() override = default;
-
- private:
-  webrtc::VideoSourceInterface<webrtc::VideoFrame>* source() override {
-    return capturer_.get();
-  }
-
-  std::mutex capturer_mutex_;
-  std::unique_ptr<TestVideoCapturer> capturer_;
-};
-
-// JSON escaping helper for data channel messages.
-std::string EscapeJsonString(const std::string& input) {
-  std::string output;
-  output.reserve(input.size());
-  for (char c : input) {
-    switch (c) {
-      case '"':  output += "\\\""; break;
-      case '\\': output += "\\\\"; break;
-      case '\b': output += "\\b";  break;
-      case '\f': output += "\\f";  break;
-      case '\n': output += "\\n";  break;
-      case '\r': output += "\\r";  break;
-      case '\t': output += "\\t";  break;
-      default:   output += c;      break;
-    }
-  }
-  return output;
-}
-
-// Build a JSON peer list event string from the peers map.
-std::string BuildPeerListJson(const Peers& peers) {
-  std::string json = R"({"event":"peer_list","peers":[)";
-  bool first = true;
-  for (const auto& p : peers) {
-    if (!first)
-      json += ",";
-    first = false;
-    json += "{\"id\":" + std::to_string(p.first) +
-            ",\"name\":\"" + p.second + "\"}";
-  }
-  json += "]}";
-  return json;
-}
-
-// Convert ICE connection state to string for JSON events.
-const char* IceConnectionStateToString(
-    webrtc::PeerConnectionInterface::IceConnectionState state) {
-  switch (state) {
-    case webrtc::PeerConnectionInterface::kIceConnectionNew:
-      return "new";
-    case webrtc::PeerConnectionInterface::kIceConnectionChecking:
-      return "checking";
-    case webrtc::PeerConnectionInterface::kIceConnectionConnected:
-      return "connected";
-    case webrtc::PeerConnectionInterface::kIceConnectionCompleted:
-      return "completed";
-    case webrtc::PeerConnectionInterface::kIceConnectionFailed:
-      return "failed";
-    case webrtc::PeerConnectionInterface::kIceConnectionDisconnected:
-      return "disconnected";
-    case webrtc::PeerConnectionInterface::kIceConnectionClosed:
-      return "closed";
-    default:
-      return "unknown";
-  }
-}
-
-// Convert DataChannel state to string.
-const char* DataChannelStateToString(webrtc::DataChannelInterface::DataState s) {
-  switch (s) {
-    case webrtc::DataChannelInterface::kConnecting: return "connecting";
-    case webrtc::DataChannelInterface::kOpen:        return "open";
-    case webrtc::DataChannelInterface::kClosing:     return "closing";
-    case webrtc::DataChannelInterface::kClosed:      return "closed";
-    default:                                         return "unknown";
-  }
-}
-
 }  // namespace
-
-// ==================== ShmVideoSink ====================
-
-WebRTCEngine::ShmVideoSink::ShmVideoSink(const std::string& key_path,
-                                          int proj_id)
-    : writer_(std::make_unique<ShmVideoWriter>()),
-      io_thread_(&ShmVideoSink::IoLoop, this) {
-  if (!writer_->Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmVideoSink: ShmVideoWriter::Init failed for "
-                      << key_path;
-  }
-}
-
-WebRTCEngine::ShmVideoSink::~ShmVideoSink() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  cv_.notify_all();
-  if (io_thread_.joinable()) {
-    io_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmVideoSink::OnFrame(const webrtc::VideoFrame& frame) {
-  webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
-      frame.video_frame_buffer()->ToI420();
-  if (!i420) {
-    RTC_LOG(LS_WARNING) << "ShmVideoSink::OnFrame: ToI420 returned null";
-    return;
-  }
-
-  int width = i420->width();
-  int height = i420->height();
-  int half_width = (width + 1) / 2;
-  int y_size = i420->StrideY() * height;
-  int u_size = i420->StrideU() * ((height + 1) / 2);
-  int v_size = i420->StrideV() * ((height + 1) / 2);
-  int total_size = y_size + u_size + v_size;
-
-  FrameData fd;
-  fd.head.ntp_time_ms = frame.ntp_time_ms();
-  fd.head.width = static_cast<uint16_t>(width);
-  fd.head.height = static_cast<uint16_t>(height);
-  fd.head.frame_type = 0;
-  fd.head.rotation = frame.rotation();
-  fd.head.frame_len = static_cast<uint32_t>(total_size);
-  fd.i420_data.resize(total_size);
-
-  // Copy Y plane (respecting stride)
-  const uint8_t* src_y = i420->DataY();
-  uint8_t* dst = fd.i420_data.data();
-  for (int row = 0; row < height; ++row) {
-    std::memcpy(dst, src_y, width);
-    dst += width;
-    src_y += i420->StrideY();
-  }
-  // Copy U plane (respecting stride)
-  const uint8_t* src_u = i420->DataU();
-  for (int row = 0; row < (height + 1) / 2; ++row) {
-    std::memcpy(dst, src_u, half_width);
-    dst += half_width;
-    src_u += i420->StrideU();
-  }
-  // Copy V plane (respecting stride)
-  const uint8_t* src_v = i420->DataV();
-  for (int row = 0; row < (height + 1) / 2; ++row) {
-    std::memcpy(dst, src_v, half_width);
-    dst += half_width;
-    src_v += i420->StrideV();
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = std::move(fd);
-  }
-  cv_.notify_one();
-}
-
-void WebRTCEngine::ShmVideoSink::IoLoop() {
-  while (true) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
-    if (stopped_) {
-      return;
-    }
-    if (pending_.has_value()) {
-      FrameData fd = std::move(*pending_);
-      pending_.reset();
-      lock.unlock();
-      writer_->WriteFrame(fd.head, fd.i420_data.data());
-    }
-  }
-}
-
-// ==================== ShmAudioSink ====================
-
-WebRTCEngine::ShmAudioSink::ShmAudioSink(const std::string& key_path,
-                                          int proj_id)
-    : writer_(std::make_unique<ShmAudioWriter>()),
-      io_thread_(&ShmAudioSink::IoLoop, this) {
-  if (!writer_->Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioSink: ShmAudioWriter::Init failed for "
-                      << key_path;
-  }
-}
-
-WebRTCEngine::ShmAudioSink::~ShmAudioSink() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  cv_.notify_all();
-  if (io_thread_.joinable()) {
-    io_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmAudioSink::OnData(
-    const void* audio_data, int bits_per_sample, int sample_rate,
-    size_t number_of_channels, size_t number_of_frames,
-    std::optional<int64_t> absolute_capture_timestamp_ms) {
-  size_t byte_count =
-      number_of_frames * number_of_channels * (bits_per_sample / 8);
-  if (byte_count > AUDIO_FRAME_MAX_SIZE) {
-    RTC_LOG(LS_WARNING) << "ShmAudioSink: frame too large: " << byte_count;
-    return;
-  }
-
-  PendingAudio pending;
-  pending.head.ntp_time_ms = absolute_capture_timestamp_ms.value_or(0);
-  pending.head.frame_len = static_cast<uint32_t>(byte_count);
-  pending.head.sample_rate = static_cast<uint32_t>(sample_rate);
-  pending.head.channels = static_cast<uint16_t>(number_of_channels);
-  pending.head.bits_per_sample = static_cast<uint16_t>(bits_per_sample);
-  pending.data.assign(static_cast<const uint8_t*>(audio_data),
-                      static_cast<const uint8_t*>(audio_data) + byte_count);
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = std::move(pending);
-  }
-  cv_.notify_one();
-}
-
-void WebRTCEngine::ShmAudioSink::IoLoop() {
-  while (true) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
-    if (stopped_) {
-      return;
-    }
-    if (pending_.has_value()) {
-      auto pending = std::move(*pending_);
-      pending_.reset();
-      lock.unlock();
-      writer_->WriteFrame(pending.head, pending.data.data());
-    }
-  }
-}
-
-// ==================== ShmAudioSource ====================
-
-webrtc::scoped_refptr<WebRTCEngine::ShmAudioSource>
-WebRTCEngine::ShmAudioSource::Create(const std::string& key_path, int proj_id) {
-  auto source = webrtc::make_ref_counted<ShmAudioSource>();
-  if (!source->reader_.Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioSource: ShmAudioReader::Init failed for "
-                      << key_path;
-    return nullptr;
-  }
-  source->running_ = true;
-  source->capture_thread_ =
-      std::thread(&ShmAudioSource::CaptureLoop, source.get());
-  return source;
-}
-
-WebRTCEngine::ShmAudioSource::~ShmAudioSource() {
-  running_ = false;
-  reader_.RequestStop();
-  if (capture_thread_.joinable()) {
-    capture_thread_.join();
-  }
-}
-
-void WebRTCEngine::ShmAudioSource::AddSink(
-    webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.push_back(sink);
-}
-
-void WebRTCEngine::ShmAudioSource::RemoveSink(
-    webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.erase(std::remove(sinks_.begin(), sinks_.end(), sink), sinks_.end());
-}
-
-void WebRTCEngine::ShmAudioSource::CaptureLoop() {
-  std::vector<uint8_t> buf(AUDIO_FRAME_MAX_SIZE);
-  while (running_) {
-    AudioFrameHead head;
-    if (!reader_.ReadFrame(head, buf.data(), AUDIO_FRAME_MAX_SIZE)) {
-      break;
-    }
-
-    std::lock_guard<std::mutex> lock(sinks_mutex_);
-    for (auto* sink : sinks_) {
-      if (sink) {
-        sink->OnData(buf.data(), head.bits_per_sample,
-                     static_cast<int>(head.sample_rate), head.channels,
-                     head.frame_len /
-                         (head.channels * (head.bits_per_sample / 8)),
-                     head.ntp_time_ms);
-      }
-    }
-  }
-}
 
 // ==================== WebRTCEngine ====================
 
-WebRTCEngine::WebRTCEngine(const webrtc::Environment& env,
-                             EventCallback on_event)
-    : on_event_(std::move(on_event)),
-      env_(env),
+WebRTCEngine::WebRTCEngine(const webrtc::Environment& env)
+    : env_(env),
       safety_(webrtc::PendingTaskSafetyFlag::Create()),
       peer_id_(-1),
       loopback_(false) {
-  signaling_client_.RegisterObserver(this);
+  signaling_ = std::make_unique<PeerConnectionClient>();
+  signaling_->RegisterObserver(this);
+}
+
+void WebRTCEngine::RegisterObserver(EngineObserver* observer) {
+  if (signaling_thread_->IsCurrent()) {
+    observer_ = observer;
+  } else {
+    signaling_thread_->PostTask([this, observer] { observer_ = observer; });
+  }
+}
+
+void WebRTCEngine::UnregisterObserver() {
+  if (signaling_thread_->IsCurrent()) {
+    observer_ = nullptr;
+  } else {
+    signaling_thread_->PostTask([this] { observer_ = nullptr; });
+  }
 }
 
 WebRTCEngine::~WebRTCEngine() {
   RTC_DCHECK(!peer_connection_);
 
-  // Stop ADM on worker thread if it exists.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (pipeline_)
+    pipeline_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -2242,7 +3487,7 @@ bool WebRTCEngine::Init() {
 }
 
 void WebRTCEngine::Shutdown() {
-  signaling_client_.SignOut();
+  signaling_->SignOut();
   DeletePeerConnection();
 
   // Clean up pending messages.
@@ -2251,22 +3496,8 @@ void WebRTCEngine::Shutdown() {
     pending_messages_.pop_front();
   }
 
-  // Stop SHM renderers.
-  StopLocalShmRenderer();
-  StopRemoteShmRenderer();
-  StopRemoteAudioShmRenderer();
-  local_audio_source_ = nullptr;
-
-  // Stop ADM on worker thread.
-  if (audio_device_module_ && worker_thread_) {
-    auto adm = std::move(audio_device_module_);
-    audio_device_module_ = nullptr;
-    worker_thread_->BlockingCall([adm = std::move(adm)]() mutable {
-      if (adm->Playing()) adm->StopPlayout();
-      if (adm->Recording()) adm->StopRecording();
-      adm = nullptr;
-    });
-  }
+  if (pipeline_)
+    pipeline_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -2284,18 +3515,44 @@ void WebRTCEngine::Shutdown() {
 }
 
 void WebRTCEngine::ConnectToServer(const std::string& server, int port) {
-  if (signaling_client_.is_connected())
+  if (signaling_thread_->IsCurrent()) {
+    ConnectToServerImpl(server, port);
+  } else {
+    signaling_thread_->PostTask(
+        [this, server, port] { ConnectToServerImpl(server, port); });
+  }
+}
+
+void WebRTCEngine::ConnectToServerImpl(const std::string& server, int port) {
+  if (signaling_->is_connected())
     return;
   server_ = server;
-  signaling_client_.Connect(server, port, GetPeerName());
+  server_port_ = port;
+  signaling_->Connect(server, port, GetPeerName());
 }
 
 void WebRTCEngine::DisconnectFromServer() {
-  if (signaling_client_.is_connected())
-    signaling_client_.SignOut();
+  if (signaling_thread_->IsCurrent()) {
+    DisconnectFromServerImpl();
+  } else {
+    signaling_thread_->PostTask([this] { DisconnectFromServerImpl(); });
+  }
+}
+
+void WebRTCEngine::DisconnectFromServerImpl() {
+  if (signaling_->is_connected())
+    signaling_->SignOut();
 }
 
 void WebRTCEngine::ConnectToPeer(int peer_id) {
+  if (signaling_thread_->IsCurrent()) {
+    ConnectToPeerImpl(peer_id);
+  } else {
+    signaling_thread_->PostTask([this, peer_id] { ConnectToPeerImpl(peer_id); });
+  }
+}
+
+void WebRTCEngine::ConnectToPeerImpl(int peer_id) {
   RTC_DCHECK(peer_id_ == -1);
   RTC_DCHECK(peer_id != -1);
 
@@ -2314,177 +3571,114 @@ void WebRTCEngine::ConnectToPeer(int peer_id) {
 }
 
 void WebRTCEngine::HangUp() {
+  if (signaling_thread_->IsCurrent()) {
+    HangUpImpl();
+  } else {
+    signaling_thread_->PostTask([this] { HangUpImpl(); });
+  }
+}
+
+void WebRTCEngine::HangUpImpl() {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   if (peer_connection_) {
     // Server-mediated hangup: send /hangup to server, which sends
     // HANGUP_CONFIRM to both parties. Cleanup happens in OnPeerDisconnected
     // when HANGUP_CONFIRM arrives.
-    signaling_client_.SendHangUp(peer_id_);
+    signaling_->SendHangUp(peer_id_);
   }
-  //on_event_(BuildPeerListJson(signaling_client_.peers()));
+  //on_event_(BuildPeerListJson(signaling_->peers()));
 }
 
 void WebRTCEngine::SetAudioMuted(bool muted) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (audio_device_module_) {
-    if (muted) {
-      audio_device_module_->StopRecording();
-    }
-    // Resume recording on unmute is left as a future enhancement.
+  if (signaling_thread_->IsCurrent()) {
+    SetAudioMutedImpl(muted);
+  } else {
+    signaling_thread_->PostTask([this, muted] { SetAudioMutedImpl(muted); });
   }
+}
+
+void WebRTCEngine::SetAudioMutedImpl(bool muted) {
+  pipeline_->SetAudioMuted(muted);
 }
 
 void WebRTCEngine::SetVideoPaused(bool paused) {
-  // Stub: log and set internal state. Full implementation can follow.
-  RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
-  if (peer_connection_) {
-    auto senders = peer_connection_->GetSenders();
-    for (auto& sender : senders) {
-      if (sender->track() &&
-          sender->track()->kind() ==
-              webrtc::MediaStreamTrackInterface::kVideoKind) {
-        sender->track()->set_enabled(!paused);
-      }
-    }
+  if (signaling_thread_->IsCurrent()) {
+    SetVideoPausedImpl(paused);
+  } else {
+    signaling_thread_->PostTask([this, paused] { SetVideoPausedImpl(paused); });
   }
 }
 
+void WebRTCEngine::SetVideoPausedImpl(bool paused) {
+  pipeline_->SetVideoPaused(paused, peer_connection_.get());
+}
+
 void WebRTCEngine::SendData(const std::string& text) {
-  if (data_channel_ &&
-      data_channel_->state() == webrtc::DataChannelInterface::kOpen) {
-    data_channel_->Send(webrtc::DataBuffer(text));
+  if (signaling_thread_->IsCurrent()) {
+    SendDataImpl(text);
   } else {
-    RTC_LOG(LS_WARNING) << "SendData: data channel not open";
+    signaling_thread_->PostTask([this, text] { SendDataImpl(text); });
   }
+}
+
+void WebRTCEngine::SendDataImpl(const std::string& text) {
+  dc_manager_->Send(text);
 }
 
 // ==================== Device Management ====================
 
 void WebRTCEngine::QueryDevices() {
-  // ADM is created by InitializePeerConnection() when a call starts.
-  // Don't create it here — PulseAudio init crashes in some environments.
-  if (!audio_device_module_ && worker_thread_) {
-    // Skip ADM creation; audio device list will be empty until first call.
+  if (signaling_thread_->IsCurrent()) {
+    QueryDevicesImpl();
+  } else {
+    signaling_thread_->PostTask([this] { QueryDevicesImpl(); });
   }
+}
 
-  Json::Value video_arr(Json::arrayValue);
-  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
-  if (info) {
-    int n = info->NumberOfDevices();
-    char name[256];
-    char id[256];
-    for (int i = 0; i < n; ++i) {
-      if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id)) == 0) {
-        Json::Value dev;
-        dev["idx"] = i;
-        dev["name"] = name;
-        video_arr.append(dev);
-      }
-    }
-  }
-  Json::StreamWriterBuilder factory;
-  factory["indentation"] = "";
-  Json::Value video_event;
-  video_event["event"] = "video_devices";
-  video_event["devices"] = video_arr;
-  on_event_(Json::writeString(factory, video_event));
-
-  Json::Value audio_arr(Json::arrayValue);
-  if (audio_device_module_ && worker_thread_) {
-    audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
-      Json::Value arr(Json::arrayValue);
-      int16_t n = audio_device_module_->RecordingDevices();
-      char name[webrtc::kAdmMaxDeviceNameSize];
-      char guid[webrtc::kAdmMaxGuidSize];
-      for (int16_t i = 0; i < n; ++i) {
-        if (audio_device_module_->RecordingDeviceName(i, name, guid) == 0) {
-          Json::Value dev;
-          dev["idx"] = i;
-          dev["name"] = name;
-          arr.append(dev);
-        }
-      }
-      return arr;
-    });
-  }
-  // Only emit ADM results if non-empty; otherwise fall through to ALSA
-  if (!audio_arr.empty()) {
-    Json::Value audio_event;
-    audio_event["event"] = "audio_input_devices";
-    audio_event["devices"] = audio_arr;
-    on_event_(Json::writeString(factory, audio_event));
-  }
-
-  // ALSA fallback: use arecord -l when ADM enumeration returns empty.
-  // ADM RecordingDevices requires InitRecording which crashes PulseAudio
-  // in some environments (safe_conversions overflow).
-  if (audio_arr.empty()) {
-    FILE* fp = popen("arecord -l 2>/dev/null", "r");
-    if (fp) {
-      Json::Value alsa_arr(Json::arrayValue);
-      char line[256];
-      int idx = 0;
-      while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "card ") == line && strstr(line, "device ")) {
-          char* desc_begin = strrchr(line, '[');
-          char* desc_end = desc_begin ? strrchr(line, ']') : nullptr;
-          char name[256];
-          if (desc_begin && desc_end && desc_end > desc_begin) {
-            size_t len = desc_end - desc_begin - 1;
-            snprintf(name, sizeof(name), "%.*s", (int)len, desc_begin + 1);
-          } else {
-            snprintf(name, sizeof(name), "Capture device %d", idx);
-          }
-          Json::Value dev;
-          dev["idx"] = idx;
-          dev["name"] = name;
-          alsa_arr.append(dev);
-          idx++;
-        }
-      }
-      pclose(fp);
-      if (!alsa_arr.empty()) {
-        Json::Value alsa_event;
-        alsa_event["event"] = "audio_input_devices";
-        alsa_event["devices"] = alsa_arr;
-        on_event_(Json::writeString(factory, alsa_event));
-      }
-    }
-  }
+void WebRTCEngine::QueryDevicesImpl() {
+  pipeline_->QueryDevices();
 }
 
 void WebRTCEngine::SetVideoDevice(int device_idx) {
-  if (!local_video_source_) {
-    RTC_LOG(LS_WARNING) << "No local video source to swap";
-    return;
+  if (signaling_thread_->IsCurrent()) {
+    SetVideoDeviceImpl(device_idx);
+  } else {
+    signaling_thread_->PostTask([this, device_idx] { SetVideoDeviceImpl(device_idx); });
   }
-  auto new_capturer = CreateCapturer(env_.task_queue_factory(), device_idx);
-  if (!new_capturer) {
-    RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
-    return;
-  }
-  auto* capturer_source = static_cast<CapturerTrackSource*>(local_video_source_.get());
-  capturer_source->SwapCapturer(std::move(new_capturer));
-  current_video_device_idx_ = device_idx;
+}
+
+void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
+  pipeline_->SetVideoDevice(device_idx);
 }
 
 void WebRTCEngine::SetAudioInputDevice(int device_idx) {
-  current_audio_input_device_idx_ = device_idx;
-  if (!audio_device_module_) return;
+  if (signaling_thread_->IsCurrent()) {
+    SetAudioInputDeviceImpl(device_idx);
+  } else {
+    signaling_thread_->PostTask([this, device_idx] { SetAudioInputDeviceImpl(device_idx); });
+  }
+}
+
+void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
+  if (pipeline_) pipeline_->set_audio_input_device_idx(device_idx);
+  if (!pipeline_ || !pipeline_->adm()) return;
   // Apply device change. If not recording yet, recording will use this device
   // when it starts via the factory. If already recording mid-call, restart.
   worker_thread_->BlockingCall([this, device_idx] {
-    bool was_recording = audio_device_module_->Recording();
+    bool was_recording = pipeline_->adm()->Recording();
     if (was_recording) {
-      audio_device_module_->StopRecording();
-      audio_device_module_->SetRecordingDevice(device_idx);
-      audio_device_module_->InitRecording();
-      audio_device_module_->StartRecording();
+      pipeline_->adm()->StopRecording();
+      pipeline_->adm()->SetRecordingDevice(device_idx);
+      pipeline_->adm()->InitRecording();
+      pipeline_->adm()->StartRecording();
     } else {
-      audio_device_module_->SetRecordingDevice(device_idx);
+      pipeline_->adm()->SetRecordingDevice(device_idx);
     }
   });
+}
+
+bool WebRTCEngine::connection_active() const {
+  return connection_active_.load(std::memory_order_acquire);
 }
 
 // ==================== PeerConnectionObserver ====================
@@ -2498,10 +3692,10 @@ void WebRTCEngine::OnAddTrack(
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
-    StartRemoteShmRenderer(video_track);
+    pipeline_->StartRemoteRenderer(video_track);
   } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
     auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
-    StartRemoteAudioShmRenderer(audio_track);
+    pipeline_->StartRemoteAudioRenderer(audio_track);
   }
 }
 
@@ -2511,35 +3705,21 @@ void WebRTCEngine::OnRemoveTrack(
 
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
-    StopRemoteShmRenderer();
+    pipeline_->StopRemoteRenderer();
   } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    StopRemoteAudioShmRenderer();
+    pipeline_->StopRemoteAudioRenderer();
   }
 }
 
 void WebRTCEngine::OnDataChannel(
     webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
-  if (!channel) {
-    RTC_LOG(LS_ERROR) << "OnDataChannel: Received null DataChannel";
-    return;
-  }
-  if (channel->label() != "chat") {
-    RTC_LOG(LS_WARNING) << "OnDataChannel: Unexpected label: " << channel->label();
-    return;
-  }
-  if (data_channel_) {
-    RTC_LOG(LS_WARNING) << "DataChannel already exists, replacing...";
-  }
-  data_channel_ = channel;
-  data_channel_->RegisterObserver(this);
-  RTC_LOG(LS_INFO) << "DataChannel received and observer registered"
-                   << " - label: " << data_channel_->label();
+  dc_manager_->OnRemoteDataChannel(channel);
 }
 
 void WebRTCEngine::OnIceConnectionChange(
     webrtc::PeerConnectionInterface::IceConnectionState new_state) {
   RTC_LOG(LS_INFO) << __FUNCTION__ << " " << new_state;
-  on_event_(std::string(R"({"event":"ice_state","state":")") +
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"ice_state","state":")") +
             IceConnectionStateToString(new_state) + R"("})");
 }
 
@@ -2581,11 +3761,11 @@ void WebRTCEngine::OnFailure(webrtc::RTCError error) {
 
 void WebRTCEngine::OnSignedIn() {
   RTC_LOG(LS_INFO) << __FUNCTION__;
-  on_event_(R"({"event":"server_connected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_connected"})");
   // Also emit current peer list.
-  const Peers& peers = signaling_client_.peers();
+  const Peers& peers = signaling_->peers();
   if (!peers.empty()) {
-    on_event_(BuildPeerListJson(peers));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(peers));
   }
 }
 
@@ -2594,35 +3774,76 @@ void WebRTCEngine::OnDisconnected() {
 
   DeletePeerConnection();
 
-  on_event_(R"({"event":"server_disconnected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_disconnected"})");
 }
 
 void WebRTCEngine::OnPeerConnected(int id, const std::string& name) {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   // Emit individual peer event + full peer list.
-  on_event_(std::string(R"({"event":"peer_online","peer":{"id":)") +
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"peer_online","peer":{"id":)") +
             std::to_string(id) + R"(,"name":")" + name + R"("}})");
-  on_event_(BuildPeerListJson(signaling_client_.peers()));
+  if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
 }
 
 void WebRTCEngine::OnPeerDisconnected(int id) {
   RTC_LOG(LS_INFO) << __FUNCTION__;
   if (id == peer_id_) {
     RTC_LOG(LS_INFO) << "Our peer disconnected";
-    DeletePeerConnection();
-    on_event_(R"({"event":"call_disconnected"})");
-    on_event_(BuildPeerListJson(signaling_client_.peers()));
+    // Phase 2 confirmation — must be sent before cleanup.
+    signaling_->SendHangUpConfirm();
+    if (observer_) observer_->OnEngineEvent(R"({"event":"call_disconnected"})");
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
+
+    // Sign out + reconnect: fully reset signaling state so the second
+    // call starts from a clean slate (no residual call_partner / hangup
+    // state on the server side).
+    std::string saved_server = server_;
+    int saved_port = server_port_;
+    auto pc = std::move(peer_connection_);
+    auto f = std::move(factory_);
+    auto adm = pipeline_->adm();
+    pipeline_->Shutdown();
+    dc_manager_->Shutdown();
+    peer_id_ = -1;
+    loopback_ = false;
+    signaling_->Close();
+    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
+                                  adm = std::move(adm)]() mutable {
+      while (!pending_messages_.empty()) {
+        delete pending_messages_.front();
+        pending_messages_.pop_front();
+      }
+      // Stop ADM asynchronously — the worker thread handles it.
+      if (adm && worker_thread_) {
+        worker_thread_->PostTask([adm]() mutable {
+          if (adm->Playing()) adm->StopPlayout();
+          if (adm->Recording()) adm->StopRecording();
+          adm = nullptr;
+        });
+      }
+      pc->Close();
+      pc = nullptr;
+      f = nullptr;
+    });
+    // Auto-reconnect after cleanup (server has removed the old member entry).
+    signaling_thread_->PostDelayedTask(
+        [this, saved_server, saved_port] {
+          RTC_LOG(LS_INFO) << "Auto-reconnecting after hangup to "
+                           << saved_server << ":" << saved_port;
+          ConnectToServer(saved_server, saved_port);
+        },
+        webrtc::TimeDelta::Seconds(2));
   } else {
     // Emit individual offline event + refreshed peer list.
-    on_event_(R"({"event":"peer_offline","peer_id":)" +
+    if (observer_) observer_->OnEngineEvent(R"({"event":"peer_offline","peer_id":)" +
               std::to_string(id) + "}");
-    on_event_(BuildPeerListJson(signaling_client_.peers()));
+    if (observer_) observer_->OnEngineEvent(BuildPeerListJson(signaling_->peers()));
   }
 }
 
 void WebRTCEngine::OnPeerBusy(int peer_id) {
   RTC_LOG(LS_INFO) << __FUNCTION__ << " " << peer_id;
-  on_event_(std::string(R"({"event":"peer_busy","peer_id":)")
+  if (observer_) observer_->OnEngineEvent(std::string(R"({"event":"peer_busy","peer_id":)")
             + std::to_string(peer_id) + "}");
 }
 
@@ -2637,7 +3858,7 @@ void WebRTCEngine::OnMessageFromPeer(int peer_id,
 
     if (!InitializePeerConnection()) {
       RTC_LOG(LS_ERROR) << "Failed to initialize our PeerConnection instance";
-      signaling_client_.SignOut();
+      signaling_->SignOut();
       return;
     }
   } else if (peer_id != peer_id_) {
@@ -2730,11 +3951,11 @@ void WebRTCEngine::OnMessageSent(int err) {
 
   RTC_LOG(LS_INFO) << "OnMessageSent";
 
-  if (!pending_messages_.empty() && !signaling_client_.IsSendingMessage()) {
+  if (!pending_messages_.empty() && !signaling_->IsSendingMessage()) {
     std::string* msg = pending_messages_.front();
     pending_messages_.pop_front();
 
-    if (!signaling_client_.SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
+    if (!signaling_->SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
       RTC_LOG(LS_ERROR) << "SendToPeer failed";
       DisconnectFromServer();
     }
@@ -2745,9 +3966,9 @@ void WebRTCEngine::OnMessageSent(int err) {
     peer_id_ = -1;
 
   // If a hangup was deferred because the control socket was busy, send it now
-  if (pending_hangup_peer_id_ != -1 && !signaling_client_.IsSendingMessage()) {
+  if (pending_hangup_peer_id_ != -1 && !signaling_->IsSendingMessage()) {
     RTC_LOG(LS_INFO) << "Sending deferred BYE to peer " << pending_hangup_peer_id_;
-    signaling_client_.SendHangUp(pending_hangup_peer_id_);
+    signaling_->SendHangUp(pending_hangup_peer_id_);
     pending_hangup_peer_id_ = -1;
   }
 }
@@ -2755,28 +3976,11 @@ void WebRTCEngine::OnMessageSent(int err) {
 void WebRTCEngine::OnServerConnectionFailure() {
   std::string error_msg = "Failed to connect to " + server_;
   RTC_LOG(LS_ERROR) << error_msg;
-  on_event_(R"({"event":"server_connection_failed","error":")" +
+  if (observer_) observer_->OnEngineEvent(R"({"event":"server_connection_failed","error":")" +
             error_msg + R"("})");
 }
 
-// ==================== DataChannelObserver ====================
-
-void WebRTCEngine::OnStateChange() {
-  if (data_channel_) {
-    const char* state_str =
-        DataChannelStateToString(data_channel_->state());
-    RTC_LOG(LS_INFO) << "DataChannel state: " << state_str;
-    on_event_(std::string(R"({"event":"data_channel_state","state":")") +
-              state_str + R"("})");
-  }
-}
-
-void WebRTCEngine::OnMessage(const webrtc::DataBuffer& buffer) {
-  RTC_LOG(LS_INFO) << "DataChannel message received";
-  std::string text(buffer.data.data<char>(), buffer.data.size());
-  on_event_(R"({"event":"data_received","text":")" +
-            EscapeJsonString(text) + R"("})");
-}
+// DataChannelObserver callbacks are handled by DataChannelManager
 
 // ==================== Private Helpers ====================
 
@@ -2811,101 +4015,53 @@ bool WebRTCEngine::InitializePeerConnection() {
     }
   }
 
-  if (!audio_device_module_) {
-    // Pulse/ALSA ADM has thread-affinity checks, so create it on the same
-    // worker thread that will later initialize and drive it.
-    audio_device_module_ = worker_thread_->BlockingCall([this] {
-      return webrtc::CreateAudioDeviceModule(
-          env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+  if (!pipeline_) {
+    pipeline_ = std::make_unique<MediaPipeline>(env_, worker_thread_.get());
+    pipeline_->SetEventCallback([this](const std::string& json) {
+      if (observer_) observer_->OnEngineEvent(json);
     });
-
-    if (!audio_device_module_) {
-      RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
+  }
+  if (!pipeline_ || !pipeline_->adm()) {
+    if (!pipeline_->CreateAudioDeviceModule()) {
       return false;
     }
   }
 
-  webrtc::PeerConnectionFactoryDependencies deps;
-  deps.network_thread = network_thread_.get();
-  deps.worker_thread = worker_thread_.get();
-  deps.signaling_thread = signaling_thread_.get();
-  deps.env = env_;
-  deps.adm = audio_device_module_;
-  deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
-  deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-  deps.video_encoder_factory =
-      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
-          webrtc::LibvpxVp8EncoderTemplateAdapter,
-          webrtc::LibvpxVp9EncoderTemplateAdapter,
-          webrtc::OpenH264EncoderTemplateAdapter,
-          webrtc::LibaomAv1EncoderTemplateAdapter>>();
-  deps.video_decoder_factory =
-      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
-          webrtc::LibvpxVp8DecoderTemplateAdapter,
-          webrtc::LibvpxVp9DecoderTemplateAdapter,
-          webrtc::OpenH264DecoderTemplateAdapter,
-          webrtc::Dav1dDecoderTemplateAdapter>>();
-  webrtc::EnableMedia(deps);
-  factory_ =
-      webrtc::CreateModularPeerConnectionFactory(std::move(deps));
-
-  if (!factory_) {
-    RTC_LOG(LS_ERROR) << "Failed to initialize PeerConnectionFactory";
+  auto pc = PcFactory::Create(network_thread_.get(), worker_thread_.get(),
+                               signaling_thread_.get(), env_,
+                               pipeline_->adm(), this);
+  if (!pc.factory || !pc.connection) {
+    RTC_LOG(LS_ERROR) << "Failed to create PeerConnection";
     DeletePeerConnection();
     return false;
   }
-
-  if (!CreatePeerConnection()) {
-    RTC_LOG(LS_ERROR) << "CreatePeerConnection failed";
-    DeletePeerConnection();
-  }
+  factory_ = std::move(pc.factory);
+  peer_connection_ = std::move(pc.connection);
+  connection_active_.store(true, std::memory_order_release);
 
   AddTracks();
+
+  dc_manager_ = std::make_unique<DataChannelManager>();
+  dc_manager_->SetEventCallback([this](const std::string& json) {
+    if (observer_) observer_->OnEngineEvent(json);
+  });
   AddDataChannel();
 
   return peer_connection_ != nullptr;
 }
 
-bool WebRTCEngine::CreatePeerConnection() {
-  RTC_DCHECK(factory_);
-  RTC_DCHECK(!peer_connection_);
-
-  webrtc::PeerConnectionInterface::RTCConfiguration config;
-  config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-
-  webrtc::PeerConnectionInterface::IceServer stun_server;
-  stun_server.uri = GetSTUNServer();
-  config.servers.push_back(stun_server);
-
-  webrtc::PeerConnectionInterface::IceServer turn_server;
-  turn_server.uri = GetTURNServer();
-  turn_server.username = GetTurnUserName();
-  turn_server.password = GetTurnPassword();
-  config.servers.push_back(turn_server);
-
-  webrtc::PeerConnectionDependencies pc_dependencies(this);
-  auto error_or_peer_connection =
-      factory_->CreatePeerConnectionOrError(
-          config, std::move(pc_dependencies));
-  if (error_or_peer_connection.ok()) {
-    peer_connection_ = std::move(error_or_peer_connection.value());
-  }
-  return peer_connection_ != nullptr;
-}
-
 void WebRTCEngine::DeletePeerConnection() {
+  connection_active_.store(false, std::memory_order_release);
   // Clear pending messages first to prevent stale ICE candidates from being sent
   while (!pending_messages_.empty()) {
     delete pending_messages_.front();
     pending_messages_.pop_front();
   }
-  StopLocalShmRenderer();
-  StopRemoteShmRenderer();
-  StopRemoteAudioShmRenderer();
-  local_audio_source_ = nullptr;
+  pipeline_->Shutdown();
+  dc_manager_->Shutdown();
+  peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
-  local_video_source_ = nullptr;
   peer_id_ = -1;
   loopback_ = false;
 }
@@ -2915,34 +4071,29 @@ void WebRTCEngine::AddTracks() {
     return;  // Already added tracks.
   }
 
-  // Audio track: select source based on --audio-source flag
+  // Audio track: create SHM source if requested, else ADM via pipeline
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
   std::string audio_source = absl::GetFlag(FLAGS_audio_source);
   if (audio_source == "shm") {
-    local_audio_source_ = ShmAudioSource::Create(
+    shm_source = ShmAudioCapturer::Create(
         shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!local_audio_source_) {
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioSource, falling back to ADM";
-      local_audio_source_ =
-          factory_->CreateAudioSource(webrtc::AudioOptions());
-    }
-  } else {
-    local_audio_source_ =
-        factory_->CreateAudioSource(webrtc::AudioOptions());
+    if (!shm_source)
+      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
   }
 
-  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
-      factory_->CreateAudioTrack(kAudioLabel, local_audio_source_.get()));
+  auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
   auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
   if (!result_or_error.ok()) {
     RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
                       << result_or_error.error().message();
   }
 
-  local_video_source_ = CapturerTrackSource::Create(env_.task_queue_factory());
-  if (local_video_source_) {
+  auto video_source = pipeline_->CreateVideoSource();
+  if (video_source) {
     webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_(
-        factory_->CreateVideoTrack(local_video_source_, kVideoLabel));
-    StartLocalShmRenderer(video_track_.get());
+        factory_->CreateVideoTrack(video_source, kVideoLabel));
+    pipeline_->StartLocalRenderer(video_track_.get());
 
     result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
     if (!result_or_error.ok()) {
@@ -2954,35 +4105,11 @@ void WebRTCEngine::AddTracks() {
         << "No local video track; proceeding without local video";
   }
 
-  on_event_(R"({"event":"call_connected"})");
+  if (observer_) observer_->OnEngineEvent(R"({"event":"call_connected"})");
 }
 
 void WebRTCEngine::AddDataChannel() {
-  if (!peer_connection_) {
-    RTC_LOG(LS_WARNING) << "AddDataChannel: no peer connection";
-    return;
-  }
-  if (data_channel_) {
-    RTC_LOG(LS_WARNING) << "AddDataChannel: data channel already exists";
-    return;
-  }
-
-  webrtc::DataChannelInit config;
-  config.ordered = true;
-  config.negotiated = true;
-  config.id = 0;
-
-  auto dc_or_error = peer_connection_->CreateDataChannelOrError("chat", &config);
-  if (!dc_or_error.ok()) {
-    RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
-                      << dc_or_error.error().message();
-    return;
-  }
-
-  data_channel_ = std::move(dc_or_error.value());
-  data_channel_->RegisterObserver(this);
-  RTC_LOG(LS_INFO) << "DataChannel created - label: " << data_channel_->label()
-                   << " - state: " << data_channel_->state();
+  dc_manager_->Add(peer_connection_.get());
 }
 
 void WebRTCEngine::SendMessage(const std::string& json_object) {
@@ -2992,10 +4119,10 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
   // If no message is currently being sent, pop and send the front now.
   // Otherwise, the pending message will be picked up by OnMessageSent when
   // the current send completes.
-  if (!signaling_client_.IsSendingMessage()) {
+  if (!signaling_->IsSendingMessage()) {
     msg = pending_messages_.front();
     pending_messages_.pop_front();
-    if (!signaling_client_.SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
+    if (!signaling_->SendToPeer(peer_id_, *msg) && peer_id_ != -1) {
       RTC_LOG(LS_ERROR) << "SendToPeer failed";
       DisconnectFromServer();
     }
@@ -3003,65 +4130,57 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
   }
 }
 
-// ==================== SHM Renderers ====================
-
-void WebRTCEngine::StartLocalShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (local_video_sink_) {
-    RTC_LOG(LS_WARNING) << "Local SHM renderer already started";
-    return;
-  }
-  local_video_sink_ = std::make_unique<ShmVideoSink>(shm_key_path() + "_local",
-                                                       SHM_PROJ_ID + 1);
-  track->AddOrUpdateSink(local_video_sink_.get(), webrtc::VideoSinkWants());
-  RTC_LOG(LS_INFO) << "Local SHM renderer started";
-}
-
-void WebRTCEngine::StopLocalShmRenderer() {
-  if (local_video_sink_) {
-    // The sink is removed from the track before destruction.
-    local_video_sink_.reset();
-    RTC_LOG(LS_INFO) << "Local SHM renderer stopped";
-  }
-}
-
-void WebRTCEngine::StartRemoteShmRenderer(webrtc::VideoTrackInterface* track) {
-  if (remote_video_sink_) {
-    RTC_LOG(LS_WARNING) << "Remote SHM renderer already started";
-    return;
-  }
-  remote_video_sink_ = std::make_unique<ShmVideoSink>(shm_key_path() + "_remote",
-                                                        SHM_PROJ_ID + 2);
-  track->AddOrUpdateSink(remote_video_sink_.get(), webrtc::VideoSinkWants());
-  RTC_LOG(LS_INFO) << "Remote SHM renderer started";
-}
-
-void WebRTCEngine::StopRemoteShmRenderer() {
-  if (remote_video_sink_) {
-    remote_video_sink_.reset();
-    RTC_LOG(LS_INFO) << "Remote SHM renderer stopped";
-  }
-}
-
-void WebRTCEngine::StartRemoteAudioShmRenderer(
-    webrtc::AudioTrackInterface* track) {
-  if (remote_audio_sink_) {
-    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
-    return;
-  }
-  remote_audio_sink_ = std::make_unique<ShmAudioSink>(
-      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_sink_.get());
-  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
-}
-
-void WebRTCEngine::StopRemoteAudioShmRenderer() {
-  if (remote_audio_sink_) {
-    remote_audio_sink_.reset();
-    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
-  }
-}
-
 #pragma GCC diagnostic pop
+
+========== ./data_channel_manager.h ==========
+Lines: 46
+
+#ifndef APPS_PEERCONNECTION_CLIENT_DATA_CHANNEL_MANAGER_H_
+#define APPS_PEERCONNECTION_CLIENT_DATA_CHANNEL_MANAGER_H_
+
+#include <functional>
+#include <string>
+
+#include "api/data_channel_interface.h"
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
+
+// Manages the lifecycle of a single negotiated DataChannel.
+// Implements DataChannelObserver to receive state changes and messages.
+class DataChannelManager : public webrtc::DataChannelObserver {
+ public:
+  using EventCallback = std::function<void(const std::string& json)>;
+
+  DataChannelManager();
+  ~DataChannelManager() override;
+
+  void SetEventCallback(EventCallback cb);
+
+  // Create the local DataChannel on the given PeerConnection.
+  bool Add(webrtc::PeerConnectionInterface* pc);
+
+  // Handle an incoming DataChannel from the remote peer.
+  void OnRemoteDataChannel(
+      webrtc::scoped_refptr<webrtc::DataChannelInterface> channel);
+
+  // Send text through the DataChannel.
+  void Send(const std::string& text);
+
+  // Release the DataChannel.
+  void Shutdown();
+
+  // DataChannelObserver
+  void OnStateChange() override;
+  void OnMessage(const webrtc::DataBuffer& buffer) override;
+  void OnBufferedAmountChange(uint64_t) override {}
+  bool IsOkToCallOnTheNetworkThread() override { return false; }
+
+ private:
+  webrtc::scoped_refptr<webrtc::DataChannelInterface> channel_;
+  EventCallback event_cb_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_DATA_CHANNEL_MANAGER_H_
 
 ========== ./shm_audio_writer.cc ==========
 Lines: 82
@@ -3149,14 +4268,207 @@ bool ShmAudioWriter::WriteFrame(const AudioFrameHead& head, const uint8_t* data)
 #pragma GCC diagnostic pop
 }
 
+========== ./shm_audio_renderer.h ==========
+Lines: 42
+
+#ifndef APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
+#define APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
+
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <vector>
+
+#include "api/media_stream_interface.h"
+#include "apps/peerconnection/client/shm_audio_writer.h"
+#include "apps/peerconnection/client/shm_common.h"
+
+// Renders remote audio to shared memory for an external Qt process.
+// Runs a dedicated IO thread to avoid blocking the WebRTC signaling thread.
+class ShmAudioRenderer : public webrtc::AudioTrackSinkInterface {
+ public:
+  ShmAudioRenderer(const std::string& key_path, int proj_id);
+  ~ShmAudioRenderer() override;
+  void OnData(const void* audio_data, int bits_per_sample,
+              int sample_rate, size_t number_of_channels,
+              size_t number_of_frames,
+              std::optional<int64_t> absolute_capture_timestamp_ms) override;
+
+ private:
+  struct PendingAudio {
+    AudioFrameHead head;
+    std::vector<uint8_t> data;
+  };
+
+  void IoLoop();
+
+  std::unique_ptr<ShmAudioWriter> writer_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::optional<PendingAudio> pending_;
+  bool stopped_ = false;
+  std::thread io_thread_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
+
+========== ./json_helpers.h ==========
+Lines: 33
+
+#ifndef APPS_PEERCONNECTION_CLIENT_JSON_HELPERS_H_
+#define APPS_PEERCONNECTION_CLIENT_JSON_HELPERS_H_
+
+#include <string>
+
+#include "api/data_channel_interface.h"
+#include "api/peer_connection_interface.h"
+#include "apps/peerconnection/client/signaling_interface.h"
+
+// JSON field names for ICE candidate serialization.
+extern const char kCandidateSdpMidName[];
+extern const char kCandidateSdpMlineIndexName[];
+extern const char kCandidateSdpName[];
+
+// JSON field names for SessionDescription serialization.
+extern const char kSessionDescriptionTypeName[];
+extern const char kSessionDescriptionSdpName[];
+
+// Escapes special characters for JSON string values.
+std::string EscapeJsonString(const std::string& input);
+
+// Builds a {"event":"peer_list","peers":[...]} JSON string.
+std::string BuildPeerListJson(const Peers& peers);
+
+// Converts ICE connection state enum to string.
+const char* IceConnectionStateToString(
+    webrtc::PeerConnectionInterface::IceConnectionState state);
+
+// Converts DataChannel state enum to string.
+const char* DataChannelStateToString(
+    webrtc::DataChannelInterface::DataState state);
+
+#endif  // APPS_PEERCONNECTION_CLIENT_JSON_HELPERS_H_
+
+========== ./shm_video_renderer.cc ==========
+Lines: 104
+
+#include "apps/peerconnection/client/shm_video_renderer.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <cstring>
+
+#include "common_video/libyuv/include/webrtc_libyuv.h"
+#include "rtc_base/logging.h"
+
+ShmVideoRenderer::ShmVideoRenderer(const std::string& key_path,
+                                     int proj_id)
+    : writer_(std::make_unique<ShmVideoWriter>()),
+      io_thread_(&ShmVideoRenderer::IoLoop, this) {
+  if (!writer_->Init(key_path, proj_id)) {
+    RTC_LOG(LS_ERROR) << "ShmVideoRenderer: ShmVideoWriter::Init failed for "
+                      << key_path;
+  }
+}
+
+ShmVideoRenderer::~ShmVideoRenderer() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopped_ = true;
+  }
+  cv_.notify_all();
+  if (io_thread_.joinable()) {
+    io_thread_.join();
+  }
+}
+
+void ShmVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
+  webrtc::scoped_refptr<webrtc::I420BufferInterface> i420 =
+      frame.video_frame_buffer()->ToI420();
+  if (!i420) {
+    RTC_LOG(LS_WARNING) << "ShmVideoRenderer::OnFrame: ToI420 returned null";
+    return;
+  }
+
+  int width = i420->width();
+  int height = i420->height();
+  int half_width = (width + 1) / 2;
+  int y_size = i420->StrideY() * height;
+  int u_size = i420->StrideU() * ((height + 1) / 2);
+  int v_size = i420->StrideV() * ((height + 1) / 2);
+  int total_size = y_size + u_size + v_size;
+
+  FrameData fd;
+  fd.head.ntp_time_ms = frame.ntp_time_ms();
+  fd.head.width = static_cast<uint16_t>(width);
+  fd.head.height = static_cast<uint16_t>(height);
+  fd.head.frame_type = 0;
+  fd.head.rotation = frame.rotation();
+  fd.head.frame_len = static_cast<uint32_t>(total_size);
+  fd.i420_data.resize(total_size);
+
+  // Copy Y plane (respecting stride)
+  const uint8_t* src_y = i420->DataY();
+  uint8_t* dst = fd.i420_data.data();
+  for (int row = 0; row < height; ++row) {
+    std::memcpy(dst, src_y, width);
+    dst += width;
+    src_y += i420->StrideY();
+  }
+  // Copy U plane (respecting stride)
+  const uint8_t* src_u = i420->DataU();
+  for (int row = 0; row < (height + 1) / 2; ++row) {
+    std::memcpy(dst, src_u, half_width);
+    dst += half_width;
+    src_u += i420->StrideU();
+  }
+  // Copy V plane (respecting stride)
+  const uint8_t* src_v = i420->DataV();
+  for (int row = 0; row < (height + 1) / 2; ++row) {
+    std::memcpy(dst, src_v, half_width);
+    dst += half_width;
+    src_v += i420->StrideV();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_ = std::move(fd);
+  }
+  cv_.notify_one();
+}
+
+void ShmVideoRenderer::IoLoop() {
+  while (true) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
+    if (stopped_) {
+      return;
+    }
+    if (pending_.has_value()) {
+      FrameData fd = std::move(*pending_);
+      pending_.reset();
+      lock.unlock();
+      writer_->WriteFrame(fd.head, fd.i420_data.data());
+    }
+  }
+}
+
+#pragma GCC diagnostic pop
+
 ========== ./main.cc ==========
-Lines: 71
+Lines: 100
 
 // main.cc
 #include <cstdio>
+#include <dirent.h>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sys/stat.h>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -3167,6 +4479,7 @@ Lines: 71
 #include "apps/peerconnection/client/flag_defs.h"
 #include "apps/peerconnection/client/unix_socket_server.h"
 #include "apps/peerconnection/client/webrtc_engine.h"
+#include "rtc_base/log_sinks.h"
 #include "rtc_base/physical_socket_server.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
@@ -3188,8 +4501,35 @@ int main(int argc, char* argv[]) {
   webrtc::ThreadManager::Instance()->SetCurrentThread(main_thread.get());
   webrtc::InitializeSSL();
 
-  // Create engine with no-op callback (set later)
-  WebRTCEngine engine(env, nullptr);
+  // All runtime files (socket, SHM, logs) live under WEBRTC_RUNTIME_DIR.
+  const char* rt_dir_env = getenv("WEBRTC_RUNTIME_DIR");
+  std::string runtime_dir = rt_dir_env ? rt_dir_env : "/tmp/webrtc_runtime";
+  mkdir(runtime_dir.c_str(), 0755);
+
+  // Find next available log index so restarts don't overwrite crash logs
+  int log_index = 0;
+  {
+    DIR* dir = opendir(runtime_dir.c_str());
+    if (dir) {
+      struct dirent* ent;
+      while ((ent = readdir(dir))) {
+        int n = 0;
+        if (sscanf(ent->d_name, "daemon_%d.", &n) == 1 && n >= log_index)
+          log_index = n + 1;
+      }
+      closedir(dir);
+    }
+  }
+  std::string log_prefix = "daemon_" + std::to_string(log_index);
+  webrtc::FileRotatingLogSink log_sink(runtime_dir, log_prefix,
+                                        10 * 1024 * 1024, 5);
+  log_sink.Init();
+  log_sink.DisableBuffering();  // flush every line for crash triage
+  webrtc::LogMessage::AddLogToStream(&log_sink, webrtc::LS_INFO);
+  RTC_LOG(LS_INFO) << "Logging to: " << runtime_dir << "/"
+                   << log_prefix << ".0.log";
+
+  WebRTCEngine engine(env);
 
   if (!engine.Init()) {
     std::cerr << "Failed to initialize WebRTC engine" << std::endl;
@@ -3207,12 +4547,9 @@ int main(int argc, char* argv[]) {
     main_thread->PostTask([&] { cli.Run(); });
     main_thread->Run();
   } else {
-    const char* runtime_dir = getenv("WEBRTC_RUNTIME_DIR");
-    std::string sock_path = std::string(runtime_dir ? runtime_dir : "/tmp/webrtc_runtime") + "/webrtc_ctrl.sock";
+    std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
     UnixSocketServer unix_server(sock_path, &engine);
-    engine.SetEventCallback([&](const std::string& json) {
-      unix_server.SendToClient(json);
-    });
+    engine.RegisterObserver(&unix_server);
     unix_server.Start();
     std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
     unix_server.Wait();
@@ -3221,11 +4558,94 @@ int main(int argc, char* argv[]) {
   engine.Shutdown();
   webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);
   webrtc::CleanupSSL();
+
+  webrtc::LogMessage::RemoveLogToStream(&log_sink);
   return 0;
 }
 
+========== ./json_helpers.cc ==========
+Lines: 77
+
+#include "apps/peerconnection/client/json_helpers.h"
+
+#include <string>
+
+// JSON field names for ICE candidate serialization.
+const char kCandidateSdpMidName[] = "sdpMid";
+const char kCandidateSdpMlineIndexName[] = "sdpMLineIndex";
+const char kCandidateSdpName[] = "candidate";
+
+// JSON field names for SessionDescription serialization.
+const char kSessionDescriptionTypeName[] = "type";
+const char kSessionDescriptionSdpName[] = "sdp";
+
+std::string EscapeJsonString(const std::string& input) {
+  std::string output;
+  output.reserve(input.size());
+  for (char c : input) {
+    switch (c) {
+      case '"':  output += "\\\""; break;
+      case '\\': output += "\\\\"; break;
+      case '\b': output += "\\b";  break;
+      case '\f': output += "\\f";  break;
+      case '\n': output += "\\n";  break;
+      case '\r': output += "\\r";  break;
+      case '\t': output += "\\t";  break;
+      default:   output += c;      break;
+    }
+  }
+  return output;
+}
+
+std::string BuildPeerListJson(const Peers& peers) {
+  std::string json = R"({"event":"peer_list","peers":[)";
+  bool first = true;
+  for (const auto& p : peers) {
+    if (!first)
+      json += ",";
+    first = false;
+    json += "{\"id\":" + std::to_string(p.first) +
+            ",\"name\":\"" + p.second + "\"}";
+  }
+  json += "]}";
+  return json;
+}
+
+const char* IceConnectionStateToString(
+    webrtc::PeerConnectionInterface::IceConnectionState state) {
+  switch (state) {
+    case webrtc::PeerConnectionInterface::kIceConnectionNew:
+      return "new";
+    case webrtc::PeerConnectionInterface::kIceConnectionChecking:
+      return "checking";
+    case webrtc::PeerConnectionInterface::kIceConnectionConnected:
+      return "connected";
+    case webrtc::PeerConnectionInterface::kIceConnectionCompleted:
+      return "completed";
+    case webrtc::PeerConnectionInterface::kIceConnectionFailed:
+      return "failed";
+    case webrtc::PeerConnectionInterface::kIceConnectionDisconnected:
+      return "disconnected";
+    case webrtc::PeerConnectionInterface::kIceConnectionClosed:
+      return "closed";
+    default:
+      return "unknown";
+  }
+}
+
+const char* DataChannelStateToString(
+    webrtc::DataChannelInterface::DataState s) {
+  switch (s) {
+    case webrtc::DataChannelInterface::kConnecting: return "connecting";
+    case webrtc::DataChannelInterface::kOpen:        return "open";
+    case webrtc::DataChannelInterface::kClosing:     return "closing";
+    case webrtc::DataChannelInterface::kClosed:      return "closed";
+    default:                                         return "unknown";
+  }
+}
+
 ========== ./cli_runner.cc ==========
-Lines: 109
+Lines: 108
 
 // cli_runner.cc
 #include "cli_runner.h"
@@ -3233,10 +4653,9 @@ Lines: 109
 #include <iostream>
 #include <sstream>
 
-#include "apps/peerconnection/client/webrtc_engine.h"
-#include "rtc_base/logging.h"
+#include "apps/peerconnection/client/engine_controller.h"
 
-CliRunner::CliRunner(WebRTCEngine* engine,
+CliRunner::CliRunner(EngineController* engine,
                      const std::string& server,
                      int port,
                      bool autoconnect,
@@ -3249,26 +4668,26 @@ CliRunner::CliRunner(WebRTCEngine* engine,
 
 CliRunner::~CliRunner() { Stop(); }
 
-void CliRunner::Run() {
-  // Wire engine events to stdout; also handle auto-call
-  engine_->SetEventCallback([this](const std::string& json) {
-    std::cout << "[event] " << json << std::endl;
-    PrintPrompt();
-    // Auto-call: when a peer appears and autocall is set, call the first peer
-    if (autocall_ && !engine_->connection_active()) {
-      // Look for "peer_online" event to extract peer_id
-      auto pos = json.find("\"peer_online\"");
-      if (pos != std::string::npos) {
-        auto id_pos = json.find("\"id\":");
-        if (id_pos != std::string::npos) {
-          int id = std::stoi(json.substr(id_pos + 5));
-          std::cout << "Auto-calling peer " << id << "..." << std::endl;
-          engine_->ConnectToPeer(id);
-          autocall_ = false;  // only auto-call once
-        }
+void CliRunner::OnEngineEvent(const std::string& json) {
+  std::cout << "[event] " << json << std::endl;
+  PrintPrompt();
+
+  if (autocall_ && !engine_->connection_active()) {
+    auto pos = json.find("\"peer_online\"");
+    if (pos != std::string::npos) {
+      auto id_pos = json.find("\"id\":");
+      if (id_pos != std::string::npos) {
+        int id = std::stoi(json.substr(id_pos + 5));
+        std::cout << "Auto-calling peer " << id << "..." << std::endl;
+        engine_->ConnectToPeer(id);
+        autocall_ = false;
       }
     }
-  });
+  }
+}
+
+void CliRunner::Run() {
+  engine_->RegisterObserver(this);
 
   std::cout << "=== WebRTC CLI (standalone mode) ===" << std::endl;
   std::cout << "Commands: connect, disconnect, call <id>, hangup, mute, unmute, pause, resume, send <text>, quit" << std::endl;
@@ -3337,6 +4756,368 @@ void CliRunner::HandleInput(const std::string& line) {
   }
 }
 
+========== ./rk_mpp_stubs.cc ==========
+Lines: 314
+
+// rk_mpp_stubs.cc — Wrapper functions for MPP symbols resolved via dlopen.
+// The real MPP functions are loaded at runtime via dlsym with RTLD_GLOBAL.
+// These wrappers satisfy the linker at build time and delegate to dlsym'd
+// function pointers at runtime.
+
+#include <dlfcn.h>
+
+// Include MPP headers for type definitions
+extern "C" {
+#include "mpp_buffer.h"
+#include "mpp_err.h"
+#include "mpp_frame.h"
+#include "mpp_meta.h"
+#include "mpp_packet.h"
+#include "rk_mpi.h"
+#include "rk_venc_cfg.h"
+}
+
+// Undefine macros that could interfere with our wrapper definitions
+#undef mpp_buffer_get
+#undef mpp_buffer_put
+#undef mpp_buffer_get_ptr
+#undef mpp_buffer_inc_ref
+#undef mpp_buffer_commit
+#undef mpp_buffer_import
+#undef mpp_buffer_get_fd
+#undef mpp_buffer_get_fd_with_caller
+#undef mpp_buffer_get_size
+#undef mpp_buffer_get_index
+#undef mpp_buffer_read
+#undef mpp_buffer_write
+#undef mpp_buffer_sync_begin
+#undef mpp_buffer_sync_end
+#undef mpp_buffer_group_get_internal
+#undef mpp_buffer_group_get_external
+
+// ── Function pointer table ──────────────────────────────
+static struct {
+  bool resolved = false;
+  void* lib = nullptr;
+
+  // rk_mpi.h
+  MPP_RET (*create)(MppCtx*, MppApi**);
+  MPP_RET (*init)(MppCtx, MppCtxType, MppCodingType);
+  MPP_RET (*destroy)(MppCtx);
+
+  // mpp_buffer.h
+  MPP_RET (*buffer_group_get)(MppBufferGroup*, MppBufferType, MppBufferMode,
+                              const char*, const char*);
+  MPP_RET (*buffer_group_put)(MppBufferGroup);
+  MPP_RET (*buffer_group_limit_config)(MppBufferGroup, size_t, RK_S32);
+  MPP_RET (*buffer_get_with_tag)(MppBufferGroup, MppBuffer*, size_t,
+                                 const char*, const char*);
+  MPP_RET (*buffer_put_with_caller)(MppBuffer, const char*);
+  void*   (*buffer_get_ptr_with_caller)(MppBuffer, const char*);
+  int     (*buffer_get_fd_with_caller)(MppBuffer, const char*);
+
+  // rk_venc_cfg.h
+  MPP_RET (*enc_cfg_init)(MppEncCfg*);
+  MPP_RET (*enc_cfg_set_s32)(MppEncCfg, const char*, RK_S32);
+  MPP_RET (*enc_cfg_deinit)(MppEncCfg);
+
+  // mpp_packet.h
+  MPP_RET (*packet_init)(MppPacket*, void*, size_t);
+  MPP_RET (*packet_init_with_buffer)(MppPacket*, MppBuffer);
+  MPP_RET (*packet_deinit)(MppPacket*);
+  void*   (*packet_get_pos)(const MppPacket);
+  size_t  (*packet_get_length)(const MppPacket);
+  void    (*packet_set_length)(MppPacket, size_t);
+  MPP_RET (*packet_set_eos)(MppPacket);
+
+  // mpp_frame.h
+  MPP_RET (*frame_init)(MppFrame*);
+  MPP_RET (*frame_deinit)(MppFrame*);
+  void    (*frame_set_width)(MppFrame, RK_U32);
+  void    (*frame_set_height)(MppFrame, RK_U32);
+  void    (*frame_set_hor_stride)(MppFrame, RK_U32);
+  void    (*frame_set_ver_stride)(MppFrame, RK_U32);
+  void    (*frame_set_fmt)(MppFrame, MppFrameFormat);
+  void    (*frame_set_buffer)(MppFrame, MppBuffer);
+  void    (*frame_set_eos)(MppFrame, RK_U32);
+  MppBuffer (*frame_get_buffer)(const MppFrame);
+  MppMeta  (*frame_get_meta)(const MppFrame);
+  RK_U32  (*frame_get_info_change)(const MppFrame);
+  RK_U32  (*frame_get_width)(const MppFrame);
+  RK_U32  (*frame_get_height)(const MppFrame);
+  RK_U32  (*frame_get_hor_stride)(const MppFrame);
+  RK_U32  (*frame_get_ver_stride)(const MppFrame);
+  size_t  (*frame_get_buf_size)(const MppFrame);
+
+  // mpp_meta.h
+  MPP_RET (*meta_set_packet)(MppMeta, MppMetaKey, MppPacket);
+} mpp;
+
+// ── Lazy resolution ─────────────────────────────────────
+// Called once before any MPP function use. Returns true if the
+// real librockchip_mpp.so was loaded and all symbols resolved.
+
+bool MppLibLoad() {
+  if (mpp.resolved) return true;
+
+  mpp.lib = dlopen("librockchip_mpp.so.1", RTLD_NOW | RTLD_GLOBAL);
+  if (!mpp.lib) {
+    mpp.lib = dlopen("librockchip_mpp.so", RTLD_NOW | RTLD_GLOBAL);
+  }
+  if (!mpp.lib) return false;
+
+  #define LOAD(name)                                                    \
+    mpp.name = reinterpret_cast<decltype(mpp.name)>(dlsym(mpp.lib, "mpp_" #name)); \
+    if (!mpp.name) { dlclose(mpp.lib); mpp.lib = nullptr; return false; }
+
+  LOAD(create);
+  LOAD(init);
+  LOAD(destroy);
+  LOAD(buffer_group_get);
+  LOAD(buffer_group_put);
+  LOAD(buffer_group_limit_config);
+  LOAD(buffer_get_with_tag);
+  LOAD(buffer_put_with_caller);
+  LOAD(buffer_get_ptr_with_caller);
+  LOAD(buffer_get_fd_with_caller);
+  LOAD(enc_cfg_init);
+  LOAD(enc_cfg_set_s32);
+  LOAD(enc_cfg_deinit);
+  LOAD(packet_init);
+  LOAD(packet_init_with_buffer);
+  LOAD(packet_deinit);
+  LOAD(packet_get_pos);
+  LOAD(packet_get_length);
+  LOAD(packet_set_length);
+  LOAD(packet_set_eos);
+  LOAD(frame_init);
+  LOAD(frame_deinit);
+  LOAD(frame_set_width);
+  LOAD(frame_set_height);
+  LOAD(frame_set_hor_stride);
+  LOAD(frame_set_ver_stride);
+  LOAD(frame_set_fmt);
+  LOAD(frame_set_buffer);
+  LOAD(frame_set_eos);
+  LOAD(frame_get_buffer);
+  LOAD(frame_get_info_change);
+  LOAD(frame_get_width);
+  LOAD(frame_get_height);
+  LOAD(frame_get_hor_stride);
+  LOAD(frame_get_ver_stride);
+  LOAD(frame_get_buf_size);
+  LOAD(frame_get_meta);
+  LOAD(meta_set_packet);
+
+  #undef LOAD
+
+  mpp.resolved = true;
+  return true;
+}
+
+// ── Wrapper functions (extern "C" — match MPP SDK declarations) ──
+extern "C" {
+
+MPP_RET mpp_create(MppCtx* ctx, MppApi** mpi_result) {
+  return mpp.create(ctx, mpi_result);
+}
+
+MPP_RET mpp_init(MppCtx ctx, MppCtxType type, MppCodingType coding) {
+  return mpp.init(ctx, type, coding);
+}
+
+MPP_RET mpp_destroy(MppCtx ctx) {
+  return mpp.destroy(ctx);
+}
+
+MPP_RET mpp_buffer_group_get(MppBufferGroup* group, MppBufferType type,
+                             MppBufferMode mode, const char* tag, const char* caller) {
+  return mpp.buffer_group_get(group, type, mode, tag, caller);
+}
+
+MPP_RET mpp_buffer_group_put(MppBufferGroup group) {
+  return mpp.buffer_group_put(group);
+}
+
+MPP_RET mpp_buffer_group_limit_config(MppBufferGroup group, size_t size, RK_S32 count) {
+  return mpp.buffer_group_limit_config(group, size, count);
+}
+
+MPP_RET mpp_buffer_get_with_tag(MppBufferGroup group, MppBuffer* buffer, size_t size,
+                                const char* tag, const char* caller) {
+  return mpp.buffer_get_with_tag(group, buffer, size, tag, caller);
+}
+
+MPP_RET mpp_buffer_put_with_caller(MppBuffer buffer, const char* caller) {
+  return mpp.buffer_put_with_caller(buffer, caller);
+}
+
+void* mpp_buffer_get_ptr_with_caller(MppBuffer buffer, const char* caller) {
+  return mpp.buffer_get_ptr_with_caller(buffer, caller);
+}
+
+int mpp_buffer_get_fd_with_caller(MppBuffer buffer, const char* caller) {
+  return mpp.buffer_get_fd_with_caller(buffer, caller);
+}
+
+MPP_RET mpp_enc_cfg_init(MppEncCfg* cfg) {
+  return mpp.enc_cfg_init(cfg);
+}
+
+MPP_RET mpp_enc_cfg_set_s32(MppEncCfg cfg, const char* name, RK_S32 val) {
+  return mpp.enc_cfg_set_s32(cfg, name, val);
+}
+
+MPP_RET mpp_enc_cfg_deinit(MppEncCfg cfg) {
+  return mpp.enc_cfg_deinit(cfg);
+}
+
+MPP_RET mpp_packet_init(MppPacket* packet, void* data, size_t size) {
+  return mpp.packet_init(packet, data, size);
+}
+
+MPP_RET mpp_packet_deinit(MppPacket* packet) {
+  return mpp.packet_deinit(packet);
+}
+
+void* mpp_packet_get_pos(const MppPacket packet) {
+  return mpp.packet_get_pos(packet);
+}
+
+size_t mpp_packet_get_length(const MppPacket packet) {
+  return mpp.packet_get_length(packet);
+}
+
+void mpp_packet_set_length(MppPacket packet, size_t size) {
+  mpp.packet_set_length(packet, size);
+}
+
+MPP_RET mpp_packet_set_eos(MppPacket packet) {
+  return mpp.packet_set_eos(packet);
+}
+
+MPP_RET mpp_packet_init_with_buffer(MppPacket* packet, MppBuffer buffer) {
+  return mpp.packet_init_with_buffer(packet, buffer);
+}
+
+MPP_RET mpp_frame_init(MppFrame* frame) {
+  return mpp.frame_init(frame);
+}
+
+MPP_RET mpp_frame_deinit(MppFrame* frame) {
+  return mpp.frame_deinit(frame);
+}
+
+void mpp_frame_set_width(MppFrame frame, RK_U32 width) {
+  mpp.frame_set_width(frame, width);
+}
+
+void mpp_frame_set_height(MppFrame frame, RK_U32 height) {
+  mpp.frame_set_height(frame, height);
+}
+
+void mpp_frame_set_hor_stride(MppFrame frame, RK_U32 stride) {
+  mpp.frame_set_hor_stride(frame, stride);
+}
+
+void mpp_frame_set_ver_stride(MppFrame frame, RK_U32 stride) {
+  mpp.frame_set_ver_stride(frame, stride);
+}
+
+void mpp_frame_set_fmt(MppFrame frame, MppFrameFormat fmt) {
+  mpp.frame_set_fmt(frame, fmt);
+}
+
+void mpp_frame_set_buffer(MppFrame frame, MppBuffer buffer) {
+  mpp.frame_set_buffer(frame, buffer);
+}
+
+void mpp_frame_set_eos(MppFrame frame, RK_U32 eos) {
+  mpp.frame_set_eos(frame, eos);
+}
+
+MppBuffer mpp_frame_get_buffer(const MppFrame frame) {
+  return mpp.frame_get_buffer(frame);
+}
+
+RK_U32 mpp_frame_get_info_change(const MppFrame frame) {
+  return mpp.frame_get_info_change(frame);
+}
+
+RK_U32 mpp_frame_get_width(const MppFrame frame) {
+  return mpp.frame_get_width(frame);
+}
+
+RK_U32 mpp_frame_get_height(const MppFrame frame) {
+  return mpp.frame_get_height(frame);
+}
+
+RK_U32 mpp_frame_get_hor_stride(const MppFrame frame) {
+  return mpp.frame_get_hor_stride(frame);
+}
+
+RK_U32 mpp_frame_get_ver_stride(const MppFrame frame) {
+  return mpp.frame_get_ver_stride(frame);
+}
+
+size_t mpp_frame_get_buf_size(const MppFrame frame) {
+  return mpp.frame_get_buf_size(frame);
+}
+
+MppMeta mpp_frame_get_meta(const MppFrame frame) {
+  return mpp.frame_get_meta(frame);
+}
+
+MPP_RET mpp_meta_set_packet(MppMeta meta, MppMetaKey key, MppPacket packet) {
+  return mpp.meta_set_packet(meta, key, packet);
+}
+
+}  // extern "C"
+
+========== ./shm_video_renderer.h ==========
+Lines: 40
+
+#ifndef APPS_PEERCONNECTION_CLIENT_SHM_VIDEO_RENDERER_H_
+#define APPS_PEERCONNECTION_CLIENT_SHM_VIDEO_RENDERER_H_
+
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <vector>
+
+#include "api/video/video_frame.h"
+#include "api/video/video_sink_interface.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/client/shm_video_writer.h"
+
+// Renders video frames to shared memory for an external Qt process.
+// Runs a dedicated IO thread to avoid blocking the WebRTC signaling thread.
+class ShmVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+ public:
+  ShmVideoRenderer(const std::string& key_path, int proj_id);
+  ~ShmVideoRenderer() override;
+  void OnFrame(const webrtc::VideoFrame& frame) override;
+
+ private:
+  struct FrameData {
+    std::vector<uint8_t> i420_data;
+    VideoFrameHead head;
+  };
+
+  void IoLoop();
+
+  std::unique_ptr<ShmVideoWriter> writer_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::optional<FrameData> pending_;
+  bool stopped_ = false;
+  std::thread io_thread_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_SHM_VIDEO_RENDERER_H_
+
 ========== ./shm_audio_writer.h ==========
 Lines: 22
 
@@ -3363,8 +5144,78 @@ private:
     bool m_inited{false};
 };
 
+========== ./shm_audio_capturer.cc ==========
+Lines: 66
+
+#include "apps/peerconnection/client/shm_audio_capturer.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <cstddef>
+#include <vector>
+
+#include "api/make_ref_counted.h"
+#include "rtc_base/logging.h"
+
+webrtc::scoped_refptr<ShmAudioCapturer>
+ShmAudioCapturer::Create(const std::string& key_path, int proj_id) {
+  auto source = webrtc::make_ref_counted<ShmAudioCapturer>();
+  if (!source->reader_.Init(key_path, proj_id)) {
+    RTC_LOG(LS_ERROR) << "ShmAudioCapturer: ShmAudioReader::Init failed for "
+                      << key_path;
+    return nullptr;
+  }
+  source->running_ = true;
+  source->capture_thread_ =
+      std::thread(&ShmAudioCapturer::CaptureLoop, source.get());
+  return source;
+}
+
+ShmAudioCapturer::~ShmAudioCapturer() {
+  running_ = false;
+  reader_.RequestStop();
+  if (capture_thread_.joinable()) {
+    capture_thread_.join();
+  }
+}
+
+void ShmAudioCapturer::AddSink(webrtc::AudioTrackSinkInterface* sink) {
+  std::lock_guard<std::mutex> lock(sinks_mutex_);
+  sinks_.push_back(sink);
+}
+
+void ShmAudioCapturer::RemoveSink(webrtc::AudioTrackSinkInterface* sink) {
+  std::lock_guard<std::mutex> lock(sinks_mutex_);
+  sinks_.erase(std::remove(sinks_.begin(), sinks_.end(), sink), sinks_.end());
+}
+
+void ShmAudioCapturer::CaptureLoop() {
+  std::vector<uint8_t> buf(AUDIO_FRAME_MAX_SIZE);
+  while (running_) {
+    AudioFrameHead head;
+    if (!reader_.ReadFrame(head, buf.data(), AUDIO_FRAME_MAX_SIZE)) {
+      break;
+    }
+
+    std::lock_guard<std::mutex> lock(sinks_mutex_);
+    for (auto* sink : sinks_) {
+      if (sink) {
+        sink->OnData(buf.data(), head.bits_per_sample,
+                     static_cast<int>(head.sample_rate), head.channels,
+                     head.frame_len /
+                         (head.channels * (head.bits_per_sample / 8)),
+                     head.ntp_time_ms);
+      }
+    }
+  }
+}
+
+#pragma GCC diagnostic pop
+
 ========== ./peer_connection_client.h ==========
-Lines: 131
+Lines: 116
 
 /*
  *  Copyright 2011 The WebRTC Project Authors. All rights reserved.
@@ -3380,32 +5231,16 @@ Lines: 131
 #define APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
 
 #include <cstddef>
-#include <map>
 #include <memory>
 #include <string>
 
 #include "api/async_dns_resolver.h"
 #include "api/task_queue/pending_task_safety_flag.h"
+#include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/socket.h"
 #include "rtc_base/socket_address.h"
 
-typedef std::map<int, std::string> Peers;
-
-struct PeerConnectionClientObserver {
-  virtual void OnSignedIn() = 0;  // Called when we're logged on.
-  virtual void OnDisconnected() = 0;
-  virtual void OnPeerConnected(int id, const std::string& name) = 0;
-  virtual void OnPeerDisconnected(int peer_id) = 0;
-  virtual void OnPeerBusy(int peer_id) = 0;
-  virtual void OnMessageFromPeer(int peer_id, const std::string& message) = 0;
-  virtual void OnMessageSent(int err) = 0;
-  virtual void OnServerConnectionFailure() = 0;
-
- protected:
-  virtual ~PeerConnectionClientObserver() {}
-};
-
-class PeerConnectionClient {
+class PeerConnectionClient : public SignalingInterface {
  public:
   enum State {
     NOT_CONNECTED,
@@ -3419,25 +5254,26 @@ class PeerConnectionClient {
   PeerConnectionClient();
   ~PeerConnectionClient();
 
-  int id() const;
-  bool is_connected() const;
-  const Peers& peers() const;
+  int id() const override;
+  bool is_connected() const override;
+  const Peers& peers() const override;
 
-  void RegisterObserver(PeerConnectionClientObserver* callback);
+  void RegisterObserver(PeerConnectionClientObserver* callback) override;
 
   void Connect(const std::string& server,
                int port,
-               const std::string& client_name);
+               const std::string& client_name) override;
 
-  bool SendToPeer(int peer_id, const std::string& message);
-  bool SendHangUp(int peer_id);
-  bool IsSendingMessage();
+  bool SendToPeer(int peer_id, const std::string& message) override;
+  bool SendHangUp(int peer_id) override;
+  void SendHangUpConfirm() override;
+  bool IsSendingMessage() override;
 
-  bool SignOut();
+  bool SignOut() override;
+  void Close() override;
 
  protected:
   void DoConnect();
-  void Close();
   void InitSocketSignals();
   bool ConnectControlSocket();
   void OnConnect(webrtc::Socket* socket);
@@ -3499,7 +5335,7 @@ class PeerConnectionClient {
 #endif  // APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
 
 ========== ./webrtc_engine.h ==========
-Lines: 245
+Lines: 144
 
 // webrtc_engine.h
 #ifndef APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
@@ -3507,7 +5343,6 @@ Lines: 245
 
 #include <atomic>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -3526,56 +5361,45 @@ Lines: 245
 #include "api/task_queue/pending_task_safety_flag.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
-#include "apps/peerconnection/client/peer_connection_client.h"
-#include "apps/peerconnection/client/shm_video_writer.h"
-#include "apps/peerconnection/client/shm_audio_writer.h"
-#include "apps/peerconnection/client/shm_audio_reader.h"
+#include "apps/peerconnection/client/data_channel_manager.h"
+#include "apps/peerconnection/client/engine_controller.h"
+#include "apps/peerconnection/client/media_pipeline.h"
+#include "apps/peerconnection/client/shm_audio_capturer.h"
+#include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/thread.h"
 
-class WebRTCEngine : public webrtc::PeerConnectionObserver,
+class WebRTCEngine : public EngineController,
+                     public webrtc::PeerConnectionObserver,
                      public webrtc::CreateSessionDescriptionObserver,
-                     public PeerConnectionClientObserver,
-                     public webrtc::DataChannelObserver {
+                     public PeerConnectionClientObserver {
  public:
-  using EventCallback = std::function<void(const std::string& json)>;
-
-  WebRTCEngine(const webrtc::Environment& env, EventCallback on_event);
+  WebRTCEngine(const webrtc::Environment& env);
   ~WebRTCEngine() override;
 
-  // Lifecycle
+  // EngineController implementation (thread-safe, callable from any thread)
+  void RegisterObserver(EngineObserver* observer) override;
+  void UnregisterObserver() override;
+  void ConnectToServer(const std::string& server, int port) override;
+  void DisconnectFromServer() override;
+  void ConnectToPeer(int peer_id) override;
+  void HangUp() override;
+  void SetAudioMuted(bool muted) override;
+  void SetVideoPaused(bool paused) override;
+  void SendData(const std::string& text) override;
+  void QueryDevices() override;
+  void SetVideoDevice(int device_idx) override;
+  void SetAudioInputDevice(int device_idx) override;
+  bool connection_active() const override;
+
+  // Lifecycle (called by main.cc, not part of EngineController)
   bool Init();
   void Shutdown();
-
-  // Signaling
-  void ConnectToServer(const std::string& server, int port);
-  void DisconnectFromServer();
-  void ConnectToPeer(int peer_id);
-  void HangUp();
-
-  // Media control
-  void SetAudioMuted(bool muted);
-  void SetVideoPaused(bool paused);
-
-  // DataChannel
-  void SendData(const std::string& text);
-
-  // Device management
-  void QueryDevices();
-  void SetVideoDevice(int device_idx);
-  void SetAudioInputDevice(int device_idx);
 
   // RefCountInterface (required by CreateSessionDescriptionObserver)
   void AddRef() const override {}
   webrtc::RefCountReleaseStatus Release() const override {
     return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
   }
-
-  // Callback can be set after construction (for daemon mode wiring)
-  void SetEventCallback(EventCallback cb) { on_event_ = std::move(cb); }
-
-  // Thread access for UnixSocketServer command dispatch
-  webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
-  bool connection_active() const { return peer_connection_ != nullptr; }
 
  protected:
   // PeerConnectionObserver
@@ -3605,108 +5429,28 @@ class WebRTCEngine : public webrtc::PeerConnectionObserver,
   void OnMessageSent(int err) override;
   void OnServerConnectionFailure() override;
 
-  // DataChannelObserver
-  void OnStateChange() override;
-  void OnMessage(const webrtc::DataBuffer& buffer) override;
-  void OnBufferedAmountChange(uint64_t) override {}
-  bool IsOkToCallOnTheNetworkThread() override { return false; }
-
  private:
   // Internal helpers (ported from Conductor)
   bool InitializePeerConnection();
-  bool CreatePeerConnection();
   void DeletePeerConnection();
   void AddTracks();
   void AddDataChannel();
   void SendMessage(const std::string& json_object);
 
-  // SHM renderers
-  void StartLocalShmRenderer(webrtc::VideoTrackInterface* track);
-  void StopLocalShmRenderer();
-  void StartRemoteShmRenderer(webrtc::VideoTrackInterface* track);
-  void StopRemoteShmRenderer();
+  // EngineController Impl helpers — must be called on signaling thread
+  void ConnectToServerImpl(const std::string& server, int port);
+  void DisconnectFromServerImpl();
+  void ConnectToPeerImpl(int peer_id);
+  void HangUpImpl();
+  void SetAudioMutedImpl(bool muted);
+  void SetVideoPausedImpl(bool paused);
+  void SendDataImpl(const std::string& text);
+  void QueryDevicesImpl();
+  void SetVideoDeviceImpl(int device_idx);
+  void SetAudioInputDeviceImpl(int device_idx);
 
-  // Audio SHM renderer
-  void StartRemoteAudioShmRenderer(webrtc::AudioTrackInterface* track);
-  void StopRemoteAudioShmRenderer();
-
-  // Inner class: VideoSink that writes frames to SHM via dedicated IO thread
-  class ShmVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
-   public:
-    ShmVideoSink(const std::string& key_path, int proj_id);
-    ~ShmVideoSink() override;
-    void OnFrame(const webrtc::VideoFrame& frame) override;
-
-   private:
-    struct FrameData {
-      std::vector<uint8_t> i420_data;
-      VideoFrameHead head;
-    };
-
-    void IoLoop();
-
-    std::unique_ptr<ShmVideoWriter> writer_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::optional<FrameData> pending_;
-    bool stopped_ = false;
-    std::thread io_thread_;
-  };
-
-  // Inner class: AudioSink that writes remote audio to SHM for Qt playback
-  class ShmAudioSink : public webrtc::AudioTrackSinkInterface {
-   public:
-    ShmAudioSink(const std::string& key_path, int proj_id);
-    ~ShmAudioSink() override;
-    void OnData(const void* audio_data, int bits_per_sample,
-                int sample_rate, size_t number_of_channels,
-                size_t number_of_frames,
-                std::optional<int64_t> absolute_capture_timestamp_ms) override;
-
-   private:
-    struct PendingAudio {
-      AudioFrameHead head;
-      std::vector<uint8_t> data;
-    };
-
-    void IoLoop();
-
-    std::unique_ptr<ShmAudioWriter> writer_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::optional<PendingAudio> pending_;
-    bool stopped_ = false;
-    std::thread io_thread_;
-  };
-
-  // Inner class: AudioSource that reads capture audio from SHM (Qt mic input)
-  class ShmAudioSource : public webrtc::AudioSourceInterface {
-   public:
-    static webrtc::scoped_refptr<ShmAudioSource> Create(
-        const std::string& key_path, int proj_id);
-    ~ShmAudioSource() override;
-
-    void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
-    void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;
-    void RegisterObserver(webrtc::ObserverInterface*) override {}
-    void UnregisterObserver(webrtc::ObserverInterface*) override {}
-    webrtc::MediaSourceInterface::SourceState state() const override {
-      return webrtc::MediaSourceInterface::kLive;
-    }
-    bool remote() const override { return false; }
-
-   protected:
-    ShmAudioSource() = default;
-    void CaptureLoop();
-
-    ShmAudioReader reader_;
-    std::mutex sinks_mutex_;
-    std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
-    std::thread capture_thread_;
-    std::atomic<bool> running_{false};
-  };
-
-  EventCallback on_event_;
+  EngineObserver* observer_ = nullptr;
+  std::atomic<bool> connection_active_{false};
   const webrtc::Environment env_;
   webrtc::ScopedTaskSafety safety_;
 
@@ -3715,37 +5459,82 @@ class WebRTCEngine : public webrtc::PeerConnectionObserver,
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
 
+  // Media pipeline (Step 1: owns ADM; later: renderers, sources, device state)
+  std::unique_ptr<MediaPipeline> pipeline_;
+
   // WebRTC objects
-  webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
-  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> local_video_source_;
-  webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
+  // DataChannel manager
+  std::unique_ptr<DataChannelManager> dc_manager_;
 
-  // Signaling client
-  PeerConnectionClient signaling_client_;
-
-  // SHM renderers
-  std::unique_ptr<ShmVideoSink> local_video_sink_;
-  std::unique_ptr<ShmVideoSink> remote_video_sink_;
-
-  // SHM audio
-  std::unique_ptr<ShmAudioSink> remote_audio_sink_;
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> local_audio_source_;
+  // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
+  std::unique_ptr<SignalingInterface> signaling_;
 
   // State
   int peer_id_ = -1;
   int pending_hangup_peer_id_ = -1;
   bool loopback_ = false;
   std::string server_;
+  int server_port_ = 8888;
   std::deque<std::string*> pending_messages_;
-
-  // Device state
-  int current_video_device_idx_ = -1;
-  int current_audio_input_device_idx_ = -1;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
+
+========== ./signaling_interface.h ==========
+Lines: 50
+
+#ifndef APPS_PEERCONNECTION_CLIENT_SIGNALING_INTERFACE_H_
+#define APPS_PEERCONNECTION_CLIENT_SIGNALING_INTERFACE_H_
+
+#include <map>
+#include <string>
+
+typedef std::map<int, std::string> Peers;
+
+// Observer interface for signaling events.
+// Engine implements this to react to server/peer state changes.
+struct PeerConnectionClientObserver {
+  virtual void OnSignedIn() = 0;
+  virtual void OnDisconnected() = 0;
+  virtual void OnPeerConnected(int id, const std::string& name) = 0;
+  virtual void OnPeerDisconnected(int peer_id) = 0;
+  virtual void OnPeerBusy(int peer_id) = 0;
+  virtual void OnMessageFromPeer(int peer_id, const std::string& message) = 0;
+  virtual void OnMessageSent(int err) = 0;
+  virtual void OnServerConnectionFailure() = 0;
+
+ protected:
+  virtual ~PeerConnectionClientObserver() {}
+};
+
+// Abstract interface for signaling server communication.
+// PeerConnectionClient is the concrete HTTP long-polling implementation.
+class SignalingInterface {
+ public:
+  virtual ~SignalingInterface() = default;
+
+  virtual int id() const = 0;
+  virtual bool is_connected() const = 0;
+  virtual const Peers& peers() const = 0;
+
+  virtual void RegisterObserver(PeerConnectionClientObserver* callback) = 0;
+
+  virtual void Connect(const std::string& server,
+                       int port,
+                       const std::string& client_name) = 0;
+
+  virtual bool SendToPeer(int peer_id, const std::string& message) = 0;
+  virtual bool SendHangUp(int peer_id) = 0;
+  virtual void SendHangUpConfirm() = 0;
+  virtual bool IsSendingMessage() = 0;
+
+  virtual bool SignOut() = 0;
+  virtual void Close() = 0;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_SIGNALING_INTERFACE_H_
 
 ========== ./shm_common.cc ==========
 Lines: 71
@@ -3822,8 +5611,86 @@ int init_shm_audio_sync(ShmAudioCtrlBlock* shm) {
   return 0;
 }
 
+========== ./media_pipeline.h ==========
+Lines: 74
+
+#ifndef APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
+#define APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
+
+#include <functional>
+#include <memory>
+#include <string>
+
+#include "api/audio/audio_device.h"
+#include "api/environment/environment.h"
+#include "api/media_stream_interface.h"
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
+#include "apps/peerconnection/client/shm_audio_renderer.h"
+#include "apps/peerconnection/client/shm_video_renderer.h"
+#include "rtc_base/thread.h"
+
+// Step 1: ADM. Step 2: renderers. Later: sources, device state.
+class MediaPipeline {
+ public:
+  MediaPipeline(const webrtc::Environment& env,
+                webrtc::Thread* worker_thread);
+  ~MediaPipeline();
+
+  // ---- ADM ----
+  bool CreateAudioDeviceModule();
+  webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
+
+  // ---- Sources ----
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
+  webrtc::AudioSourceInterface* CreateAudioSource(
+      webrtc::PeerConnectionFactoryInterface* factory,
+      webrtc::AudioSourceInterface* external_source = nullptr);
+
+  // ---- Events ----
+  using EventCallback = std::function<void(const std::string& json)>;
+  void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
+
+  // ---- Device management ----
+  void SetVideoDevice(int device_idx);
+  void SetAudioMuted(bool muted);
+  void SetVideoPaused(bool paused, webrtc::PeerConnectionInterface* pc);
+  void QueryDevices();
+
+  void set_video_device_idx(int idx) { video_device_idx_ = idx; }
+  void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
+
+  // ---- Renderers ----
+  void StartLocalRenderer(webrtc::VideoTrackInterface* track);
+  void StopLocalRenderer();
+  void StartRemoteRenderer(webrtc::VideoTrackInterface* track);
+  void StopRemoteRenderer();
+  void StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track);
+  void StopRemoteAudioRenderer();
+
+  // ---- Lifecycle ----
+  void Shutdown();
+
+ private:
+  const webrtc::Environment& env_;
+  webrtc::Thread* const worker_thread_;
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source_;
+
+  std::unique_ptr<ShmVideoRenderer> local_renderer_;
+  std::unique_ptr<ShmVideoRenderer> remote_renderer_;
+  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
+
+  EventCallback event_cb_;
+  int video_device_idx_ = -1;
+  int audio_input_device_idx_ = -1;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
+
 ========== ./cli_runner.h ==========
-Lines: 36
+Lines: 41
 
 // cli_runner.h
 #ifndef APPS_PEERCONNECTION_CLIENT_CLI_RUNNER_H_
@@ -3832,11 +5699,13 @@ Lines: 36
 #include <atomic>
 #include <string>
 
-class WebRTCEngine;
+#include "apps/peerconnection/client/engine_controller.h"
 
-class CliRunner {
+class EngineController;
+
+class CliRunner : public EngineObserver {
  public:
-  CliRunner(WebRTCEngine* engine,
+  CliRunner(EngineController* engine,
             const std::string& server,
             int port,
             bool autoconnect,
@@ -3846,13 +5715,16 @@ class CliRunner {
   void Run();
   void Stop();
 
+  // EngineObserver
+  void OnEngineEvent(const std::string& json) override;
+
   static void PrintPrompt();
 
  private:
   void InputLoop();
   void HandleInput(const std::string& line);
 
-  WebRTCEngine* engine_;
+  EngineController* engine_;
   std::string server_;
   int port_;
   bool autoconnect_;
@@ -3862,7 +5734,102 @@ class CliRunner {
 
 #endif
 
+========== ./pc_factory.cc ==========
+Lines: 91
+
+#include "apps/peerconnection/client/pc_factory.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <memory>
+#include <utility>
+
+#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+#include "api/audio_codecs/builtin_audio_encoder_factory.h"
+#include "api/create_modular_peer_connection_factory.h"
+#include "api/enable_media.h"
+#include "api/peer_connection_interface.h"
+#include "api/scoped_refptr.h"
+#include "api/video_codecs/video_decoder_factory_template.h"
+#include "api/video_codecs/video_decoder_factory_template_dav1d_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_decoder_factory_template_open_h264_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template.h"
+#include "api/video_codecs/video_encoder_factory_template_libaom_av1_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
+#include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
+#include "apps/peerconnection/client/defaults.h"
+#include "apps/peerconnection/client/rk_mpp_codec.h"
+#include "rtc_base/logging.h"
+
+PcComponents PcFactory::Create(webrtc::Thread* network_thread,
+                                webrtc::Thread* worker_thread,
+                                webrtc::Thread* signaling_thread,
+                                const webrtc::Environment& env,
+                                webrtc::AudioDeviceModule* adm,
+                                webrtc::PeerConnectionObserver* observer) {
+  PcComponents result;
+
+  webrtc::PeerConnectionFactoryDependencies deps;
+  deps.network_thread = network_thread;
+  deps.worker_thread = worker_thread;
+  deps.signaling_thread = signaling_thread;
+  deps.env = env;
+  deps.adm = adm;
+  deps.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
+  deps.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+  deps.video_encoder_factory =
+      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+          //webrtc::MppH264EncoderTemplateAdapter,
+          webrtc::OpenH264EncoderTemplateAdapter,
+          webrtc::LibvpxVp8EncoderTemplateAdapter,
+          webrtc::LibvpxVp9EncoderTemplateAdapter,
+          webrtc::LibaomAv1EncoderTemplateAdapter>>();
+  deps.video_decoder_factory =
+      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+          //webrtc::MppH264DecoderTemplateAdapter,
+          webrtc::OpenH264DecoderTemplateAdapter,
+          webrtc::LibvpxVp8DecoderTemplateAdapter,
+          webrtc::LibvpxVp9DecoderTemplateAdapter,
+          webrtc::Dav1dDecoderTemplateAdapter>>();
+  webrtc::EnableMedia(deps);
+
+  result.factory =
+      webrtc::CreateModularPeerConnectionFactory(std::move(deps));
+  if (!result.factory) {
+    RTC_LOG(LS_ERROR) << "Failed to create PeerConnectionFactory";
+    return result;
+  }
+
+  webrtc::PeerConnectionInterface::RTCConfiguration config;
+  config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
+
+  webrtc::PeerConnectionInterface::IceServer stun_server;
+  stun_server.uri = GetSTUNServer();
+  config.servers.push_back(stun_server);
+
+  webrtc::PeerConnectionInterface::IceServer turn_server;
+  turn_server.uri = GetTURNServer();
+  turn_server.username = GetTurnUserName();
+  turn_server.password = GetTurnPassword();
+  config.servers.push_back(turn_server);
+
+  webrtc::PeerConnectionDependencies pc_deps(observer);
+  auto error_or = result.factory->CreatePeerConnectionOrError(
+      config, std::move(pc_deps));
+  if (error_or.ok()) {
+    result.connection = std::move(error_or.value());
+  }
+  return result;
+}
+
+#pragma GCC diagnostic pop
+
 
 =====================================
-Total files: 22
-Total lines: 3746
+Total files: 43
+Total lines: 5608

@@ -6,6 +6,7 @@
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
 #include "apps/peerconnection/client_arm64/rk_mpp_codec.h"
+#include "apps/peerconnection/client_arm64/rga_video_track_source.h"
 
 #include <unistd.h>
 #include <cstring>
@@ -15,7 +16,9 @@
 #include "api/video/encoded_image.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame.h"
+#include "api/video_codecs/video_codec.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
+#include "modules/video_coding/codecs/interface/common_constants.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
@@ -194,6 +197,7 @@ struct MppH264Encoder::Impl {
       mpp_enc_cfg_set_s32(cfg, "prep:ver_stride", ver_stride);
       mpp_enc_cfg_set_s32(cfg, "prep:format", MPP_FMT_YUV420SP);
       int bps = codec_config.maxBitrate * 1000;
+      if (bps <= 0) bps = 300000;
       mpp_enc_cfg_set_s32(cfg, "rc:mode", 1);
       mpp_enc_cfg_set_s32(cfg, "rc:bps_target", bps);
       mpp_enc_cfg_set_s32(cfg, "rc:gop", 60);
@@ -236,23 +240,32 @@ struct MppH264Encoder::Impl {
     mpp_frame_set_ver_stride(frm, ver_stride);
     mpp_frame_set_fmt(frm, MPP_FMT_YUV420SP);
 
-    auto* nv12_buf = frame.video_frame_buffer()->GetNV12();
-    if (nv12_buf) {
-      // External DMA-BUF fd check: Nv12DmaBufBuffer carries fd for zero-copy.
-      // In the final build, dynamic_cast to Nv12DmaBufBuffer extracts the fd.
-      // For now the import path is dormant; the CPU memcpy path is the fallback.
-      int external_fd = -1;  // Set by GetNv12DmaBufFd when DMA-BUF capture is active
+    auto buf = frame.video_frame_buffer();
+    if (buf->type() == webrtc::VideoFrameBuffer::Type::kNV12) {
+      auto* nv12_buf = static_cast<const webrtc::NV12BufferInterface*>(buf.get());
+      int external_fd = GetNv12DmaBufFd(frame);
       if (external_fd >= 0) {
         if (external_fd != imported_fd_) {
-          import_buf_ = nullptr;
-          // MPP DMA-BUF import — API varies by MPP version.
-          // On RK3588: mpp_buffer_import(&import_buf_, &info, external_fd)
-          // where info.type = MPP_BUFFER_TYPE_DRM, info.size = frame_size.
-          // Wire this on the board with the correct MPP headers.
-          imported_fd_ = external_fd;
+          if (import_buf_) { mpp_buffer_put(import_buf_); import_buf_ = nullptr; }
+          MppBufferInfo info;
+          memset(&info, 0, sizeof(info));
+          info.type = MPP_BUFFER_TYPE_DRM;
+          info.fd = external_fd;
+          info.size = frame_size;
+          MPP_RET ret = mpp_buffer_import_with_tag(nullptr, &info, &import_buf_, MODULE_TAG, __func__);
+          RTC_LOG(LS_INFO) << "  EncodeOne: DMA-BUF import fd=" << external_fd << " ret=" << ret << " buf=" << (void*)import_buf_;
+          imported_fd_ = (ret == MPP_OK) ? external_fd : -1;
         }
-        mpp_frame_set_buffer(frm, import_buf_);
+        if (import_buf_) {
+          mpp_frame_set_buffer(frm, import_buf_);
+        } else {
+          RTC_LOG(LS_WARNING) << "  DMA-BUF import failed, CPU fallback";
+          memcpy(dst, nv12_buf->DataY(), ys);
+          memcpy(dst + ys, nv12_buf->DataUV(), uvs * 2);
+          mpp_frame_set_buffer(frm, frm_buf);
+        }
       } else {
+        RTC_LOG(LS_INFO) << "  EncodeOne: srcY=" << (void*)nv12_buf->DataY() << " srcUV=" << (void*)nv12_buf->DataUV() << " (NV12 path)";
         memcpy(dst, nv12_buf->DataY(), ys);
         memcpy(dst + ys, nv12_buf->DataUV(), uvs * 2);
         mpp_frame_set_buffer(frm, frm_buf);
@@ -271,7 +284,16 @@ struct MppH264Encoder::Impl {
       mpp_frame_set_buffer(frm, frm_buf);
     }
 
-    // rk_h264_test doesn't call ENC_SET_IDR_FRAME; skip it
+    // Force IDR frame when WebRTC requests a keyframe (PLI/FIR)
+    if (frame_types) {
+      for (auto t : *frame_types) {
+        if (t == VideoFrameType::kVideoFrameKey) {
+          RTC_LOG(LS_INFO) << "  EncodeOne: forcing IDR frame";
+          mpi->control(ctx, MPP_ENC_SET_IDR_FRAME, nullptr);
+          break;
+        }
+      }
+    }
 
     // Official pattern: pre-allocated packet buffer, attach to frame metadata
     MppPacket pkt = nullptr;
@@ -324,9 +346,23 @@ struct MppH264Encoder::Impl {
     img._frameType = is_key ? VideoFrameType::kVideoFrameKey
                             : VideoFrameType::kVideoFrameDelta;
 
+    {
+      uint8_t* d = (uint8_t*)data;
+      char hex_buf[64];
+      snprintf(hex_buf, sizeof(hex_buf), "%02x %02x %02x %02x %02x %02x %02x %02x",
+               d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+      RTC_LOG(LS_INFO) << "  EncodeOne: len=" << len << " key=" << (is_key ? 1 : 0) << " hex=[" << hex_buf << "]";
+    }
+
     if (callback) {
       RTC_LOG(LS_INFO) << "  EncodeOne: calling callback...";
-      callback->OnEncodedImage(img, nullptr);
+      CodecSpecificInfo codec_specific;
+      codec_specific.codecType = kVideoCodecH264;
+      codec_specific.codecSpecific.H264.packetization_mode = H264PacketizationMode::NonInterleaved;
+      codec_specific.codecSpecific.H264.temporal_idx = kNoTemporalIdx;
+      codec_specific.codecSpecific.H264.idr_frame = is_key;
+      codec_specific.codecSpecific.H264.base_layer_sync = false;
+      callback->OnEncodedImage(img, &codec_specific);
       RTC_LOG(LS_INFO) << "  EncodeOne: callback done";
     }
     RTC_LOG(LS_INFO) << "  EncodeOne: deinit pkt...";
@@ -404,6 +440,9 @@ VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
   if (impl_) {
     i.scaling_settings.min_pixels_per_frame = impl_->w * impl_->h;
   }
+  i.preferred_pixel_formats = {VideoFrameBuffer::Type::kNV12};
+  i.resolution_bitrate_limits = {
+      VideoEncoder::ResolutionBitrateLimits(640 * 480, 150000, 100000, 2000000)};
   return i;
 }
 

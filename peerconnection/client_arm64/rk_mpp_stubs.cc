@@ -54,6 +54,8 @@ static struct {
   MPP_RET (*buffer_put_with_caller)(MppBuffer, const char*);
   void*   (*buffer_get_ptr_with_caller)(MppBuffer, const char*);
   int     (*buffer_get_fd_with_caller)(MppBuffer, const char*);
+  MPP_RET (*buffer_import_with_tag)(MppBufferGroup, MppBufferInfo*, MppBuffer*,
+                                     const char*, const char*);
 
   // rk_venc_cfg.h
   MPP_RET (*enc_cfg_init)(MppEncCfg*);
@@ -119,6 +121,7 @@ bool MppLibLoad() {
   LOAD(buffer_put_with_caller);
   LOAD(buffer_get_ptr_with_caller);
   LOAD(buffer_get_fd_with_caller);
+  LOAD(buffer_import_with_tag);
   LOAD(enc_cfg_init);
   LOAD(enc_cfg_set_s32);
   LOAD(enc_cfg_deinit);
@@ -197,6 +200,12 @@ void* mpp_buffer_get_ptr_with_caller(MppBuffer buffer, const char* caller) {
 
 int mpp_buffer_get_fd_with_caller(MppBuffer buffer, const char* caller) {
   return mpp.buffer_get_fd_with_caller(buffer, caller);
+}
+
+MPP_RET mpp_buffer_import_with_tag(MppBufferGroup group, MppBufferInfo* info,
+                                   MppBuffer* buffer, const char* tag,
+                                   const char* caller) {
+  return mpp.buffer_import_with_tag(group, info, buffer, tag, caller);
 }
 
 MPP_RET mpp_enc_cfg_init(MppEncCfg* cfg) {

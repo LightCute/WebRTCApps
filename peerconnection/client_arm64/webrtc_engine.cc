@@ -437,93 +437,98 @@ void WebRTCEngine::OnIceCandidate(const webrtc::IceCandidate* candidate) {
 }
 
 // ── SDP filter: keep only H264 in video m-line, force MPP hardware codec ──
-static std::string FilterSdpH264Only(const std::string& sdp) {
-  std::istringstream in(sdp);
-  std::string line;
-  std::vector<std::string> lines;
-  std::set<int> h264_pts;
-  int video_mline_idx = -1;
+// static std::string FilterSdpH264Only(const std::string& sdp) {
+//   std::istringstream in(sdp);
+//   std::string line;
+//   std::vector<std::string> lines;
+//   std::set<int> h264_pts;
+//   int video_mline_idx = -1;
 
-  // Pass 1: collect lines, find H264 payload types
-  while (std::getline(in, line)) {
-    lines.push_back(line);
-    // a=rtpmap:<pt> H264/...
-    if (line.find("a=rtpmap:") == 0 &&
-        line.find("H264") != std::string::npos) {
-      int pt = 0;
-      if (sscanf(line.c_str(), "a=rtpmap:%d", &pt) == 1)
-        h264_pts.insert(pt);
-    }
-    // m=video line
-    if (line.find("m=video") == 0)
-      video_mline_idx = (int)lines.size() - 1;
-  }
+//   // Pass 1: collect lines, find H264 payload types
+//   while (std::getline(in, line)) {
+//     // std::getline strips \n but leaves \r — we must remove it or the
+//     // final reconstructed SDP will contain \r\r\n which breaks parsing
+//     // on the receiving side.
+//     if (!line.empty() && line.back() == '\r')
+//       line.pop_back();
+//     lines.push_back(line);
+//     // a=rtpmap:<pt> H264/...
+//     if (line.find("a=rtpmap:") == 0 &&
+//         line.find("H264") != std::string::npos) {
+//       int pt = 0;
+//       if (sscanf(line.c_str(), "a=rtpmap:%d", &pt) == 1)
+//         h264_pts.insert(pt);
+//     }
+//     // m=video line
+//     if (line.find("m=video") == 0)
+//       video_mline_idx = (int)lines.size() - 1;
+//   }
 
-  if (video_mline_idx < 0 || h264_pts.empty()) return sdp;
+//   if (video_mline_idx < 0 || h264_pts.empty()) return sdp;
 
-  // Pass 2: rewrite video m-line — keep only H264 payload types
-  // Format: m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 ...
-  std::string& mline = lines[video_mline_idx];
-  size_t space_after_proto = mline.rfind("SAVPF");
-  if (space_after_proto == std::string::npos)
-    space_after_proto = mline.rfind("SAVP ");  // non-bundle fallback
-  if (space_after_proto == std::string::npos) return sdp;
+//   // Pass 2: rewrite video m-line — keep only H264 payload types
+//   // Format: m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 ...
+//   std::string& mline = lines[video_mline_idx];
+//   size_t space_after_proto = mline.rfind("SAVPF");
+//   if (space_after_proto == std::string::npos)
+//     space_after_proto = mline.rfind("SAVP ");  // non-bundle fallback
+//   if (space_after_proto == std::string::npos) return sdp;
 
-  std::string prefix = mline.substr(0, mline.find(' ', space_after_proto));
-  std::string new_mline = prefix;
-  std::set<int> kept_pts;
-  for (int pt : h264_pts) {
-    new_mline += " " + std::to_string(pt);
-    kept_pts.insert(pt);
-  }
-  // Also keep RTX and FLEXFEC retransmission payloads associated with H264
-  for (size_t i = 0; i < lines.size(); i++) {
-    if (lines[i].find("a=rtpmap:") != 0) continue;
-    int pt = 0;
-    sscanf(lines[i].c_str(), "a=rtpmap:%d", &pt);
-    if (kept_pts.count(pt)) continue;
-    if (lines[i].find("rtx") != std::string::npos ||
-        lines[i].find("flexfec") != std::string::npos) {
-      // Check if this RTX/FLEXFEC is associated with a kept H264 pt
-      // via a=fmtp:<rtx_pt> apt=<h264_pt>
-      for (const auto& check_line : lines) {
-        if (check_line.find("a=fmtp:" + std::to_string(pt)) == 0) {
-          for (int hpt : kept_pts) {
-            if (check_line.find("apt=" + std::to_string(hpt)) != std::string::npos) {
-              new_mline += " " + std::to_string(pt);
-              kept_pts.insert(pt);
-              break;
-            }
-          }
-        }
-      }
-    }
-  }
-  lines[video_mline_idx] = new_mline;
+//   std::string prefix = mline.substr(0, mline.find(' ', space_after_proto));
+//   std::string new_mline = prefix;
+//   std::set<int> kept_pts;
+//   for (int pt : h264_pts) {
+//     new_mline += " " + std::to_string(pt);
+//     kept_pts.insert(pt);
+//   }
+//   // Also keep RTX and FLEXFEC retransmission payloads associated with H264
+//   for (size_t i = 0; i < lines.size(); i++) {
+//     if (lines[i].find("a=rtpmap:") != 0) continue;
+//     int pt = 0;
+//     sscanf(lines[i].c_str(), "a=rtpmap:%d", &pt);
+//     if (kept_pts.count(pt)) continue;
+//     if (lines[i].find("rtx") != std::string::npos ||
+//         lines[i].find("flexfec") != std::string::npos) {
+//       // Check if this RTX/FLEXFEC is associated with a kept H264 pt
+//       // via a=fmtp:<rtx_pt> apt=<h264_pt>
+//       for (const auto& check_line : lines) {
+//         if (check_line.find("a=fmtp:" + std::to_string(pt)) == 0) {
+//           for (int hpt : kept_pts) {
+//             if (check_line.find("apt=" + std::to_string(hpt)) != std::string::npos) {
+//               new_mline += " " + std::to_string(pt);
+//               kept_pts.insert(pt);
+//               break;
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+//   lines[video_mline_idx] = new_mline;
 
-  // Filter non-kept rtpmap/fmtp lines in video section
-  bool in_video = false;
-  for (size_t i = 0; i < lines.size(); i++) {
-    if (lines[i].find("m=video") == 0) {
-      in_video = true; continue;
-    }
-    if (i > (size_t)video_mline_idx && lines[i].find("m=") == 0) {
-      in_video = false; continue;
-    }
-    if (!in_video) continue;
-    if (lines[i].find("a=rtpmap:") != 0 && lines[i].find("a=fmtp:") != 0)
-      continue;
-    int pt = 0;
-    sscanf(lines[i].c_str(), lines[i][2] == 'r' ? "a=rtpmap:%d" : "a=fmtp:%d", &pt);
-    if (!kept_pts.count(pt)) lines[i] = "";  // mark for removal
-  }
+//   // Filter non-kept rtpmap/fmtp lines in video section
+//   bool in_video = false;
+//   for (size_t i = 0; i < lines.size(); i++) {
+//     if (lines[i].find("m=video") == 0) {
+//       in_video = true; continue;
+//     }
+//     if (i > (size_t)video_mline_idx && lines[i].find("m=") == 0) {
+//       in_video = false; continue;
+//     }
+//     if (!in_video) continue;
+//     if (lines[i].find("a=rtpmap:") != 0 && lines[i].find("a=fmtp:") != 0)
+//       continue;
+//     int pt = 0;
+//     sscanf(lines[i].c_str(), lines[i][2] == 'r' ? "a=rtpmap:%d" : "a=fmtp:%d", &pt);
+//     if (!kept_pts.count(pt)) lines[i] = "";  // mark for removal
+//   }
 
-  std::string result;
-  for (const auto& l : lines) {
-    if (!l.empty()) { result += l; result += "\r\n"; }
-  }
-  return result;
-}
+//   std::string result;
+//   for (const auto& l : lines) {
+//     if (!l.empty()) { result += l; result += "\r\n"; }
+//   }
+//   return result;
+// }
 
 // ==================== CreateSessionDescriptionObserver ====================
 
@@ -546,7 +551,9 @@ void WebRTCEngine::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
   peer_connection_->SetLocalDescription(
       DummySetSessionDescriptionObserver::Create().get(), desc);
 
-  sdp = FilterSdpH264Only(sdp);
+  // FIXME: FilterSdpH264Only is producing empty SDP on the wire.
+  // Temporarily send unfiltered SDP to isolate the issue.
+  // sdp = FilterSdpH264Only(sdp);
 
   Json::Value jmessage;
   jmessage[kSessionDescriptionTypeName] =

@@ -56,6 +56,7 @@ class MppH264Decoder : public VideoDecoder {
       DecodedImageCallback* callback) override;
   int32_t Release() override;
   DecoderInfo GetDecoderInfo() const override;
+  int GetLastNV12Fd() const;
 
  private:
   struct Impl;

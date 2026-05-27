@@ -80,4 +80,8 @@ class RgaVideoTrackSource : public webrtc::VideoTrackSource,
   std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> device_info_;
 };
 
+// Extract DMA-BUF fd from an NV12 VideoFrame backed by Nv12DmaBufBuffer.
+// Returns -1 if the frame is a regular NV12Buffer (CPU path) or no fd.
+int GetNv12DmaBufFd(const webrtc::VideoFrame& frame);
+
 #endif
