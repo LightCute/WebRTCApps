@@ -49,7 +49,4 @@ ABSL_FLAG(
     "will assign the group Enabled to field trial WebRTC-FooFeature. Multiple "
     "trials are separated by \"/\"");
 
-ABSL_FLAG(std::string, audio_source, "adm",
-          "Audio capture source: 'adm' (AudioDeviceModule) or 'shm' (shared memory)");
-
 #endif  // APPS_PEERCONNECTION_CLIENT_FLAG_DEFS_H_

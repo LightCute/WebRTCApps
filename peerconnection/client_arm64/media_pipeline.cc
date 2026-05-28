@@ -132,7 +132,95 @@ bool MediaPipeline::CreateAudioDeviceModule() {
     RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
     return false;
   }
+
+  // Select NAU8822 for recording and playout on RK3588.
+  // Must run on worker_thread since ADM ops are not thread-safe.
+  worker_thread_->BlockingCall([this] {
+    // Init() enables CHECKinitialized_() guards needed by
+    // RecordingDevices/SetRecordingDevice/SetPlayoutDevice.
+    if (adm_->Init() != 0) {
+      RTC_LOG(LS_ERROR) << "ADM Init failed during device selection";
+      return;
+    }
+
+    // Select recording device: find nau8822 in the enumerated names.
+    int16_t rec_n = adm_->RecordingDevices();
+    RTC_LOG(LS_INFO) << "Recording devices: " << rec_n;
+    bool rec_found = false;
+    for (int16_t i = 0; i < rec_n; i++) {
+      char name[webrtc::kAdmMaxDeviceNameSize];
+      char guid[webrtc::kAdmMaxGuidSize];
+      if (adm_->RecordingDeviceName(i, name, guid) == 0) {
+        RTC_LOG(LS_INFO) << "  RecDev[" << i << "]: " << name;
+        if (!rec_found && (strstr(name, "nau8822") ||
+                           strstr(name, "rockchipnau8822"))) {
+          adm_->SetRecordingDevice(i);
+          RTC_LOG(LS_INFO) << "  -> Selected as recording device";
+          rec_found = true;
+        }
+      }
+    }
+
+    // Select playout device: find nau8822.
+    int16_t play_n = adm_->PlayoutDevices();
+    RTC_LOG(LS_INFO) << "Playout devices: " << play_n;
+    bool play_found = false;
+    for (int16_t i = 0; i < play_n; i++) {
+      char name[webrtc::kAdmMaxDeviceNameSize];
+      char guid[webrtc::kAdmMaxGuidSize];
+      if (adm_->PlayoutDeviceName(i, name, guid) == 0) {
+        RTC_LOG(LS_INFO) << "  PlayDev[" << i << "]: " << name;
+        if (!play_found && (strstr(name, "nau8822") ||
+                            strstr(name, "rockchipnau8822"))) {
+          adm_->SetPlayoutDevice(i);
+          RTC_LOG(LS_INFO) << "  -> Selected as playout device";
+          play_found = true;
+        }
+      }
+    }
+  });
+
   return true;
+}
+
+// WebRtcVoiceEngine::Init() resets ADM devices back to 0.
+// Call this AFTER PcFactory::Create() to re-select NAU8822 and
+// re-init playout/recording with the correct ALSA cards.
+void MediaPipeline::FixupAudioDeviceSelection() {
+  if (!adm_) return;
+
+  worker_thread_->BlockingCall([this] {
+    // Re-enumerate and select NAU8822 (engine may have reset to device 0).
+    int16_t rec_n = adm_->RecordingDevices();
+    for (int16_t i = 0; i < rec_n; i++) {
+      char name[webrtc::kAdmMaxDeviceNameSize];
+      char guid[webrtc::kAdmMaxGuidSize];
+      if (adm_->RecordingDeviceName(i, name, guid) == 0 &&
+          (strstr(name, "nau8822") || strstr(name, "rockchipnau8822"))) {
+        adm_->SetRecordingDevice(i);
+        RTC_LOG(LS_INFO) << "Fixup: SetRecordingDevice(" << i << ") -> " << name;
+        break;
+      }
+    }
+    int16_t play_n = adm_->PlayoutDevices();
+    for (int16_t i = 0; i < play_n; i++) {
+      char name[webrtc::kAdmMaxDeviceNameSize];
+      char guid[webrtc::kAdmMaxGuidSize];
+      if (adm_->PlayoutDeviceName(i, name, guid) == 0 &&
+          (strstr(name, "nau8822") || strstr(name, "rockchipnau8822"))) {
+        adm_->SetPlayoutDevice(i);
+        RTC_LOG(LS_INFO) << "Fixup: SetPlayoutDevice(" << i << ") -> " << name;
+        break;
+      }
+    }
+
+    // Re-init with the corrected devices.
+    // InitPlayout/InitRecording close old handles and re-open with new indices.
+    int32_t ret = adm_->InitPlayout();
+    RTC_LOG(LS_INFO) << "Fixup: InitPlayout returned " << ret;
+    ret = adm_->InitRecording();
+    RTC_LOG(LS_INFO) << "Fixup: InitRecording returned " << ret;
+  });
 }
 
 // ---- Sources ----
@@ -164,13 +252,8 @@ MediaPipeline::CreateVideoSource() {
 }
 
 webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
-    webrtc::PeerConnectionFactoryInterface* factory,
-    webrtc::AudioSourceInterface* external_source) {
-  if (external_source) {
-    audio_source_ = external_source;
-  } else {
-    audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
-  }
+    webrtc::PeerConnectionFactoryInterface* factory) {
+  audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
   return audio_source_.get();
 }
 
@@ -377,24 +460,6 @@ void MediaPipeline::StopRemoteRenderer() {
   }
 }
 
-void MediaPipeline::StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track) {
-  if (remote_audio_renderer_) {
-    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
-    return;
-  }
-  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
-      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_renderer_.get());
-  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
-}
-
-void MediaPipeline::StopRemoteAudioRenderer() {
-  if (remote_audio_renderer_) {
-    remote_audio_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
-  }
-}
-
 // ---- Lifecycle ----
 
 void MediaPipeline::Shutdown() {
@@ -409,7 +474,6 @@ void MediaPipeline::Shutdown() {
   remote_rga_sink_.reset();
   local_renderer_.reset();
   remote_renderer_.reset();
-  remote_audio_renderer_.reset();
   video_source_ = nullptr;
   audio_source_ = nullptr;
   if (adm_ && worker_thread_) {

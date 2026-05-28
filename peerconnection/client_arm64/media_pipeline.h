@@ -10,7 +10,7 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
-#include "apps/peerconnection/client_arm64/shm_audio_renderer.h"
+
 #include "apps/peerconnection/client_arm64/shm_video_renderer.h"
 #include "apps/peerconnection/client_arm64/dma_buf_pool.h"
 #include "apps/peerconnection/client_arm64/dma_buf_server.h"
@@ -31,12 +31,12 @@ class MediaPipeline {
   // ---- ADM ----
   bool CreateAudioDeviceModule();
   webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
+  void FixupAudioDeviceSelection();
 
   // ---- Sources ----
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
   webrtc::AudioSourceInterface* CreateAudioSource(
-      webrtc::PeerConnectionFactoryInterface* factory,
-      webrtc::AudioSourceInterface* external_source = nullptr);
+      webrtc::PeerConnectionFactoryInterface* factory);
 
   // ---- Events ----
   using EventCallback = std::function<void(const std::string& json)>;
@@ -56,9 +56,6 @@ class MediaPipeline {
   void StopLocalRenderer();
   void StartRemoteRenderer(webrtc::VideoTrackInterface* track);
   void StopRemoteRenderer();
-  void StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track);
-  void StopRemoteAudioRenderer();
-
   // ---- Lifecycle ----
   void Shutdown();
 
@@ -71,7 +68,6 @@ class MediaPipeline {
 
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;
-  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
 
   // DMA-BUF hardware rendering (RK3588)
   std::unique_ptr<DmaBufPool> local_dma_pool_;

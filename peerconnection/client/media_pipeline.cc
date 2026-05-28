@@ -127,13 +127,8 @@ MediaPipeline::CreateVideoSource() {
 }
 
 webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
-    webrtc::PeerConnectionFactoryInterface* factory,
-    webrtc::AudioSourceInterface* external_source) {
-  if (external_source) {
-    audio_source_ = external_source;
-  } else {
-    audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
-  }
+    webrtc::PeerConnectionFactoryInterface* factory) {
+  audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
   return audio_source_.get();
 }
 
@@ -288,30 +283,11 @@ void MediaPipeline::StopRemoteRenderer() {
   }
 }
 
-void MediaPipeline::StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track) {
-  if (remote_audio_renderer_) {
-    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
-    return;
-  }
-  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
-      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_renderer_.get());
-  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
-}
-
-void MediaPipeline::StopRemoteAudioRenderer() {
-  if (remote_audio_renderer_) {
-    remote_audio_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
-  }
-}
-
 // ---- Lifecycle ----
 
 void MediaPipeline::Shutdown() {
   local_renderer_.reset();
   remote_renderer_.reset();
-  remote_audio_renderer_.reset();
   video_source_ = nullptr;
   audio_source_ = nullptr;
   if (adm_ && worker_thread_) {

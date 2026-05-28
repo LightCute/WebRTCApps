@@ -79,20 +79,34 @@ bool RgaVideoTrackSource::Init(webrtc::TaskQueueFactory& task_queue_factory,
     RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: librga not available";
     return false;
   }
+  RTC_LOG(LS_INFO) << "RgaVideoTrackSource: librga loaded OK";
 
   device_info_.reset(webrtc::VideoCaptureFactory::CreateDeviceInfo());
-  if (!device_info_) return false;
+  if (!device_info_) {
+    RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: CreateDeviceInfo returned null";
+    return false;
+  }
 
   int ndev = device_info_->NumberOfDevices();
-  if (ndev <= 0) return false;
+  RTC_LOG(LS_INFO) << "RgaVideoTrackSource: V4L2 devices found: " << ndev;
+  if (ndev <= 0) {
+    RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: no V4L2 capture devices";
+    return false;
+  }
 
   int target = (device_idx >= 0 && device_idx < ndev) ? device_idx : 0;
   char name[256], uid[256];
-  if (device_info_->GetDeviceName(target, name, sizeof(name), uid, sizeof(uid)) != 0)
+  if (device_info_->GetDeviceName(target, name, sizeof(name), uid, sizeof(uid)) != 0) {
+    RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: GetDeviceName failed for idx=" << target;
     return false;
+  }
+  RTC_LOG(LS_INFO) << "RgaVideoTrackSource: device[" << target << "] name='" << name << "' uid='" << uid << "'";
 
   vcm_ = webrtc::VideoCaptureFactory::Create(uid);
-  if (!vcm_) return false;
+  if (!vcm_) {
+    RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: VideoCaptureFactory::Create failed for uid=" << uid;
+    return false;
+  }
 
   vcm_->RegisterCaptureDataCallback(
       static_cast<webrtc::RawVideoSinkInterface*>(this));
@@ -103,7 +117,11 @@ bool RgaVideoTrackSource::Init(webrtc::TaskQueueFactory& task_queue_factory,
   cap.videoType = webrtc::VideoType::kYUY2;
   cap.interlaced = false;
 
-  if (vcm_->StartCapture(cap) != 0) return false;
+  if (vcm_->StartCapture(cap) != 0) {
+    RTC_LOG(LS_WARNING) << "RgaVideoTrackSource: StartCapture failed";
+    return false;
+  }
+  RTC_LOG(LS_INFO) << "RgaVideoTrackSource: capture started OK, 640x480 YUY2 @30fps";
   return vcm_->CaptureStarted();
 }
 
@@ -233,17 +251,11 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
   // Deliver to encoder sink
   if (sink_) sink_->OnFrame(frame);
 
-  // Local preview: RGA NV12->I420 to DMA-BUF
+  // Local preview: RGA NV12->I420 to DMA-BUF.
+  // Don't block waiting for consumers — just overwrite the oldest slot.
+  // DMA-BUF readers mmap the fd directly and may not update SHM r_idx.
   if (preview_pool_ && preview_ctrl_) {
     pthread_mutex_lock(&preview_ctrl_->mtx);
-    while (preview_ctrl_->frame_count >= RING_BUFFER_CNT) {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_nsec += 100 * 1000000;
-      if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-      pthread_cond_timedwait(&preview_ctrl_->cv_can_write,
-                             &preview_ctrl_->mtx, &ts);
-    }
     uint32_t pw_idx = preview_ctrl_->w_idx;
     pthread_mutex_unlock(&preview_ctrl_->mtx);
 

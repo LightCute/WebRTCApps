@@ -17,10 +17,7 @@
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
-#include "absl/flags/declare.h"
 #include "absl/flags/flag.h"
-
-ABSL_DECLARE_FLAG(std::string, audio_source);
 
 #include <cstddef>
 #include <cstring>
@@ -64,7 +61,6 @@ ABSL_DECLARE_FLAG(std::string, audio_source);
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
 #include "apps/peerconnection/client_arm64/defaults.h"
-#include "apps/peerconnection/client_arm64/shm_audio_writer.h"
 #include "apps/peerconnection/client_arm64/shm_video_writer.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
 #include "json/json.h"
@@ -394,9 +390,6 @@ void WebRTCEngine::OnAddTrack(
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
     pipeline_->StartRemoteRenderer(video_track);
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
-    pipeline_->StartRemoteAudioRenderer(audio_track);
   }
 }
 
@@ -407,8 +400,6 @@ void WebRTCEngine::OnRemoveTrack(
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     pipeline_->StopRemoteRenderer();
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    pipeline_->StopRemoteAudioRenderer();
   }
 }
 
@@ -857,6 +848,10 @@ bool WebRTCEngine::InitializePeerConnection() {
   peer_connection_ = std::move(pc.connection);
   connection_active_.store(true, std::memory_order_release);
 
+  // WebRtcVoiceEngine::Init() resets ADM devices to 0 (DP0).
+  // Re-select NAU8822 and re-init playout/recording.
+  pipeline_->FixupAudioDeviceSelection();
+
   AddTracks();
 
   dc_manager_ = std::make_unique<DataChannelManager>();
@@ -890,16 +885,7 @@ void WebRTCEngine::AddTracks() {
   }
 
   // Audio track
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    shm_source = ShmAudioCapturer::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!shm_source)
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
-  }
-
-  auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  auto audio_src = pipeline_->CreateAudioSource(factory_.get());
   auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
   auto audio_result = peer_connection_->AddTrack(audio_track, {kStreamId});
   if (!audio_result.ok()) {

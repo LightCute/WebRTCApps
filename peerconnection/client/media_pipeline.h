@@ -10,7 +10,6 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
-#include "apps/peerconnection/client/shm_audio_renderer.h"
 #include "apps/peerconnection/client/shm_video_renderer.h"
 #include "rtc_base/thread.h"
 
@@ -28,8 +27,7 @@ class MediaPipeline {
   // ---- Sources ----
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
   webrtc::AudioSourceInterface* CreateAudioSource(
-      webrtc::PeerConnectionFactoryInterface* factory,
-      webrtc::AudioSourceInterface* external_source = nullptr);
+      webrtc::PeerConnectionFactoryInterface* factory);
 
   // ---- Events ----
   using EventCallback = std::function<void(const std::string& json)>;
@@ -49,9 +47,6 @@ class MediaPipeline {
   void StopLocalRenderer();
   void StartRemoteRenderer(webrtc::VideoTrackInterface* track);
   void StopRemoteRenderer();
-  void StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track);
-  void StopRemoteAudioRenderer();
-
   // ---- Lifecycle ----
   void Shutdown();
 
@@ -64,8 +59,6 @@ class MediaPipeline {
 
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;
-  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
-
   EventCallback event_cb_;
   int video_device_idx_ = -1;
   int audio_input_device_idx_ = -1;

@@ -25,7 +25,6 @@
 #include "apps/peerconnection/client/data_channel_manager.h"
 #include "apps/peerconnection/client/engine_controller.h"
 #include "apps/peerconnection/client/media_pipeline.h"
-#include "apps/peerconnection/client/shm_audio_capturer.h"
 #include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/thread.h"
 
