@@ -12,6 +12,7 @@
 #include "api/scoped_refptr.h"
 
 #include "apps/peerconnection/client_arm64/shm_video_renderer.h"
+#include "apps/peerconnection/client_arm64/video_frame_shm_ctrl.h"
 #include "apps/peerconnection/client_arm64/dma_buf_pool.h"
 #include "apps/peerconnection/client_arm64/dma_buf_server.h"
 #include "apps/peerconnection/client_arm64/rga_decoded_sink.h"
@@ -75,8 +76,8 @@ class MediaPipeline {
   std::unique_ptr<DmaBufServer> local_dma_server_;
   std::unique_ptr<DmaBufServer> remote_dma_server_;
   std::unique_ptr<RgaDecodedSink> remote_rga_sink_;
-  ShmCtrlBlock* local_ctrl_ = nullptr;
-  ShmCtrlBlock* remote_ctrl_ = nullptr;
+  ShmMultiCtrlBlock* local_ctrl_ = nullptr;
+  ShmMultiCtrlBlock* remote_ctrl_ = nullptr;
   bool use_rga_source_ = false;
 
   // Capture pool (NV12 DMA-BUF for zero-copy encode)

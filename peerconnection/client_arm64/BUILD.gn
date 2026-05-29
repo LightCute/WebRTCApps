@@ -49,6 +49,8 @@ rtc_executable("peerconnection_client") {
     "dma_buf_pool.h",
     "dma_buf_server.cc",
     "dma_buf_server.h",
+    "video_frame_shm_ctrl.cc",
+    "video_frame_shm_ctrl.h",
     "webrtc_engine.cc",
     "webrtc_engine.h",
   ]

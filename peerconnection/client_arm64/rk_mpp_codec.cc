@@ -22,6 +22,7 @@
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
+#include "rtc_base/time_utils.h"
 
 // ── Real MPP headers from SDK ─────────────────────────
 extern "C" {
@@ -498,81 +499,98 @@ struct MppH264Decoder::Impl {
     mpp_packet_deinit(&packet);
     if (!pkt_done) return WEBRTC_VIDEO_CODEC_ERROR;
 
-    MppFrame frame = nullptr;
-    for (int tries = 0; tries < MAX_RETRY; tries++) {
+    // Drain ALL available frames from MPP's output queue.
+    // MPP decodes in batches — multiple frames may be ready after a
+    // few packets. Only taking one per DecodeOne causes bursty output
+    // (3-5s smooth, 1s freeze). Loop until no more frames are available.
+    int frames_decoded = 0;
+    while (true) {
+      MppFrame frame = nullptr;
       ret = mpi->decode_get_frame(ctx, &frame);
-      if (ret == MPP_OK && frame) break;
-      usleep(1000);
-    }
-    if (!frame) return WEBRTC_VIDEO_CODEC_OK;
+      if (ret != MPP_OK || !frame) {
+        if (frames_decoded == 0) {
+          // First attempt returned nothing — try a few more times
+          for (int tries = 0; tries < MAX_RETRY && !frame; tries++) {
+            usleep(1000);
+            ret = mpi->decode_get_frame(ctx, &frame);
+            if (ret == MPP_OK && frame) break;
+          }
+          if (!frame) return WEBRTC_VIDEO_CODEC_OK;
+        } else {
+          break;  // No more frames in queue, done draining
+        }
+      }
 
-    if (mpp_frame_get_info_change(frame)) {
-      w = mpp_frame_get_width(frame);
-      h = mpp_frame_get_height(frame);
-      hor_stride = mpp_frame_get_hor_stride(frame);
-      ver_stride = mpp_frame_get_ver_stride(frame);
-      buf_size = mpp_frame_get_buf_size(frame);
+      if (mpp_frame_get_info_change(frame)) {
+        w = mpp_frame_get_width(frame);
+        h = mpp_frame_get_height(frame);
+        hor_stride = mpp_frame_get_hor_stride(frame);
+        ver_stride = mpp_frame_get_ver_stride(frame);
+        buf_size = mpp_frame_get_buf_size(frame);
 
-      RTC_LOG(LS_INFO) << "Decoder info change: " << w << "x" << h
-                       << " stride=" << hor_stride << "x" << ver_stride
-                       << " buf=" << buf_size;
+        RTC_LOG(LS_INFO) << "Decoder info change: " << w << "x" << h
+                         << " stride=" << hor_stride << "x" << ver_stride
+                         << " buf=" << buf_size;
 
-      if (frm_grp) mpp_buffer_group_put(frm_grp);
-      ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_DRM, MPP_BUFFER_INTERNAL, "rk", __func__);
-      if (ret)
-        ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_ION, MPP_BUFFER_INTERNAL, "rk", __func__);
-      mpp_buffer_group_limit_config(frm_grp, buf_size, 24);
+        if (frm_grp) mpp_buffer_group_put(frm_grp);
+        ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_DRM, MPP_BUFFER_INTERNAL, "rk", __func__);
+        if (ret)
+          ret = mpp_buffer_group_get(&frm_grp, MPP_BUFFER_TYPE_ION, MPP_BUFFER_INTERNAL, "rk", __func__);
+        mpp_buffer_group_limit_config(frm_grp, buf_size, 24);
 
-      mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, frm_grp);
-      mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
-      info_ready = true;
+        mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, frm_grp);
+        mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
+        info_ready = true;
+
+        mpp_frame_deinit(&frame);
+        continue;  // info_change frame, no pixel data
+      }
+
+      if (!info_ready) {
+        mpp_frame_deinit(&frame);
+        continue;
+      }
+
+      MppBuffer dec_buf = mpp_frame_get_buffer(frame);
+      if (!dec_buf) {
+        mpp_frame_deinit(&frame);
+        continue;
+      }
+
+      // Export MPP dma-buf fd for zero-copy RGA source
+      last_nv12_fd_ = mpp_buffer_get_fd(dec_buf);
+
+      uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
+      scoped_refptr<I420Buffer> i420 = I420Buffer::Create(w, h);
+      if (!i420) {
+        mpp_frame_deinit(&frame);
+        continue;
+      }
+
+      int ys = w * h, uvs = ys / 4;
+      memcpy(i420->MutableDataY(), src, ys);
+      for (int i = 0; i < uvs; i++) {
+        i420->MutableDataU()[i] = src[ys + i*2];
+        i420->MutableDataV()[i] = src[ys + i*2 + 1];
+      }
+
+      VideoFrame decoded_frame = VideoFrame::Builder()
+          .set_video_frame_buffer(i420)
+          .set_rtp_timestamp(input_image.RtpTimestamp())
+          .set_ntp_time_ms(input_image.NtpTimeMs())
+          .set_timestamp_us(TimeMicros())
+          .build();
+
+      if (callback) {
+        callback->Decoded(decoded_frame, render_time_ms);
+      }
+      if (MppH264Decoder::decoded_hook_) {
+        MppH264Decoder::decoded_hook_->Decoded(decoded_frame, render_time_ms);
+      }
 
       mpp_frame_deinit(&frame);
-      return WEBRTC_VIDEO_CODEC_OK;
+      frames_decoded++;
     }
-
-    if (!info_ready) {
-      mpp_frame_deinit(&frame);
-      return WEBRTC_VIDEO_CODEC_OK;
-    }
-
-    MppBuffer dec_buf = mpp_frame_get_buffer(frame);
-    if (!dec_buf) {
-      mpp_frame_deinit(&frame);
-      return WEBRTC_VIDEO_CODEC_ERROR;
-    }
-
-    // Export MPP dma-buf fd for zero-copy RGA source
-    last_nv12_fd_ = mpp_buffer_get_fd(dec_buf);
-
-    uint8_t* src = (uint8_t*)mpp_buffer_get_ptr_with_caller(dec_buf, __func__);
-    scoped_refptr<I420Buffer> i420 = I420Buffer::Create(w, h);
-    if (!i420) {
-      mpp_frame_deinit(&frame);
-      return WEBRTC_VIDEO_CODEC_ERROR;
-    }
-
-    int ys = w * h, uvs = ys / 4;
-    memcpy(i420->MutableDataY(), src, ys);
-    for (int i = 0; i < uvs; i++) {
-      i420->MutableDataU()[i] = src[ys + i*2];
-      i420->MutableDataV()[i] = src[ys + i*2 + 1];
-    }
-
-    VideoFrame decoded_frame = VideoFrame::Builder()
-        .set_video_frame_buffer(i420)
-        .set_rtp_timestamp(input_image.RtpTimestamp())
-        .set_ntp_time_ms(input_image.NtpTimeMs())
-        .build();
-
-    if (callback) {
-      callback->Decoded(decoded_frame, render_time_ms);
-    }
-    if (MppH264Decoder::decoded_hook_) {
-      MppH264Decoder::decoded_hook_->Decoded(decoded_frame, render_time_ms);
-    }
-
-    mpp_frame_deinit(&frame);
     return WEBRTC_VIDEO_CODEC_OK;
   }
 };

@@ -144,7 +144,7 @@ void RgaVideoTrackSource::RemoveSink(
   if (sink_ == sink) sink_ = nullptr;
 }
 
-void RgaVideoTrackSource::SetLocalPreview(DmaBufPool* pool, ShmCtrlBlock* ctrl) {
+void RgaVideoTrackSource::SetLocalPreview(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl) {
   preview_pool_ = pool;
   preview_ctrl_ = ctrl;
 }
@@ -251,12 +251,13 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
   // Deliver to encoder sink
   if (sink_) sink_->OnFrame(frame);
 
-  // Local preview: RGA NV12->I420 to DMA-BUF.
-  // Don't block waiting for consumers — just overwrite the oldest slot.
-  // DMA-BUF readers mmap the fd directly and may not update SHM r_idx.
+  // Local preview: RGA NV12→I420 to DMA-BUF with seqlock (multi-consumer safe)
   if (preview_pool_ && preview_ctrl_) {
+    // Seqlock: mark slot as writing (odd seq)
     pthread_mutex_lock(&preview_ctrl_->mtx);
     uint32_t pw_idx = preview_ctrl_->w_idx;
+    preview_ctrl_->seq[pw_idx]++;       // odd = writing
+    __sync_synchronize();
     pthread_mutex_unlock(&preview_ctrl_->mtx);
 
     int dst_fd = preview_pool_->GetFd(pw_idx);
@@ -287,7 +288,8 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
     dst2.mmuFlag = 1; dst2.sync_mode = 1;  // sync: DMA-BUF flushed before SHM update
 
     if (rga_blit_(&src2, &dst2, nullptr) == 0) {
-      size_t total = ys + 2 * (ys / 4);
+      size_t total = ys + 2 * uvs;
+      // RGA done — write metadata and finalize seqlock (even = done)
       pthread_mutex_lock(&preview_ctrl_->mtx);
       RingVideoFrameItem& item = preview_ctrl_->ring[pw_idx];
       memset(&item.head, 0, sizeof(item.head));
@@ -295,10 +297,14 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
       item.head.width = static_cast<uint16_t>(w);
       item.head.height = static_cast<uint16_t>(h);
       preview_ctrl_->w_idx = (pw_idx + 1) % RING_BUFFER_CNT;
-      preview_ctrl_->frame_count++;
-      pthread_cond_signal(&preview_ctrl_->cv_can_read);
+      preview_ctrl_->seq[pw_idx]++;     // even = done
+      __sync_synchronize();
+      pthread_cond_broadcast(&preview_ctrl_->cv_can_read);
       pthread_mutex_unlock(&preview_ctrl_->mtx);
     } else {
+      // RGA failed — revert seqlock
+      pthread_mutex_lock(&preview_ctrl_->mtx);
+      preview_ctrl_->seq[pw_idx]--;     // restore
       pthread_mutex_unlock(&preview_ctrl_->mtx);
     }
   }

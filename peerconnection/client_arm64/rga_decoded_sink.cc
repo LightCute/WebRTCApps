@@ -12,6 +12,7 @@
 
 #include "apps/peerconnection/client_arm64/dma_buf_pool.h"
 #include "apps/peerconnection/client_arm64/shm_common.h"
+#include "apps/peerconnection/client_arm64/video_frame_shm_ctrl.h"
 #include "apps/peerconnection/client_arm64/rk_mpp_codec.h"
 #include "rtc_base/logging.h"
 
@@ -36,7 +37,7 @@ bool RgaDecodedSink::Init() {
   return true;
 }
 
-void RgaDecodedSink::SetOutput(DmaBufPool* pool, ShmCtrlBlock* ctrl) {
+void RgaDecodedSink::SetOutput(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl) {
   pool_ = pool;
   ctrl_ = ctrl;
 }
@@ -53,42 +54,38 @@ int32_t RgaDecodedSink::Decoded(webrtc::VideoFrame& frame) {
   int ys = w * h, uvs = ys / 4;
   size_t total = ys + 2 * uvs;
 
+  // Multi-consumer seqlock write
   pthread_mutex_lock(&ctrl_->mtx);
-  while (ctrl_->frame_count >= RING_BUFFER_CNT) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 100 * 1000000;
-    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-    pthread_cond_timedwait(&ctrl_->cv_can_write, &ctrl_->mtx, &ts);
-  }
   uint32_t w_idx = ctrl_->w_idx;
+  ctrl_->seq[w_idx]++;          // odd = writing
+  __sync_synchronize();
   pthread_mutex_unlock(&ctrl_->mtx);
 
   int dst_fd = pool_->GetFd(w_idx);
 
-  rga_info_t src{};
-  rga_info_t dst{};
+  // RGA source setup (same as before)
+  rga_info_t src{}, dst{};
   memset(&src, 0, sizeof(src));
   memset(&dst, 0, sizeof(dst));
 
-  // Priority 1: MPP decoder dma-buf fd — zero-copy NV12 source
   int mpp_fd = decoder_ ? decoder_->GetLastNV12Fd() : -1;
   if (mpp_fd >= 0) {
     src.fd = mpp_fd;
     src.format = RK_FORMAT_YCbCr_420_SP;
   } else {
-    // Priority 2: NV12 CPU buffer (MPP fd export failed or not available).
-    // GetNV12() RTC_CHECKs type == kNV12 and aborts on non-NV12 frames.
-    // WebRTC may adapt the frame to I420, so check the type safely first.
     auto buf = frame.video_frame_buffer();
     if (buf->type() == webrtc::VideoFrameBuffer::Type::kNV12) {
       auto* nv12 = static_cast<const webrtc::NV12BufferInterface*>(buf.get());
       src.virAddr = const_cast<uint8_t*>(nv12->DataY());
       src.format = RK_FORMAT_YCbCr_420_SP;
     } else {
-      // Priority 3: I420 CPU fallback
       auto i420 = frame.video_frame_buffer()->ToI420();
-      if (!i420) return 0;
+      if (!i420) {
+        pthread_mutex_lock(&ctrl_->mtx);
+        ctrl_->seq[w_idx]--;     // revert seqlock
+        pthread_mutex_unlock(&ctrl_->mtx);
+        return 0;
+      }
       src.virAddr = const_cast<uint8_t*>(i420->DataY());
       src.format = RK_FORMAT_YCbCr_420_P;
     }
@@ -108,9 +105,13 @@ int32_t RgaDecodedSink::Decoded(webrtc::VideoFrame& frame) {
   if (rga_blit_(&src, &dst, nullptr) != 0) {
     static int errs = 0;
     if (errs++ < 3) RTC_LOG(LS_WARNING) << "RgaDecodedSink: blit failed";
+    pthread_mutex_lock(&ctrl_->mtx);
+    ctrl_->seq[w_idx]--;         // revert seqlock on failure
+    pthread_mutex_unlock(&ctrl_->mtx);
     return 0;
   }
 
+  // RGA done — write metadata and finalize seqlock (even = done)
   pthread_mutex_lock(&ctrl_->mtx);
   RingVideoFrameItem& item = ctrl_->ring[w_idx];
   memset(&item.head, 0, sizeof(item.head));
@@ -120,10 +121,10 @@ int32_t RgaDecodedSink::Decoded(webrtc::VideoFrame& frame) {
   item.head.frame_type = 0;
   item.head.ntp_time_ms = frame.ntp_time_ms();
   ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
-  ctrl_->frame_count++;
-  pthread_cond_signal(&ctrl_->cv_can_read);
+  ctrl_->seq[w_idx]++;           // even = done
+  __sync_synchronize();
+  pthread_cond_broadcast(&ctrl_->cv_can_read);
   pthread_mutex_unlock(&ctrl_->mtx);
-
   return 0;
 }
 

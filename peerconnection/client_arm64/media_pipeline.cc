@@ -113,6 +113,24 @@ static ShmCtrlBlock* InitCtrlShmHelper(const std::string& key_path, int proj_id)
   return ptr;
 }
 
+static ShmMultiCtrlBlock* InitMultiCtrlShmHelper(
+    const std::string& key_path, int proj_id) {
+  int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
+  if (fd >= 0) close(fd);
+  key_t key = ftok(key_path.c_str(), proj_id);
+  if (key == -1) { perror("ftok"); return nullptr; }
+  int shmid = shmget(key, SHM_MULTI_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
+  if (shmid == -1) { perror("shmget"); return nullptr; }
+  auto* ptr = static_cast<ShmMultiCtrlBlock*>(shmat(shmid, nullptr, 0));
+  if (ptr == (void*)-1) { perror("shmat"); return nullptr; }
+  if (video_frame_shm_init(ptr) != 0) {
+    perror("video_frame_shm_init");
+    shmdt(ptr);
+    return nullptr;
+  }
+  return ptr;
+}
+
 }  // namespace
 
 MediaPipeline::MediaPipeline(const webrtc::Environment& env,
@@ -377,8 +395,8 @@ void MediaPipeline::StartLocalRenderer(webrtc::VideoTrackInterface* track) {
     const size_t kFrameSize = 640 * 480 * 3 / 2;
     local_dma_pool_ = std::make_unique<DmaBufPool>();
     if (local_dma_pool_->Allocate(kFrameSize) == 0) {
-      local_ctrl_ = InitCtrlShmHelper(shm_video_local_key_path(),
-                                      SHM_VIDEO_LOCAL_PROJ_ID);
+      local_ctrl_ = InitMultiCtrlShmHelper(shm_video_local_key_path(),
+                                           SHM_VIDEO_LOCAL_PROJ_ID);
       if (local_ctrl_) {
         int fds[DmaBufPool::kNumSlots];
         for (int i = 0; i < DmaBufPool::kNumSlots; ++i)
@@ -386,7 +404,8 @@ void MediaPipeline::StartLocalRenderer(webrtc::VideoTrackInterface* track) {
         local_dma_server_ = std::make_unique<DmaBufServer>();
         local_dma_server_->Start(
             shm_video_local_key_path() + "_socket",
-            fds, DmaBufPool::kNumSlots);
+            fds, DmaBufPool::kNumSlots,
+            kFrameSize, local_ctrl_);
         auto* rga_src = static_cast<RgaVideoTrackSource*>(video_source_.get());
         rga_src->SetLocalPreview(local_dma_pool_.get(), local_ctrl_);
         RTC_LOG(LS_INFO) << "Local DMA-BUF preview started";
@@ -420,8 +439,8 @@ void MediaPipeline::StartRemoteRenderer(webrtc::VideoTrackInterface* track) {
     const size_t kFrameSize = 640 * 480 * 3 / 2;
     remote_dma_pool_ = std::make_unique<DmaBufPool>();
     if (remote_dma_pool_->Allocate(kFrameSize) == 0) {
-      remote_ctrl_ = InitCtrlShmHelper(shm_video_remote_key_path(),
-                                       SHM_VIDEO_REMOTE_PROJ_ID);
+      remote_ctrl_ = InitMultiCtrlShmHelper(shm_video_remote_key_path(),
+                                           SHM_VIDEO_REMOTE_PROJ_ID);
       if (remote_ctrl_) {
         int fds[DmaBufPool::kNumSlots];
         for (int i = 0; i < DmaBufPool::kNumSlots; ++i)
@@ -429,7 +448,8 @@ void MediaPipeline::StartRemoteRenderer(webrtc::VideoTrackInterface* track) {
         remote_dma_server_ = std::make_unique<DmaBufServer>();
         remote_dma_server_->Start(
             shm_video_remote_key_path() + "_socket",
-            fds, DmaBufPool::kNumSlots);
+            fds, DmaBufPool::kNumSlots,
+            kFrameSize, remote_ctrl_);
         remote_rga_sink_->SetOutput(remote_dma_pool_.get(), remote_ctrl_);
         webrtc::MppH264Decoder::SetDecodedHook(remote_rga_sink_.get());
         RTC_LOG(LS_INFO) << "Remote DMA-BUF sink wired to MPP decoder";

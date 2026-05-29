@@ -9,7 +9,7 @@ class MppH264Decoder;
 }
 
 class DmaBufPool;
-struct ShmCtrlBlock;
+struct ShmMultiCtrlBlock;
 
 class RgaDecodedSink : public webrtc::DecodedImageCallback {
  public:
@@ -17,7 +17,7 @@ class RgaDecodedSink : public webrtc::DecodedImageCallback {
   ~RgaDecodedSink() override;
 
   bool Init();
-  void SetOutput(DmaBufPool* pool, ShmCtrlBlock* ctrl);
+  void SetOutput(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl);
   void SetDecoder(webrtc::MppH264Decoder* decoder);
 
   int32_t Decoded(webrtc::VideoFrame& frame) override;
@@ -29,7 +29,7 @@ class RgaDecodedSink : public webrtc::DecodedImageCallback {
   int (*rga_blit_)(void*, void*, void*) = nullptr;
 
   DmaBufPool* pool_ = nullptr;
-  ShmCtrlBlock* ctrl_ = nullptr;
+  ShmMultiCtrlBlock* ctrl_ = nullptr;
 };
 
 #endif

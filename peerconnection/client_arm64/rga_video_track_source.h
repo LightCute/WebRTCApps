@@ -15,9 +15,11 @@
 #include "modules/video_capture/video_capture_defines.h"
 #include "pc/video_track_source.h"
 #include "rtc_base/thread.h"
+#include "apps/peerconnection/client_arm64/video_frame_shm_ctrl.h"
 
 class DmaBufPool;
 struct ShmCtrlBlock;
+struct ShmMultiCtrlBlock;
 
 namespace webrtc {
 class Environment;
@@ -50,7 +52,7 @@ class RgaVideoTrackSource : public webrtc::VideoTrackSource,
                      webrtc::VideoRotation rotation,
                      int64_t captureTime) override;
 
-  void SetLocalPreview(DmaBufPool* pool, ShmCtrlBlock* ctrl);
+  void SetLocalPreview(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl);
   void SetCapturePool(DmaBufPool* pool, ShmCtrlBlock* ctrl);
 
  protected:
@@ -72,7 +74,7 @@ class RgaVideoTrackSource : public webrtc::VideoTrackSource,
   webrtc::VideoSinkWants wants_;
 
   DmaBufPool* preview_pool_ = nullptr;
-  ShmCtrlBlock* preview_ctrl_ = nullptr;
+  ShmMultiCtrlBlock* preview_ctrl_ = nullptr;
 
   DmaBufPool* capture_pool_ = nullptr;
   ShmCtrlBlock* capture_ctrl_ = nullptr;
