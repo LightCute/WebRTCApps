@@ -6,8 +6,9 @@
 #include <string>
 #include <thread>
 
-// Sends dma-buf fds to a single consumer via Unix domain socket.
-// Stop() closes the server socket to unblock pending accept(), then joins.
+// Sends dma-buf fds to multiple consumers via Unix domain socket.
+// Each client that connects receives the full set of fds via SCM_RIGHTS.
+// accept() blocks with zero CPU; late-joining clients are served automatically.
 class DmaBufServer {
  public:
   DmaBufServer() = default;

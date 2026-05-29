@@ -1,4 +1,4 @@
-// dma_buf_server.cc — Unix socket server to pass dma-buf fds
+// dma_buf_server.cc — Unix socket server to pass dma-buf fds to consumers
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic push
@@ -66,7 +66,8 @@ int DmaBufServer::Start(const std::string& socket_path, const int* fds,
     return -1;
   }
 
-  if (listen(server_fd_, 1) < 0) {
+  // Backlog 5: renderer + AI + extras. accept() blocks with zero CPU.
+  if (listen(server_fd_, 5) < 0) {
     perror("DmaBufServer: listen");
     close(server_fd_); server_fd_ = -1;
     unlink(socket_path.c_str());
@@ -78,27 +79,28 @@ int DmaBufServer::Start(const std::string& socket_path, const int* fds,
   int fd = server_fd_;  // capture for lambda
 
   thread_ = std::thread([path_copy, fd_copy, fd]() {
-    fprintf(stderr, "DmaBufServer: waiting for consumer on %s...\n",
-            path_copy.c_str());
+    fprintf(stderr, "DmaBufServer: listening on %s (%d fds)\n",
+            path_copy.c_str(), (int)fd_copy.size());
 
-    int client_fd = accept(fd, nullptr, nullptr);
-    if (client_fd < 0) {
-      // accept() failed — likely because Stop() closed server_fd
-      if (errno != EBADF && errno != EINVAL)
+    while (true) {
+      int client_fd = accept(fd, nullptr, nullptr);
+      if (client_fd < 0) {
+        if (errno == EBADF || errno == EINVAL) break;  // server shut down
         perror("DmaBufServer: accept");
-      return;
-    }
+        continue;
+      }
 
-    if (SendFds(client_fd, fd_copy.data(), (int)fd_copy.size()) < 0) {
-      fprintf(stderr, "DmaBufServer: sendmsg failed: %s\n", strerror(errno));
-    } else {
-      fprintf(stderr, "DmaBufServer: sent %d fds to consumer\n",
+      fprintf(stderr, "DmaBufServer: client connected, sending %d fds\n",
               (int)fd_copy.size());
-    }
 
-    close(client_fd);
-    close(fd);
-    unlink(path_copy.c_str());
+      if (SendFds(client_fd, fd_copy.data(), (int)fd_copy.size()) < 0) {
+        fprintf(stderr, "DmaBufServer: sendmsg failed: %s\n", strerror(errno));
+      }
+
+      close(client_fd);
+      // Client disconnects after receiving fds — the fds remain valid
+      // in the client process for the lifetime of the DMA-BUF pool.
+    }
   });
 
   return 0;

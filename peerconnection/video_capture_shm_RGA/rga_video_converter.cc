@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/video_capture_shm_RGA/video_frame_shm_ctrl.h"
 #include "apps/peerconnection/video_capture_shm_RGA/dma_buf_pool.h"
 #include "rtc_base/logging.h"
 
@@ -63,7 +63,7 @@ bool RgaVideoConverter::Init() {
   return true;
 }
 
-void RgaVideoConverter::SetOutput(DmaBufPool* pool, ShmCtrlBlock* ctrl) {
+void RgaVideoConverter::SetOutput(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl) {
   pool_ = pool;
   ctrl_ = ctrl;
 }
@@ -83,12 +83,13 @@ int32_t RgaVideoConverter::OnRawFrame(uint8_t* videoFrame,
   size_t uv_size = ((w + 1) / 2) * ((h + 1) / 2);
   size_t total = y_size + 2 * uv_size;
 
-  // Wait for an available write slot in the ring buffer
+  // No back-pressure: always write, overwrite oldest slot
   pthread_mutex_lock(&ctrl_->mtx);
-  while (ctrl_->frame_count >= RING_BUFFER_CNT) {
-    pthread_cond_wait(&ctrl_->cv_can_write, &ctrl_->mtx);
-  }
   uint32_t w_idx = ctrl_->w_idx;
+
+  // Seqlock: mark slot as "writing" (odd seq)
+  ctrl_->seq[w_idx]++;
+  __sync_synchronize();  // write barrier: seq visible before RGA blit starts
   pthread_mutex_unlock(&ctrl_->mtx);
 
   // Get dma-buf fd for this slot — RGA writes directly to CMA memory
@@ -109,7 +110,6 @@ int32_t RgaVideoConverter::OnRawFrame(uint8_t* videoFrame,
   src.mmuFlag = 1;
   src.sync_mode = 0;
 
-  // Configure destination — dma-buf fd (RGA DMA writes directly, no CPU copy)
   rga_info_t dst;
   memset(&dst, 0, sizeof(dst));
   dst.fd = dst_fd;
@@ -129,10 +129,14 @@ int32_t RgaVideoConverter::OnRawFrame(uint8_t* videoFrame,
     if (err_count++ < 3) {
       RTC_LOG(LS_WARNING) << "RgaVideoConverter: c_RkRgaBlit failed";
     }
+    // Revert seqlock on failure
+    pthread_mutex_lock(&ctrl_->mtx);
+    ctrl_->seq[w_idx]--;  // restore even
+    pthread_mutex_unlock(&ctrl_->mtx);
     return 0;
   }
 
-  // Write frame metadata to control block
+  // RGA blit complete — write metadata and advance
   pthread_mutex_lock(&ctrl_->mtx);
 
   RingVideoFrameItem& item = ctrl_->ring[w_idx];
@@ -143,10 +147,14 @@ int32_t RgaVideoConverter::OnRawFrame(uint8_t* videoFrame,
   item.head.frame_type = 0;
   item.head.rotation = static_cast<uint8_t>(rotation);
 
-  ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
-  ctrl_->frame_count++;
+  // Seqlock: mark slot as "done" (even seq)
+  __sync_synchronize();  // write barrier: RGA data visible before seq turns even
+  ctrl_->seq[w_idx]++;
 
-  pthread_cond_signal(&ctrl_->cv_can_read);
+  ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
+
+  // Broadcast to ALL consumers (was pthread_cond_signal)
+  pthread_cond_broadcast(&ctrl_->cv_can_read);
   pthread_mutex_unlock(&ctrl_->mtx);
 
   return 0;

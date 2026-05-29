@@ -11,6 +11,8 @@ rtc_executable("video_capture_shm_RGA") {
     "dma_buf_server.h",
     "rga_video_converter.cc",
     "rga_video_converter.h",
+    "video_frame_shm_ctrl.cc",
+    "video_frame_shm_ctrl.h",
     "../client/shm_common.cc",
     "../client/shm_common.h",
     "../client/shm_video_renderer.cc",

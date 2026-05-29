@@ -9,7 +9,7 @@
 #include "modules/video_capture/video_capture_defines.h"
 
 class DmaBufPool;
-struct ShmCtrlBlock;
+struct ShmMultiCtrlBlock;
 
 // Receives raw YUYV frames from VCM, converts to I420 via RGA hardware
 // writing directly to a dma-buf pool slot (zero CPU copy).
@@ -23,7 +23,7 @@ class RgaVideoConverter : public webrtc::RawVideoSinkInterface {
   bool Init();
 
   // Set the output target: dma-buf pool + control block for ring buffer sync.
-  void SetOutput(DmaBufPool* pool, ShmCtrlBlock* ctrl);
+  void SetOutput(DmaBufPool* pool, ShmMultiCtrlBlock* ctrl);
 
   // RawVideoSinkInterface — called from VCM capture thread
   int32_t OnRawFrame(uint8_t* videoFrame,
@@ -43,7 +43,7 @@ class RgaVideoConverter : public webrtc::RawVideoSinkInterface {
 
   // DMA-BUF output
   DmaBufPool* pool_ = nullptr;
-  ShmCtrlBlock* ctrl_ = nullptr;
+  ShmMultiCtrlBlock* ctrl_ = nullptr;
 };
 
 #endif  // APPS_PEERCONNECTION_VIDEO_CAPTURE_SHM_RGA_RGA_VIDEO_CONVERTER_H_

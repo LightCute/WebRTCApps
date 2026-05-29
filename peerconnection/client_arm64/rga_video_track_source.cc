@@ -284,7 +284,7 @@ int32_t RgaVideoTrackSource::OnRawFrame(uint8_t* videoFrame,
     dst2.rect.width = w; dst2.rect.height = h;
     dst2.rect.wstride = w; dst2.rect.hstride = h;
     dst2.rect.format = RK_FORMAT_YCbCr_420_P;
-    dst2.mmuFlag = 1; dst2.sync_mode = 0;
+    dst2.mmuFlag = 1; dst2.sync_mode = 1;  // sync: DMA-BUF flushed before SHM update
 
     if (rga_blit_(&src2, &dst2, nullptr) == 0) {
       size_t total = ys + 2 * (ys / 4);
