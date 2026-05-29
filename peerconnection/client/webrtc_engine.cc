@@ -254,29 +254,9 @@ void WebRTCEngine::HangUpImpl() {
   //on_event_(BuildPeerListJson(signaling_->peers()));
 }
 
-void WebRTCEngine::SetAudioMuted(bool muted) {
-  if (signaling_thread_->IsCurrent()) {
-    SetAudioMutedImpl(muted);
-  } else {
-    signaling_thread_->PostTask([this, muted] { SetAudioMutedImpl(muted); });
-  }
-}
 
-void WebRTCEngine::SetAudioMutedImpl(bool muted) {
-  pipeline_->SetAudioMuted(muted);
-}
 
-void WebRTCEngine::SetVideoPaused(bool paused) {
-  if (signaling_thread_->IsCurrent()) {
-    SetVideoPausedImpl(paused);
-  } else {
-    signaling_thread_->PostTask([this, paused] { SetVideoPausedImpl(paused); });
-  }
-}
 
-void WebRTCEngine::SetVideoPausedImpl(bool paused) {
-  pipeline_->SetVideoPaused(paused, peer_connection_.get());
-}
 
 void WebRTCEngine::SendData(const std::string& text) {
   if (signaling_thread_->IsCurrent()) {
@@ -292,55 +272,11 @@ void WebRTCEngine::SendDataImpl(const std::string& text) {
 
 // ==================== Device Management ====================
 
-void WebRTCEngine::QueryDevices() {
-  if (signaling_thread_->IsCurrent()) {
-    QueryDevicesImpl();
-  } else {
-    signaling_thread_->PostTask([this] { QueryDevicesImpl(); });
-  }
-}
 
-void WebRTCEngine::QueryDevicesImpl() {
-  pipeline_->QueryDevices();
-}
 
-void WebRTCEngine::SetVideoDevice(int device_idx) {
-  if (signaling_thread_->IsCurrent()) {
-    SetVideoDeviceImpl(device_idx);
-  } else {
-    signaling_thread_->PostTask([this, device_idx] { SetVideoDeviceImpl(device_idx); });
-  }
-}
 
-void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  pipeline_->SetVideoDevice(device_idx);
-}
 
-void WebRTCEngine::SetAudioInputDevice(int device_idx) {
-  if (signaling_thread_->IsCurrent()) {
-    SetAudioInputDeviceImpl(device_idx);
-  } else {
-    signaling_thread_->PostTask([this, device_idx] { SetAudioInputDeviceImpl(device_idx); });
-  }
-}
 
-void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
-  if (pipeline_) pipeline_->set_audio_input_device_idx(device_idx);
-  if (!pipeline_ || !pipeline_->adm()) return;
-  // Apply device change. If not recording yet, recording will use this device
-  // when it starts via the factory. If already recording mid-call, restart.
-  worker_thread_->BlockingCall([this, device_idx] {
-    bool was_recording = pipeline_->adm()->Recording();
-    if (was_recording) {
-      pipeline_->adm()->StopRecording();
-      pipeline_->adm()->SetRecordingDevice(device_idx);
-      pipeline_->adm()->InitRecording();
-      pipeline_->adm()->StartRecording();
-    } else {
-      pipeline_->adm()->SetRecordingDevice(device_idx);
-    }
-  });
-}
 
 void WebRTCEngine::GetLocalSdp() {
   if (signaling_thread_->IsCurrent()) {

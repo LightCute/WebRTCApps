@@ -11,7 +11,6 @@
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials.h"
-#include "apps/peerconnection/client/cli_runner.h"
 #include "apps/peerconnection/client/flag_defs.h"
 #include "apps/peerconnection/client/unix_socket_server.h"
 #include "apps/peerconnection/client/webrtc_engine.h"
@@ -20,7 +19,6 @@
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
 
-ABSL_FLAG(bool, standalone, false, "Run in standalone CLI mode (no Unix socket)");
 
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
@@ -29,7 +27,6 @@ int main(int argc, char* argv[]) {
       std::make_unique<webrtc::FieldTrials>(
           absl::GetFlag(FLAGS_force_fieldtrials)));
 
-  bool standalone = absl::GetFlag(FLAGS_standalone);
 
   // Set up a WebRTC main thread (PeerConnectionClient needs CurrentThread())
   webrtc::PhysicalSocketServer pss;
@@ -73,23 +70,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  if (standalone) {
-    CliRunner cli(&engine,
-                  absl::GetFlag(FLAGS_server),
-                  absl::GetFlag(FLAGS_port),
-                  absl::GetFlag(FLAGS_autoconnect),
-                  absl::GetFlag(FLAGS_autocall));
-    // Run CLI input loop on the main thread, event loop in a task
-    main_thread->PostTask([&] { cli.Run(); });
-    main_thread->Run();
-  } else {
-    std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
-    UnixSocketServer unix_server(sock_path, &engine);
-    engine.RegisterObserver(&unix_server);
-    unix_server.Start();
-    std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
-    unix_server.Wait();
-  }
+  std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
+  UnixSocketServer unix_server(sock_path, &engine);
+  engine.RegisterObserver(&unix_server);
+  unix_server.Start();
+  std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
+  unix_server.Wait();
 
   engine.Shutdown();
   webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);

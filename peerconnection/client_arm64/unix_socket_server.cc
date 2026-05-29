@@ -118,35 +118,6 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
     SendResponse(id, true);
     running_ = false;
     shutdown_cv_.notify_all();
-  } else if (cmd == "set_mute") {
-    bool audio_mute = root["params"].get("audio", false).asBool();
-    bool video_mute = root["params"].get("video", false).asBool();
-    if (audio_mute) engine_->SetAudioMuted(true);
-    if (video_mute) engine_->SetVideoPaused(true);
-    SendResponse(id, true);
-  } else if (cmd == "send_data") {
-    std::string text = root["params"].get("text", "").asString();
-    engine_->SendData(text);
-    SendResponse(id, true);
-  } else if (cmd == "query_devices") {
-    engine_->QueryDevices();
-    SendResponse(id, true);
-  } else if (cmd == "set_video_device") {
-    int idx = root["params"].get("device_idx", -1).asInt();
-    if (idx < 0) {
-      SendResponse(id, false, "Missing device_idx");
-      return;
-    }
-    engine_->SetVideoDevice(idx);
-    SendResponse(id, true);
-  } else if (cmd == "set_audio_input_device") {
-    int idx = root["params"].get("device_idx", -1).asInt();
-    if (idx < 0) {
-      SendResponse(id, false, "Missing device_idx");
-      return;
-    }
-    engine_->SetAudioInputDevice(idx);
-    SendResponse(id, true);
   } else if (cmd == "get_local_sdp") {
     engine_->GetLocalSdp();
     // Response comes later via OnEngineEvent("local_sdp")

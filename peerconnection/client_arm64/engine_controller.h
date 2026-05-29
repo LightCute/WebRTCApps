@@ -24,12 +24,7 @@ class EngineController {
   virtual void DisconnectFromServer() = 0;
   virtual void ConnectToPeer(int peer_id) = 0;
   virtual void HangUp() = 0;
-  virtual void SetAudioMuted(bool muted) = 0;
-  virtual void SetVideoPaused(bool paused) = 0;
   virtual void SendData(const std::string& text) = 0;
-  virtual void QueryDevices() = 0;
-  virtual void SetVideoDevice(int device_idx) = 0;
-  virtual void SetAudioInputDevice(int device_idx) = 0;
   virtual void GetLocalSdp() = 0;
 
   virtual bool connection_active() const = 0;

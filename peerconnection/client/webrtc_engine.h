@@ -43,12 +43,7 @@ class WebRTCEngine : public EngineController,
   void DisconnectFromServer() override;
   void ConnectToPeer(int peer_id) override;
   void HangUp() override;
-  void SetAudioMuted(bool muted) override;
-  void SetVideoPaused(bool paused) override;
   void SendData(const std::string& text) override;
-  void QueryDevices() override;
-  void SetVideoDevice(int device_idx) override;
-  void SetAudioInputDevice(int device_idx) override;
   void GetLocalSdp() override;
   bool connection_active() const override;
 
@@ -103,12 +98,7 @@ class WebRTCEngine : public EngineController,
   void DisconnectFromServerImpl();
   void ConnectToPeerImpl(int peer_id);
   void HangUpImpl();
-  void SetAudioMutedImpl(bool muted);
-  void SetVideoPausedImpl(bool paused);
   void SendDataImpl(const std::string& text);
-  void QueryDevicesImpl();
-  void SetVideoDeviceImpl(int device_idx);
-  void SetAudioInputDeviceImpl(int device_idx);
   void GetLocalSdpImpl();
 
   EngineObserver* observer_ = nullptr;

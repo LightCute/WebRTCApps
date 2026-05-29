@@ -34,10 +34,6 @@ class MediaPipeline {
   void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
   // ---- Device management ----
-  void SetVideoDevice(int device_idx);
-  void SetAudioMuted(bool muted);
-  void SetVideoPaused(bool paused, webrtc::PeerConnectionInterface* pc);
-  void QueryDevices();
 
   void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
