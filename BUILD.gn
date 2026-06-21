@@ -1,0 +1,25 @@
+# Copyright 2026 The WebRTC Project Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file in the root of the source
+# tree. An additional intellectual property rights grant can be found
+# in the file PATENTS.  All contributing project authors may
+# be found in the AUTHORS file in the root of the source tree.
+
+group("apps") {
+  testonly = true
+  deps = []
+  if (is_android) {
+    deps += [ "//apps/peerconnection/client_android:client_android" ]
+  }
+  if (is_linux || is_chromeos) {
+    deps += [
+      "//apps/peerconnection/media_pipeline:media_pipeline",
+      "//apps/webrtc_engine:webrtc_engine",
+    ]
+    if (target_cpu == "arm64") {
+      deps += [ "//apps/client_arm64_linux:client_arm64" ]
+    } else {
+      deps += [ "//apps/client_x64_linux:client_x64" ]
+    }
+  }
+}

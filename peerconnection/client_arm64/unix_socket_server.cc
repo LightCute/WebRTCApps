@@ -114,6 +114,14 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
   } else if (cmd == "hangup") {
     engine_->HangUp();
     SendResponse(id, true);
+  } else if (cmd == "send_data") {
+    std::string text = root["params"].get("text", "").asString();
+    if (text.empty()) {
+      SendResponse(id, false, "Missing text in params");
+      return;
+    }
+    engine_->SendData(text);
+    SendResponse(id, true);
   } else if (cmd == "shutdown") {
     SendResponse(id, true);
     running_ = false;

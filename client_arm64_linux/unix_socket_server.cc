@@ -14,7 +14,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "apps/peerconnection/client/engine_controller.h"
+#include "apps/webrtc_engine/engine_controller.h"
 #include "json/reader.h"
 #include "json/value.h"
 #include "json/writer.h"
@@ -128,7 +128,7 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
     shutdown_cv_.notify_all();
   } else if (cmd == "get_local_sdp") {
     engine_->GetLocalSdp();
-    // Response comes later via OnEngineEvent("local_sdp") or ("local_sdp_error")
+    // Response comes later via OnEngineEvent("local_sdp")
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }
