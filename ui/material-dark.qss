@@ -1,0 +1,389 @@
+/*============================================================
+  Material Dark — Qt Widgets QSS (Fusion style)
+  Comprehensive: covers all widget states in both ui_rk & ui_x64
+  ============================================================*/
+
+/*── Foundation ──────────────────────────────────────────────*/
+
+QWidget {
+    background-color: #121212;
+    color: rgba(255,255,255,0.87);
+}
+
+QWidget:disabled {
+    color: rgba(255,255,255,0.38);
+}
+
+/*── MainWindow ──────────────────────────────────────────────*/
+
+QMainWindow {
+    background-color: #121212;
+}
+
+QMainWindow::separator {
+    width: 1px;
+    background: rgba(255,255,255,0.12);
+}
+
+/*── ToolBar ─────────────────────────────────────────────────*/
+
+QToolBar {
+    background: #1e1e1e;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    padding: 4px 10px;
+    spacing: 8px;
+}
+
+QToolBar::separator {
+    background: rgba(255,255,255,0.10);
+    width: 1px;
+    margin: 4px 2px;
+}
+
+/* Toolbar buttons — default state */
+QToolBar QToolButton {
+    background: transparent;
+    color: rgba(255,255,255,0.87);
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: 500;
+}
+
+QToolBar QToolButton:hover {
+    background: rgba(255,255,255,0.06);
+}
+
+QToolBar QToolButton:pressed {
+    background: rgba(100,181,246,0.18);
+}
+
+QToolBar QToolButton:disabled {
+    color: rgba(255,255,255,0.24);
+}
+
+/* No language-specific selectors — rely on generic styling */
+
+/* Toolbar embedded QLineEdit */
+QToolBar QLineEdit {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: rgba(255,255,255,0.87);
+    selection-background-color: #64B5F6;
+    max-width: 180px;
+}
+
+QToolBar QLineEdit:focus {
+    border-color: #64B5F6;
+    background: rgba(255,255,255,0.08);
+}
+
+QToolBar QLineEdit:disabled {
+    color: rgba(255,255,255,0.24);
+    background: rgba(255,255,255,0.03);
+}
+
+/*── StatusBar ───────────────────────────────────────────────*/
+
+QStatusBar {
+    background: #1e1e1e;
+    color: rgba(255,255,255,0.45);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding: 2px 10px;
+    font-size: 12px;
+}
+
+/*── Section Cards (chat / log areas) ────────────────────────*/
+
+/* Read-only QPlainTextEdit → "card" look */
+QPlainTextEdit[readOnly="true"] {
+    background: #1c1c1c;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 6px;
+    padding: 10px;
+    color: rgba(255,255,255,0.87);
+    selection-background-color: #64B5F6;
+    selection-color: #121212;
+}
+
+/* Chat display — taller, distinct bg */
+QPlainTextEdit#chatDisplay {
+    background: #1a1a1a;
+    border-color: rgba(255,255,255,0.08);
+    font-size: 13px;
+}
+
+/* Log area — compact, dimmer */
+QPlainTextEdit#logArea {
+    background: #161616;
+    border-color: rgba(255,255,255,0.05);
+    font-size: 12px;
+    color: rgba(255,255,255,0.60);
+}
+
+/* Placeholder text for read-only areas */
+QPlainTextEdit[readOnly="true"]:focus {
+    border-color: rgba(255,255,255,0.08);
+}
+
+/*── QLineEdit (chat input) ──────────────────────────────────*/
+
+QLineEdit {
+    background: #252525;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: rgba(255,255,255,0.87);
+    selection-background-color: #64B5F6;
+    selection-color: #121212;
+}
+
+QLineEdit:focus {
+    border-color: #64B5F6;
+    background: #2c2c2c;
+}
+
+QLineEdit:disabled {
+    background: #1a1a1a;
+    color: rgba(255,255,255,0.24);
+    border-color: transparent;
+}
+
+QLineEdit:read-only {
+    background: #1c1c1c;
+    color: rgba(255,255,255,0.60);
+}
+
+/* Placeholder text */
+QLineEdit[text=""] {
+    color: rgba(255,255,255,0.38);
+}
+
+/*── QPushButton ─────────────────────────────────────────────*/
+
+QPushButton {
+    background: #64B5F6;
+    color: #121212;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-weight: 500;
+    font-size: 13px;
+}
+
+QPushButton:hover {
+    background: #7EC2F7;
+}
+
+QPushButton:pressed {
+    background: #42A5F5;
+}
+
+QPushButton:disabled {
+    background: rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.24);
+}
+
+/* Send button — compact */
+QPushButton#sendButton {
+    padding: 6px 14px;
+    font-size: 12px;
+    min-width: 60px;
+    max-width: 80px;
+    border-radius: 4px;
+}
+
+/*── QTreeWidget (peer list) ──────────────────────────────────*/
+
+QTreeWidget {
+    background: #1c1c1c;
+    alternate-background-color: #202020;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 6px;
+    color: rgba(255,255,255,0.87);
+    outline: none;
+    padding: 2px;
+}
+
+QTreeWidget::item {
+    padding: 7px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    border-radius: 4px;
+}
+
+QTreeWidget::item:selected {
+    background: rgba(100,181,246,0.16);
+    color: #fff;
+}
+
+QTreeWidget::item:hover:!selected {
+    background: rgba(255,255,255,0.04);
+}
+
+QHeaderView::section {
+    background: #1e1e1e;
+    color: rgba(255,255,255,0.50);
+    border: none;
+    border-bottom: 2px solid rgba(255,255,255,0.08);
+    padding: 8px 8px;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
+QHeaderView::section:hover {
+    color: rgba(255,255,255,0.70);
+}
+
+/*── QStackedWidget ──────────────────────────────────────────*/
+
+QStackedWidget {
+    background: #121212;
+}
+
+/*── QLabel ──────────────────────────────────────────────────*/
+
+QLabel {
+    background: transparent;
+    color: rgba(255,255,255,0.87);
+}
+
+QLabel:disabled {
+    color: rgba(255,255,255,0.38);
+}
+
+/*── QToolTip ────────────────────────────────────────────────*/
+
+QToolTip {
+    background: #383838;
+    color: rgba(255,255,255,0.95);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+}
+
+/*── ScrollBars ──────────────────────────────────────────────*/
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(255,255,255,0.15);
+    min-height: 30px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: rgba(255,255,255,0.28);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+    background: none;
+}
+
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 8px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background: rgba(255,255,255,0.15);
+    min-width: 30px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: rgba(255,255,255,0.28);
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+    background: none;
+}
+
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+}
+
+/*── QMenu (context menus) ───────────────────────────────────*/
+
+QMenu {
+    background: #282828;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 8px;
+    padding: 6px;
+}
+
+QMenu::item {
+    padding: 8px 32px 8px 14px;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background: rgba(100,181,246,0.16);
+}
+
+QMenu::item:disabled {
+    color: rgba(255,255,255,0.24);
+}
+
+QMenu::separator {
+    height: 1px;
+    background: rgba(255,255,255,0.06);
+    margin: 4px 8px;
+}
+
+/*── QProgressBar (if any) ───────────────────────────────────*/
+
+QProgressBar {
+    background: rgba(255,255,255,0.06);
+    border: none;
+    border-radius: 4px;
+    height: 4px;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background: #64B5F6;
+    border-radius: 4px;
+}
+
+/*── QSplitter (if any) ─────────────────────────────────────*/
+
+QSplitter::handle {
+    background: rgba(255,255,255,0.08);
+}
+
+QSplitter::handle:hover {
+    background: rgba(100,181,246,0.30);
+}
+
+/*── QDockWidget (if any) ────────────────────────────────────*/
+
+QDockWidget {
+    background: #1e1e1e;
+    titlebar-close-icon: none;
+}
+
+QDockWidget::title {
+    background: #1e1e1e;
+    padding: 6px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    text-align: left;
+}
