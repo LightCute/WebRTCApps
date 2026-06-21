@@ -115,6 +115,14 @@ bool MediaPipeline::CreateAudioDeviceModule() {
     RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
     return false;
   }
+  // Init() must be called before ADM can register callbacks.
+  // Without it, audio tracks will fail with "Init() must be called
+  // before adding this sink" when AddTracks registers the AudioTransport.
+  if (adm_->Init() != 0) {
+    RTC_LOG(LS_ERROR) << "ADM Init() failed";
+    adm_ = nullptr;
+    return false;
+  }
   return true;
 }
 

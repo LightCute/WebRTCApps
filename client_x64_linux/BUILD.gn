@@ -43,6 +43,7 @@ if (is_linux || is_chromeos) {
       "../../api/audio_codecs:audio_codecs_api",
       "../../api/audio_codecs:builtin_audio_decoder_factory",
       "../../api/audio_codecs:builtin_audio_encoder_factory",
+      "../../api:field_trials",
       "../../api/environment",
       "../../api/environment:environment_factory",
       "../../api/task_queue",
