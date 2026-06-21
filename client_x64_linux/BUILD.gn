@@ -1,0 +1,87 @@
+import("../../webrtc.gni")
+
+if (is_linux || is_chromeos) {
+  rtc_executable("client_x64") {
+    testonly = true
+
+    sources = [
+      "main.cc",
+      "media_pipeline.cc",
+      "media_pipeline.h",
+      "pc_factory.cc",
+      "pc_factory.h",
+      "pc_factory_x64.cc",
+      "pc_factory_x64.h",
+      "shm_common.cc",
+      "shm_common.h",
+      "shm_video_renderer.cc",
+      "shm_video_renderer.h",
+      "shm_video_writer.cc",
+      "shm_video_writer.h",
+      "unix_socket_server.cc",
+      "unix_socket_server.h",
+    ]
+
+    deps = [
+      "..//webrtc_engine:webrtc_engine",
+      "../../api:create_frame_generator",
+      "../../api:create_modular_peer_connection_factory",
+      "../../api:data_channel_interface",
+      "../../api:enable_media",
+      "../../api:jsep",
+      "../../api:make_ref_counted",
+      "../../api:media_stream_interface",
+      "../../api:peer_connection_interface",
+      "../../api:rtc_error",
+      "../../api:rtp_receiver_interface",
+      "../../api:rtp_sender_interface",
+      "../../api:scoped_refptr",
+      "../../api/audio:audio_device",
+      "../../api/audio:audio_mixer_api",
+      "../../api/audio:audio_processing",
+      "../../api/audio:create_audio_device_module",
+      "../../api/audio_codecs:audio_codecs_api",
+      "../../api/audio_codecs:builtin_audio_decoder_factory",
+      "../../api/audio_codecs:builtin_audio_encoder_factory",
+      "../../api/environment",
+      "../../api/environment:environment_factory",
+      "../../api/task_queue",
+      "../../api/task_queue:pending_task_safety_flag",
+      "../../api/units:time_delta",
+      "../../api/video:video_frame",
+      "../../api/video:video_rtp_headers",
+      "../../api/video_codecs:video_codecs_api",
+      "../../api/video_codecs:video_decoder_factory_template",
+      "../../api/video_codecs:video_decoder_factory_template_dav1d_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_libvpx_vp8_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_libvpx_vp9_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_open_h264_adapter",
+      "../../api/video_codecs:video_encoder_factory_template",
+      "../../api/video_codecs:video_encoder_factory_template_libaom_av1_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_libvpx_vp8_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_libvpx_vp9_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_open_h264_adapter",
+      "../../common_video",
+      "../../media:media_channel",
+      "../../media:video_common",
+      "../../modules/audio_device",
+      "../../modules/video_capture:video_capture_module",
+      "../../pc:video_track_source",
+      "../../rtc_base:log_sinks",
+      "../../rtc_base:logging",
+      "../../rtc_base:rtc_json",
+      "../../rtc_base:ssl_adapter",
+      "../../rtc_base:threading",
+      "../../system_wrappers:system_wrappers",
+      "../../test:frame_generator_capturer",
+      "../../test:platform_video_capturer",
+      "../../test:test_video_capturer",
+      "//third_party/abseil-cpp/absl/flags:flag",
+      "//third_party/abseil-cpp/absl/flags:parse",
+      "//third_party/jsoncpp",
+    ]
+
+    cflags = [ "-Wno-deprecated-declarations" ]
+    libs = [ "pthread", "dl" ]
+  }
+}
