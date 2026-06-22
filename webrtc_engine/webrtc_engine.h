@@ -1,0 +1,157 @@
+// webrtc_engine.h
+#ifndef APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
+#define APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
+
+#include <atomic>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "api/audio/audio_device.h"
+#include "api/data_channel_interface.h"
+#include "api/environment/environment.h"
+#include "api/jsep.h"
+#include "api/media_stream_interface.h"
+#include "api/peer_connection_interface.h"
+#include "api/rtc_error.h"
+#include "api/scoped_refptr.h"
+#include "api/task_queue/pending_task_safety_flag.h"
+#include "api/video/video_frame.h"
+#include "rtc_base/task_utils/repeating_task.h"
+#include "api/video/video_sink_interface.h"
+#include "apps/webrtc_engine/data_channel_manager.h"
+#include "apps/webrtc_engine/engine_controller.h"
+#include "apps/webrtc_engine/signaling_interface.h"
+#include "apps/webrtc_engine/ipc_server_interface.h"
+#include "apps/webrtc_engine/media_pipeline_interface.h"
+#include "apps/webrtc_engine/pc_factory_interface.h"
+#include "rtc_base/thread.h"
+
+class WebRTCEngine : public EngineController,
+                     public webrtc::PeerConnectionObserver,
+                     public webrtc::CreateSessionDescriptionObserver,
+                     public PeerConnectionClientObserver {
+ public:
+  WebRTCEngine(const webrtc::Environment& env);
+  ~WebRTCEngine() override;
+
+  // EngineController implementation (thread-safe, callable from any thread)
+  void RegisterObserver(EngineObserver* observer) override;
+  void UnregisterObserver() override;
+  void ConnectToServer(const std::string& server, int port) override;
+  void DisconnectFromServer() override;
+  void ConnectToPeer(int peer_id) override;
+  void HangUp() override;
+  void SendData(const std::string& text) override;
+  void GetLocalSdp() override;
+  bool connection_active() const override;
+
+  // Reports connection stats (fps/bitrate/loss/rtt) via observer as JSON.
+  void DumpStats() override;
+  void StartStatsPolling() override;
+  void StopStatsPolling() override;
+
+  // Lifecycle (called by main.cc, not part of EngineController)
+  bool Init();
+  void Shutdown();
+
+  // ---- Dependency injection (call before Init) ----
+  void SetMediaPipeline(std::unique_ptr<IMediaPipeline> pipeline);
+  void SetPcFactory(std::unique_ptr<IPcFactory> factory);
+  void SetIpcServer(std::unique_ptr<IIpcServer> server);
+  void SetSignaling(std::unique_ptr<SignalingInterface> signaling);
+  webrtc::Thread* worker_thread() const { return worker_thread_.get(); }
+  webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
+
+  // RefCountInterface (required by CreateSessionDescriptionObserver)
+  void AddRef() const override {}
+  webrtc::RefCountReleaseStatus Release() const override {
+    return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
+  }
+
+ protected:
+  // PeerConnectionObserver
+  void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
+  void OnAddTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+                  const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>& streams) override;
+  void OnRemoveTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) override;
+  void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) override;
+  void OnRenegotiationNeeded() override {}
+  void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState) override;
+  void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState) override {}
+  void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
+  void OnIceCandidateRemoved(const webrtc::IceCandidate* candidate) override {}
+  void OnIceConnectionReceivingChange(bool) override {}
+
+  // CreateSessionDescriptionObserver
+  void OnSuccess(webrtc::SessionDescriptionInterface* desc) override;
+  void OnFailure(webrtc::RTCError error) override;
+
+  // PeerConnectionClientObserver
+  void OnSignedIn() override;
+  void OnDisconnected() override;
+  void OnPeerConnected(int id, const std::string& name) override;
+  void OnPeerDisconnected(int id) override;
+  void OnPeerBusy(int peer_id) override;
+  void OnMessageFromPeer(int peer_id, const std::string& message) override;
+  void OnMessageSent(int err) override;
+  void OnServerConnectionFailure() override;
+
+ private:
+  // Internal helpers (ported from Conductor)
+  bool InitializePeerConnection();
+  void DeletePeerConnection();
+  void AddTracks();
+  void AddDataChannel();
+  void SendMessage(const std::string& json_object);
+
+  // EngineController Impl helpers — must be called on signaling thread
+  void ConnectToServerImpl(const std::string& server, int port);
+  void DisconnectFromServerImpl();
+  void ConnectToPeerImpl(int peer_id);
+  void HangUpImpl();
+  void SendDataImpl(const std::string& text);
+  void GetLocalSdpImpl();
+
+  EngineObserver* observer_ = nullptr;
+  std::atomic<bool> connection_active_{false};
+  const webrtc::Environment env_;
+  webrtc::ScopedTaskSafety safety_;
+
+  // WebRTC threads
+  std::unique_ptr<webrtc::Thread> network_thread_;
+  std::unique_ptr<webrtc::Thread> worker_thread_;
+  std::unique_ptr<webrtc::Thread> signaling_thread_;
+
+  // Media pipeline (injected or self-created)
+  std::unique_ptr<IMediaPipeline> pipeline_;
+  std::unique_ptr<IPcFactory> pc_factory_injected_;
+  std::unique_ptr<IIpcServer> ipc_server_;
+
+  // WebRTC objects
+  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
+  webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
+  // DataChannel manager
+  std::unique_ptr<DataChannelManager> dc_manager_;
+
+  // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
+  std::unique_ptr<SignalingInterface> signaling_;
+
+  // Periodic stats polling
+  std::optional<webrtc::RepeatingTaskHandle> stats_polling_;
+
+  // State
+  int peer_id_ = -1;
+  int pending_hangup_peer_id_ = -1;
+  bool loopback_ = false;
+  bool collecting_sdp_ = false;
+  std::string server_;
+  int server_port_ = 8888;
+  std::deque<std::string*> pending_messages_;
+};
+
+#endif  // APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
