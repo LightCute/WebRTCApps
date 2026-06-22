@@ -25,6 +25,7 @@ HEADERS += \
     mainwindow.h \
     gl_video_widget.h \
     shm_video_source.h \
+    shm_video_source_interface.h \
     shm_video_reader.h \
     shm_common.h \
     control_channel.h \

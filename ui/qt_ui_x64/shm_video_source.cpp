@@ -3,24 +3,32 @@
 #include <libyuv/convert.h>
 #include <QDebug>
 
-ShmVideoSource::ShmVideoSource(const QString& key_path, int proj_id,
-                               QObject* parent)
-    : QObject(parent), key_path_(key_path), proj_id_(proj_id)
-{
+ShmVideoSource::ShmVideoSource(QObject* parent)
+    : IShmVideoSource(parent) {
     i420_buf_.resize(FRAME_MAX_SIZE);
 }
 
 ShmVideoSource::~ShmVideoSource() {
-    stop();
+    Stop();
 }
 
-void ShmVideoSource::start() {
-    if (running_) return;
+bool ShmVideoSource::Start(const QString& key, int proj_id) {
+    if (running_) return false;
+    key_path_ = key;
+    proj_id_ = proj_id;
     stop_requested_ = false;
-
-    // 尝试初始化。如果失败（通话还没开始，daemon 未创建文件），
-    // 用定时器异步重试，不阻塞调用线程。
     tryInit();
+    return true;
+}
+
+void ShmVideoSource::Stop() {
+    stop_requested_ = true;
+    if (!running_) return;
+    running_ = false;
+    reader_.RequestStop();
+    if (thread_) {
+        thread_->wait(5000);
+    }
 }
 
 void ShmVideoSource::tryInit() {
@@ -34,18 +42,7 @@ void ShmVideoSource::tryInit() {
         thread_->start();
         return;
     }
-    // 500ms 后重试
     QTimer::singleShot(500, this, &ShmVideoSource::tryInit);
-}
-
-void ShmVideoSource::stop() {
-    stop_requested_ = true;  // 同时打断 Init 的重试循环
-    if (!running_) return;
-    running_ = false;
-    reader_.RequestStop();
-    if (thread_) {
-        thread_->wait(5000);
-    }
 }
 
 void ShmVideoSource::readLoop() {
@@ -85,8 +82,7 @@ void ShmVideoSource::readLoop() {
         }
 
         QImage image(argb_buf_.data(), width, height, QImage::Format_ARGB32);
-        QImage copy = image.copy(); // detach before next frame overwrites buffer
-
+        QImage copy = image.copy();
         emit frameReady(copy);
     }
     running_ = false;

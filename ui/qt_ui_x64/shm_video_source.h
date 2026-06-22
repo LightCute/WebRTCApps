@@ -7,18 +7,18 @@
 #include <atomic>
 #include <vector>
 #include "shm_video_reader.h"
+#include "shm_video_source_interface.h"
 
-class ShmVideoSource : public QObject
+class ShmVideoSource : public IShmVideoSource
 {
     Q_OBJECT
 
 public:
-    explicit ShmVideoSource(const QString& key_path, int proj_id,
-                            QObject* parent = nullptr);
+    explicit ShmVideoSource(QObject* parent = nullptr);
     ~ShmVideoSource() override;
 
-    void start();
-    void stop();
+    bool Start(const QString& key, int proj_id) override;
+    void Stop() override;
     bool isRunning() const { return running_; }
 
 signals:

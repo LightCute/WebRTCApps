@@ -612,8 +612,8 @@ void MainWindow::startVideoSources() {
     QString rdir = qEnvironmentVariable("WEBRTC_RUNTIME_DIR",
                                         "/tmp/webrtc_runtime");
 
-    local_source_ = new ShmVideoSource(rdir + "/shm_video_buf_local", 0x89, this);
-    remote_source_ = new ShmVideoSource(rdir + "/shm_video_buf_remote", 0x8a, this);
+    local_source_ = new ShmVideoSource(this);
+    remote_source_ = new ShmVideoSource(this);
 
     connect(local_source_, &ShmVideoSource::frameReady, this,
             [this](const QImage& f) {
@@ -643,19 +643,19 @@ void MainWindow::startVideoSources() {
     connect(remote_source_, &ShmVideoSource::errorOccurred, this,
             [this](const QString& e) { log("Remote video error: " + e); });
 
-    local_source_->start();
-    remote_source_->start();
+    local_source_->Start(rdir + "/shm_video_buf_local", 0x89);
+    remote_source_->Start(rdir + "/shm_video_buf_remote", 0x8a);
     log("Video sources started (SHM + libyuv)");
 }
 
 void MainWindow::stopVideoSources() {
     if (local_source_) {
-        local_source_->stop();
+        local_source_->Stop();
         local_source_->deleteLater();
         local_source_ = nullptr;
     }
     if (remote_source_) {
-        remote_source_->stop();
+        remote_source_->Stop();
         remote_source_->deleteLater();
         remote_source_ = nullptr;
     }
