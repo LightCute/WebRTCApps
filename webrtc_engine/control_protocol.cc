@@ -18,7 +18,7 @@ void ControlProtocol::OnLineReceived(const std::string& line) {
   HandleCommand(line);
 }
 
-void ControlProtocol::SendEvent(const std::string& json) {
+void ControlProtocol::OnEngineEvent(const std::string& json) {
   transport_->Send(json);
 }
 

@@ -5,18 +5,21 @@
 #include <functional>
 #include <string>
 
-class EngineController;
+#include "apps/webrtc_engine/engine_controller.h"
+
 class IPipeTransport;
 
-class ControlProtocol {
+class ControlProtocol : public EngineObserver {
  public:
   ControlProtocol(IPipeTransport* transport, EngineController* engine);
 
   // Called by transport when a complete line arrives.
   void OnLineReceived(const std::string& line);
 
-  // Helper for sending JSON events back to client.
-  void SendEvent(const std::string& json);
+  // EngineObserver — engine events forwarded to transport.
+  void OnEngineEvent(const std::string& json) override;
+
+  // Helper for sending JSON responses back to client.
   void SendResponse(int id, bool ok, const std::string& error = "");
 
   // Optional callback for system commands (shutdown).
