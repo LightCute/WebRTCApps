@@ -458,7 +458,7 @@ void MainWindow::initConnections() {
             ui.stats_monitor_btn_->setText("测量启动");
         }
     });
-    connect(channel_, SIGNAL(statsReceived(QJsonObject)), this, SLOT(onStatsReceived(QJsonObject)));
+    connect(channel_, &ControlChannel::statsReceived, this, &MainWindow::onStatsReceived);
 }
 
 void MainWindow::onProcessStateChanged(WebRtcProcessManager::State state) {
@@ -563,7 +563,7 @@ void MainWindow::startVideoSources() {
     remote_source_ = new DmaBufVideoSource(this);
     remote_source_->setSocketPath(rdir + "/shm_video_buf_remote_socket");
 
-    connect(local_source_, QOverload<QImage, int, int>::of(&DmaBufVideoSource::frameReady), this,
+    connect(local_source_, &DmaBufVideoSource::frameReady, this,
             [this](const QImage& f, int w, int h) {
         local_width_ = w;
         local_height_ = h;
@@ -584,7 +584,7 @@ void MainWindow::startVideoSources() {
         }
     });
     bool* call_mode_entered = new bool(false);
-    connect(remote_source_, QOverload<QImage, int, int>::of(&DmaBufVideoSource::frameReady), this,
+    connect(remote_source_, &DmaBufVideoSource::frameReady, this,
             [this, call_mode_entered](const QImage& f, int w, int h) {
         remote_width_ = w;
         remote_height_ = h;
@@ -711,40 +711,6 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
     }
     // Quality limitation reason (the most important diagnostic)
     if (s.contains("quality_limit")) {
-        QString ql = s["quality_limit"].toString();
-        QString txt = QString("降质: %1").arg(ql);
-        ui.stats_limit_->setText(txt);
-        QString c = (ql == "none") ? "color:#27ae60;" : (ql == "cpu") ? "color:#f39c12;" : "color:#e74c3c;";
-        ui.stats_limit_->setStyleSheet(c);
-    }
-    // Encode time
-    if (s.contains("avg_encode_ms")) {
-        int ms = s["avg_encode_ms"].toInt();
-        setColored(ui.stats_encode_ms_, QString("编码: %1ms").arg(ms), ms, 20, 33);
-    }
-    // Decode time
-    if (s.contains("avg_decode_ms")) {
-        int ms = s["avg_decode_ms"].toInt();
-        setColored(ui.stats_decode_ms_, QString("解码: %1ms").arg(ms), ms, 10, 20);
-    }
-    // Available bandwidth
-    if (s.contains("avail_kbps")) {
-        int avail = s["avail_kbps"].toInt();
-        int target = s.value("target_kbps").toInt(0);
-        QString txt = QString("可用带宽: %1kbps").arg(avail);
-        ui.stats_avail_kbps_->setText(txt);
-        double ratio = target > 0 ? (double)avail / target : 2.0;
-        QString c = (ratio >= 1.5) ? "color:#27ae60;" : (ratio >= 1.0) ? "color:#f39c12;" : "color:#e74c3c;";
-        ui.stats_avail_kbps_->setStyleSheet(c);
-    }
-    // Freeze count (visible quality drops)
-    if (s.contains("freeze_cnt")) {
-        int fz = s["freeze_cnt"].toInt();
-        ui.stats_freeze_->setText(QString("冻结: %1").arg(fz));
-        QString c = (fz == 0) ? "color:#27ae60;" : (fz <= 3) ? "color:#f39c12;" : "color:#e74c3c;";
-        ui.stats_freeze_->setStyleSheet(c);
-    }
-}
 
 void MainWindow::log(const QString& msg) {
     ui.log_area_->appendPlainText(msg);
