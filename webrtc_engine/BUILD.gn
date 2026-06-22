@@ -1,0 +1,57 @@
+import("../../webrtc.gni")
+
+rtc_static_library("webrtc_engine") {
+  testonly = true
+  sources = [
+    "blocking_queue.h",
+    "data_channel_manager.cc",
+    "data_channel_manager.h",
+    "defaults.cc",
+    "defaults.h",
+    "engine_controller.h",
+    "flag_defs.h",
+    "ipc_server_interface.h",
+    "json_helpers.cc",
+    "json_helpers.h",
+    "media_pipeline_interface.h",
+    "pc_factory_interface.h",
+    "peer_connection_client.cc",
+    "peer_connection_client.h",
+    "pipe_transport_interface.h",
+    "protocol_handler.cc",
+    "protocol_handler.h",
+    "shared_memory_interface.h",
+    "signaling_interface.h",
+    "webrtc_engine.cc",
+    "webrtc_engine.h",
+  ]
+
+  deps = [
+    "../../api:async_dns_resolver",
+    "../../api:create_modular_peer_connection_factory",
+    "../../api:data_channel_interface",
+    "../../api:enable_media",
+    "../../api:jsep",
+    "../../api:make_ref_counted",
+    "../../api:media_stream_interface",
+    "../../api:peer_connection_interface",
+    "../../api:rtc_error",
+    "../../api:scoped_refptr",
+    "../../api/audio:audio_device",
+    "../../api/audio:create_audio_device_module",
+    "../../api/environment",
+    "../../api/task_queue:pending_task_safety_flag",
+    "../../api/video:video_frame",
+    "../../modules/video_capture:video_capture_module",
+    "../../rtc_base:logging",
+    "../../rtc_base:rtc_json",
+    "../../rtc_base:threading",
+    "../../test:frame_generator_capturer",
+    "../../test:platform_video_capturer",
+    "../../test:test_video_capturer",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/jsoncpp",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+}
