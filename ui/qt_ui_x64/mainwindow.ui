@@ -269,6 +269,47 @@
              </widget>
             </item>
             <item>
+             <widget class="QGroupBox" name="video_quality_group_">
+              <property name="title">
+               <string>视频画质</string>
+              </property>
+              <layout class="QGridLayout" name="videoQualityLayout">
+               <property name="spacing">
+                <number>2</number>
+               </property>
+               <item row="0" column="0" colspan="2">
+                <widget class="QComboBox" name="video_caps_combo_">
+                 <property name="enabled">
+                  <bool>false</bool>
+                 </property>
+                 <item>
+                  <property name="text">
+                   <string>640×480 30fps</string>
+                  </property>
+                 </item>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QPushButton" name="video_query_btn_">
+                 <property name="text">
+                  <string>查询能力</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QPushButton" name="video_apply_btn_">
+                 <property name="enabled">
+                  <bool>false</bool>
+                 </property>
+                 <property name="text">
+                  <string>应用</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
              <widget class="QPlainTextEdit" name="chat_display_">
               <property name="readOnly">
                <bool>true</bool>

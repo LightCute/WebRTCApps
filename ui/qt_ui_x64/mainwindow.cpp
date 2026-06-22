@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QRegularExpression>
 #include <QSplitter>
 #include <QDebug>
 
@@ -501,6 +502,41 @@ void MainWindow::initConnections() {
         }
     });
     connect(channel_, &ControlChannel::statsReceived, this, &MainWindow::onStatsReceived);
+
+    // ---- Video quality (resolution / fps) ----
+    connect(ui.video_query_btn_, &QPushButton::clicked, this, [this]() {
+        channel_->cmdQueryVideoCaps();
+        log("Querying video capabilities...");
+    });
+    connect(ui.video_apply_btn_, &QPushButton::clicked, this, [this]() {
+        int idx = ui.video_caps_combo_->currentIndex();
+        if (idx < 0) return;
+        QString text = ui.video_caps_combo_->currentText();
+        // Parse "640×480 30fps" → 640, 480, 30
+        auto parts = text.split(QRegularExpression("[×x fps]+"), Qt::SkipEmptyParts);
+        if (parts.size() >= 3) {
+            int w = parts[0].toInt();
+            int h = parts[1].toInt();
+            int fps = parts[2].toInt();
+            channel_->cmdSetVideoParams(w, h, fps);
+            log(QString("Set video: %1×%2 %3fps").arg(w).arg(h).arg(fps));
+        }
+    });
+    connect(channel_, &ControlChannel::videoCapsReceived, this,
+            [this](const QList<VideoCapInfo>& caps) {
+        ui.video_caps_combo_->clear();
+        for (const auto& c : caps) {
+            ui.video_caps_combo_->addItem(
+                QString("%1×%2 %3fps").arg(c.width).arg(c.height).arg(c.max_fps));
+        }
+        ui.video_caps_combo_->setEnabled(!caps.isEmpty());
+        ui.video_apply_btn_->setEnabled(!caps.isEmpty());
+        log(QString("Received %1 video capabilities").arg(caps.size()));
+    });
+    connect(channel_, &ControlChannel::videoParamsChanged, this,
+            [this](int w, int h, int fps) {
+        log(QString("Video params changed: %1×%2 %3fps").arg(w).arg(h).arg(fps));
+    });
 }
 
 void MainWindow::onProcessStateChanged(WebRtcProcessManager::State state) {
