@@ -30,7 +30,7 @@ MainWindow::MainWindow(QWidget* parent)
     log_file_->open(QIODevice::Append | QIODevice::Text);
 
     QString daemon_path = qEnvironmentVariable("WEBRTC_DAEMON_PATH",
-        app_dir + "/apps_peerconnection_client_arm64");
+        app_dir + "/client_arm64");
 
     proc_mgr_ = new WebRtcProcessManager(daemon_path, this);
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -343,6 +343,7 @@ void MainWindow::initConnections() {
         statusBar()->showMessage("ICE: " + s);
         if (s == "connected") {
             log("ICE connected, starting video...");
+            switchToCallMode();
             startVideoSources();
         }
     });
