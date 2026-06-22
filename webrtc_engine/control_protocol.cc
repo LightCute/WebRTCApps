@@ -89,6 +89,19 @@ void ControlProtocol::HandleCommand(const std::string& raw_json) {
   } else if (cmd == "stop_stats") {
     engine_->StopStatsPolling();
     SendResponse(id, true);
+  } else if (cmd == "query_video_caps") {
+    engine_->QueryVideoCaps();
+    // Response comes later via OnEngineEvent("video_caps")
+  } else if (cmd == "set_video_params") {
+    int w = root["params"].get("width", 0).asInt();
+    int h = root["params"].get("height", 0).asInt();
+    int fps = root["params"].get("fps", 0).asInt();
+    if (w <= 0 || h <= 0 || fps <= 0) {
+      SendResponse(id, false, "Invalid video params");
+      return;
+    }
+    engine_->SetVideoParams(w, h, fps);
+    SendResponse(id, true);
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }
