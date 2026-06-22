@@ -169,36 +169,13 @@ void MainWindow::initUi() {
     // chatRow (chat_input_, send_button_), log_area_, peer_tree_ exist.
     ui.setupUi(this);
 
-    // ---- Replace callPage layout with QSplitter structure ----
-    // The .ui callLayout is a QVBoxLayout with only remote_video_ in it.
-    // Qt cannot set a new layout while the old one is still installed, so:
-    //   1. Remove remote_video_ from old layout (widget survives)
-    //   2. Delete old layout (now empty and detached from callPage)
-    //   3. Build new layout structure
-    QLayout* oldCallLayout = ui.callPage->layout();
-    oldCallLayout->removeWidget(ui.remote_video_);
-    delete oldCallLayout;
-
-    QHBoxLayout* callRootLayout = new QHBoxLayout(ui.callPage);
-    callRootLayout->setContentsMargins(0, 0, 0, 0);
-    callRootLayout->setSpacing(0);
-
-    splitter_ = new QSplitter(Qt::Horizontal, ui.callPage);
-    splitter_->setHandleWidth(4);
-    splitter_->setChildrenCollapsible(false);
-
-    // --- remote_container_ ---
-    remote_container_ = new QWidget();
-    remote_container_->setObjectName("remoteContainer");
-    remote_container_->setMinimumWidth(400);
-
-    QVBoxLayout* remoteLayout = new QVBoxLayout(remote_container_);
-    remoteLayout->setContentsMargins(0, 0, 0, 0);
-    remoteLayout->setSpacing(0);
-
-    // Reparent remote_video_ into remote_container_
-    ui.remote_video_->setParent(remote_container_);
-    remoteLayout->addWidget(ui.remote_video_);
+    // ---- Find runtime pointers from .ui layout ----
+    // callPage now contains QSplitter(callSplitter) →
+    //   remote_container_ (with remote_video_) + right_panel_ (with chat widgets)
+    remote_container_ = centralWidget()->findChild<QWidget*>("remote_container_");
+    if (remote_container_) {
+        remote_container_->setObjectName("remoteContainer");
+    }
 
     // --- local_video_ (PIP, NOT in layout — absolute positioned) ---
     local_video_ = new GlVideoWidget(remote_container_);
@@ -220,51 +197,6 @@ void MainWindow::initUi() {
         "color: white; background: rgba(0,0,0,0.55);"
         "border-radius: 4px; padding: 4px 12px;");
     stats_label_->hide();
-
-    // --- right_panel_ ---
-    right_panel_ = new QWidget();
-    right_panel_->setObjectName("rightPanel");
-    right_panel_->setMinimumWidth(200);
-
-    QVBoxLayout* panelLayout = new QVBoxLayout(right_panel_);
-    panelLayout->setContentsMargins(8, 8, 8, 8);
-    panelLayout->setSpacing(4);
-
-    // chat_display_ — created in C++
-    chat_display_ = new QPlainTextEdit(right_panel_);
-    chat_display_->setObjectName("chatDisplay");
-    chat_display_->setReadOnly(true);
-    chat_display_->setPlaceholderText("DataChannel / 语音对话消息...");
-    chat_display_->setMinimumHeight(120);
-
-    // chat_input_row_ — reparent chat_input_ and send_button_ from chatRow
-    QWidget* chatInputRow = new QWidget(right_panel_);
-    QHBoxLayout* chatInputLayout = new QHBoxLayout(chatInputRow);
-    chatInputLayout->setContentsMargins(0, 0, 0, 0);
-    chatInputLayout->setSpacing(4);
-
-    // Reparent from chatRow (which is still in mainLayout — remove it)
-    QWidget* oldChatRow = ui.chat_input_->parentWidget();
-    ui.chat_input_->setParent(chatInputRow);
-    ui.send_button_->setParent(chatInputRow);
-    chatInputLayout->addWidget(ui.chat_input_);
-    chatInputLayout->addWidget(ui.send_button_);
-    // Remove old chatRow from mainLayout (it's now empty)
-    if (oldChatRow) {
-        ui.mainLayout->removeWidget(oldChatRow);
-        oldChatRow->deleteLater();
-    }
-
-    panelLayout->addWidget(chat_display_, 1);
-    panelLayout->addWidget(chatInputRow);
-
-    // --- Assemble splitter ---
-    splitter_->addWidget(remote_container_);
-    splitter_->addWidget(right_panel_);
-    splitter_->setStretchFactor(0, 80);
-    splitter_->setStretchFactor(1, 20);
-
-    callRootLayout->addWidget(splitter_);
 
     // ---- Overlay positioning on remote_container_ resize ----
     remote_container_->installEventFilter(this);
@@ -387,12 +319,15 @@ void MainWindow::initConnections() {
         action_hangup_->setEnabled(true);
         action_voice_chat_->setEnabled(false);
         stopVoiceChat();
+        if (stats_group_) stats_group_->setVisible(true);
         statusBar()->showMessage("Call in progress — waiting for ICE...");
     });
 
     connect(channel_, &ControlChannel::callDisconnected, this, [this]() {
         log("Call disconnected, restarting daemon...");
         is_call_active_ = false;
+        if (stats_group_) stats_group_->setVisible(false);
+        stats_monitoring_ = false;
         ai_active_type_.clear();
         held_key_ = 0;
         key_timer_->stop();
@@ -552,6 +487,50 @@ void MainWindow::initConnections() {
     stats_timer_ = new QTimer(this);
     stats_timer_->setInterval(1000);
     connect(stats_timer_, &QTimer::timeout, this, &MainWindow::onUpdateStats);
+
+    // ---- Stats monitoring panel (below chat input row) ----
+    stats_group_ = new QGroupBox("通信质量", ui.right_panel_);
+    stats_group_->setVisible(true);
+    auto* statsLayout = new QGridLayout(stats_group_);
+    statsLayout->setSpacing(2);
+    statsLayout->setContentsMargins(4, 4, 4, 4);
+
+    auto makeLabel = [](const QString& text = "--", QGridLayout* l, int r, int c) {
+        auto* lb = new QLabel(text);
+        lb->setStyleSheet("font-size:11px; padding:1px 2px;");
+        l->addWidget(lb, r, c);
+        return lb;
+    };
+    stats_conn_         = makeLabel("连接: --",      statsLayout, 0, 0);
+    stats_rtt_          = makeLabel("延迟: --ms",     statsLayout, 0, 1);
+    stats_loss_         = makeLabel("丢包: --%",      statsLayout, 1, 0);
+    stats_send_quality_ = makeLabel("发送: --",       statsLayout, 1, 1);
+    stats_recv_quality_ = makeLabel("接收: --",       statsLayout, 2, 0);
+    stats_send_rate_    = makeLabel("发送码率: --",   statsLayout, 2, 1);
+    stats_recv_rate_    = makeLabel("接收码率: --",   statsLayout, 3, 0);
+
+    stats_monitor_btn_ = new QPushButton("测量启动");
+    stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px;");
+    statsLayout->addWidget(stats_monitor_btn_, 3, 1);
+
+    connect(stats_monitor_btn_, &QPushButton::clicked, this, [this]() {
+        if (!stats_monitoring_) {
+            channel_->cmdStartStats();
+            stats_monitoring_ = true;
+            stats_monitor_btn_->setText("测量关闭");
+            stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px; background:#e74c3c; color:#fff;");
+        } else {
+            channel_->cmdStopStats();
+            stats_monitoring_ = false;
+            stats_monitor_btn_->setText("测量启动");
+            stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px;");
+        }
+    });
+    connect(channel_, &ControlChannel::statsReceived, this, &MainWindow::onStatsReceived);
+
+    // Hide until call is active
+    stats_group_->setVisible(false);
+    ui.panelLayout->addWidget(stats_group_);
 }
 
 void MainWindow::onProcessStateChanged(WebRtcProcessManager::State state) {
@@ -650,9 +629,11 @@ void MainWindow::switchToCallMode() {
     // setStretchFactor alone only governs resize redistribution; setSizes
     // pins the starting allocation.
     QTimer::singleShot(0, this, [this]() {
-        int totalW = splitter_->width();
+        auto* sp = centralWidget()->findChild<QSplitter*>("callSplitter");
+        if (!sp) return;
+        int totalW = sp->width();
         if (totalW > 0) {
-            splitter_->setSizes({totalW * 80 / 100, totalW * 20 / 100});
+            sp->setSizes({totalW * 80 / 100, totalW * 20 / 100});
         }
     });
 }
@@ -726,6 +707,80 @@ void MainWindow::onUpdateStats() {
     stats_label_->setText(stats);
 }
 
+void MainWindow::onStatsReceived(const QJsonObject& s) {
+    if (!stats_group_) return;
+
+    auto color = [](double v, double green, double yellow) -> QString {
+        if (v <= green) return "color:#27ae60;";
+        if (v <= yellow) return "color:#f39c12;";
+        return "color:#e74c3c;";
+    };
+    auto setColored = [](QLabel* lb, const QString& text, double val, double green, double yellow) {
+        QString c = (val <= green) ? "color:#27ae60;" : (val <= yellow) ? "color:#f39c12;" : "color:#e74c3c;";
+        lb->setText(text);
+        lb->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    };
+
+    // Connection state
+    QString iceType = s.value("local_cand_type").toString();
+    bool writable = s.value("ice_writable").toBool();
+    if (writable) {
+        stats_conn_->setText(QString("连接: 正常 (%1)").arg(iceType));
+        stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
+    } else {
+        stats_conn_->setText("连接: 检查中");
+        stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#f39c12;");
+    }
+
+    // RTT (ms)
+    if (s.contains("rtt_s")) {
+        double rtt = s["rtt_s"].toDouble() * 1000.0;
+        setColored(stats_rtt_, QString("延迟: %1ms").arg(rtt, 0, 'f', 1), rtt, 50, 200);
+    }
+    // Loss rate
+    if (s.contains("loss_rate_pct")) {
+        double loss = s["loss_rate_pct"].toDouble();
+        setColored(stats_loss_, QString("丢包: %1%").arg(loss, 0, 'f', 1), loss, 1, 3);
+    }
+    // Send quality
+    if (s.contains("encode_fps") && s.contains("encode_h")) {
+        int fps = s["encode_fps"].toInt();
+        int w = s["encode_w"].toInt();
+        int h = s["encode_h"].toInt();
+        QString txt = QString("发送: %1×%2 %3fps").arg(w).arg(h).arg(fps);
+        stats_send_quality_->setText(txt);
+        QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
+        stats_send_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Recv quality
+    if (s.contains("decode_fps") && s.contains("decode_h")) {
+        int fps = s["decode_fps"].toInt();
+        int w = s["decode_w"].toInt();
+        int h = s["decode_h"].toInt();
+        QString txt = QString("接收: %1×%2 %3fps").arg(w).arg(h).arg(fps);
+        stats_recv_quality_->setText(txt);
+        QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
+        stats_recv_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Send rate
+    if (s.contains("send_kbps")) {
+        int kbps = s["send_kbps"].toInt();
+        int target = s.value("target_kbps").toInt(0);
+        double ratio = target > 0 ? (double)kbps / target : 1.0;
+        QString txt = QString("发送码率: %1kbps").arg(kbps);
+        stats_send_rate_->setText(txt);
+        QString c = (ratio >= 0.8) ? "color:#27ae60;" : (ratio >= 0.5) ? "color:#f39c12;" : "color:#e74c3c;";
+        stats_send_rate_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Recv rate
+    if (s.contains("recv_kbps")) {
+        int kbps = s["recv_kbps"].toInt();
+        QString txt = QString("接收码率: %1kbps").arg(kbps);
+        stats_recv_rate_->setText(txt);
+        stats_recv_rate_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
+    }
+}
+
 void MainWindow::log(const QString& msg) {
     ui.log_area_->appendPlainText(msg);
     if (log_file_ && log_file_->isOpen()) {
@@ -736,7 +791,7 @@ void MainWindow::log(const QString& msg) {
 }
 
 void MainWindow::chatLog(const QString& msg) {
-    chat_display_->appendPlainText(msg);
+    ui.chat_display_->appendPlainText(msg);
 }
 
 void MainWindow::toggleVoiceChat()
