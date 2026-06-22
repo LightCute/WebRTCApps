@@ -4,8 +4,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QLabel>
-#include <QGroupBox>
-#include <QGridLayout>
 #include <QJsonObject>
 #include <QTreeWidget>
 #include <QStackedWidget>
@@ -120,17 +118,7 @@ private:
     int remote_width_ = 0, remote_height_ = 0;
     int local_width_ = 0, local_height_ = 0;
     void onStatsReceived(const QJsonObject& stats);
-    // Stats panel widgets
-    QGroupBox* stats_group_ = nullptr;
-    QPushButton* stats_monitor_btn_ = nullptr;
     bool stats_monitoring_ = false;
-    QLabel* stats_conn_ = nullptr;
-    QLabel* stats_rtt_ = nullptr;
-    QLabel* stats_loss_ = nullptr;
-    QLabel* stats_send_quality_ = nullptr;
-    QLabel* stats_recv_quality_ = nullptr;
-    QLabel* stats_send_rate_ = nullptr;
-    QLabel* stats_recv_rate_ = nullptr;
     uint64_t remote_frame_count_ = 0;
     uint64_t local_frame_count_ = 0;
 };

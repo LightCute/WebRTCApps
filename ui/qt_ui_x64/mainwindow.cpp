@@ -29,7 +29,7 @@ MainWindow::MainWindow(QWidget* parent)
     log_file_->open(QIODevice::Append | QIODevice::Text);
 
     QString daemon_path = qEnvironmentVariable("WEBRTC_DAEMON_PATH",
-        app_dir + "/apps_peerconnection_client");
+        app_dir + "/client_x64");
 
     proc_mgr_ = new WebRtcProcessManager(daemon_path, this);
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
@@ -319,14 +319,14 @@ void MainWindow::initConnections() {
         action_hangup_->setEnabled(true);
         action_voice_chat_->setEnabled(false);
         stopVoiceChat();
-        if (stats_group_) stats_group_->setVisible(true);
+        
         statusBar()->showMessage("Call in progress — waiting for ICE...");
     });
 
     connect(channel_, &ControlChannel::callDisconnected, this, [this]() {
         log("Call disconnected, restarting daemon...");
         is_call_active_ = false;
-        if (stats_group_) stats_group_->setVisible(false);
+        
         stats_monitoring_ = false;
         ai_active_type_.clear();
         held_key_ = 0;
@@ -488,49 +488,19 @@ void MainWindow::initConnections() {
     stats_timer_->setInterval(1000);
     connect(stats_timer_, &QTimer::timeout, this, &MainWindow::onUpdateStats);
 
-    // ---- Stats monitoring panel (below chat input row) ----
-    stats_group_ = new QGroupBox("通信质量", ui.right_panel_);
-    stats_group_->setVisible(true);
-    auto* statsLayout = new QGridLayout(stats_group_);
-    statsLayout->setSpacing(2);
-    statsLayout->setContentsMargins(4, 4, 4, 4);
-
-    auto makeLabel = [](const QString& text = "--", QGridLayout* l, int r, int c) {
-        auto* lb = new QLabel(text);
-        lb->setStyleSheet("font-size:11px; padding:1px 2px;");
-        l->addWidget(lb, r, c);
-        return lb;
-    };
-    stats_conn_         = makeLabel("连接: --",      statsLayout, 0, 0);
-    stats_rtt_          = makeLabel("延迟: --ms",     statsLayout, 0, 1);
-    stats_loss_         = makeLabel("丢包: --%",      statsLayout, 1, 0);
-    stats_send_quality_ = makeLabel("发送: --",       statsLayout, 1, 1);
-    stats_recv_quality_ = makeLabel("接收: --",       statsLayout, 2, 0);
-    stats_send_rate_    = makeLabel("发送码率: --",   statsLayout, 2, 1);
-    stats_recv_rate_    = makeLabel("接收码率: --",   statsLayout, 3, 0);
-
-    stats_monitor_btn_ = new QPushButton("测量启动");
-    stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px;");
-    statsLayout->addWidget(stats_monitor_btn_, 3, 1);
-
-    connect(stats_monitor_btn_, &QPushButton::clicked, this, [this]() {
+    // ---- Stats monitoring panel (defined in mainwindow.ui) ----
+    connect(ui.stats_monitor_btn_, &QPushButton::clicked, this, [this]() {
         if (!stats_monitoring_) {
             channel_->cmdStartStats();
             stats_monitoring_ = true;
-            stats_monitor_btn_->setText("测量关闭");
-            stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px; background:#e74c3c; color:#fff;");
+            ui.stats_monitor_btn_->setText("测量关闭");
         } else {
             channel_->cmdStopStats();
             stats_monitoring_ = false;
-            stats_monitor_btn_->setText("测量启动");
-            stats_monitor_btn_->setStyleSheet("font-size:11px; padding:2px 4px;");
+            ui.stats_monitor_btn_->setText("测量启动");
         }
     });
     connect(channel_, &ControlChannel::statsReceived, this, &MainWindow::onStatsReceived);
-
-    // Hide until call is active
-    stats_group_->setVisible(false);
-    ui.panelLayout->addWidget(stats_group_);
 }
 
 void MainWindow::onProcessStateChanged(WebRtcProcessManager::State state) {
@@ -708,7 +678,7 @@ void MainWindow::onUpdateStats() {
 }
 
 void MainWindow::onStatsReceived(const QJsonObject& s) {
-    if (!stats_group_) return;
+    
 
     auto color = [](double v, double green, double yellow) -> QString {
         if (v <= green) return "color:#27ae60;";
@@ -725,22 +695,22 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
     QString iceType = s.value("local_cand_type").toString();
     bool writable = s.value("ice_writable").toBool();
     if (writable) {
-        stats_conn_->setText(QString("连接: 正常 (%1)").arg(iceType));
-        stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
+        ui.stats_conn_->setText(QString("连接: 正常 (%1)").arg(iceType));
+        ui.stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
     } else {
-        stats_conn_->setText("连接: 检查中");
-        stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#f39c12;");
+        ui.stats_conn_->setText("连接: 检查中");
+        ui.stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#f39c12;");
     }
 
     // RTT (ms)
     if (s.contains("rtt_s")) {
         double rtt = s["rtt_s"].toDouble() * 1000.0;
-        setColored(stats_rtt_, QString("延迟: %1ms").arg(rtt, 0, 'f', 1), rtt, 50, 200);
+        setColored(ui.stats_rtt_, QString("延迟: %1ms").arg(rtt, 0, 'f', 1), rtt, 50, 200);
     }
     // Loss rate
     if (s.contains("loss_rate_pct")) {
         double loss = s["loss_rate_pct"].toDouble();
-        setColored(stats_loss_, QString("丢包: %1%").arg(loss, 0, 'f', 1), loss, 1, 3);
+        setColored(ui.stats_loss_, QString("丢包: %1%").arg(loss, 0, 'f', 1), loss, 1, 3);
     }
     // Send quality
     if (s.contains("encode_fps") && s.contains("encode_h")) {
@@ -748,9 +718,9 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
         int w = s["encode_w"].toInt();
         int h = s["encode_h"].toInt();
         QString txt = QString("发送: %1×%2 %3fps").arg(w).arg(h).arg(fps);
-        stats_send_quality_->setText(txt);
+        ui.stats_send_quality_->setText(txt);
         QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
-        stats_send_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+        ui.stats_send_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
     }
     // Recv quality
     if (s.contains("decode_fps") && s.contains("decode_h")) {
@@ -758,9 +728,9 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
         int w = s["decode_w"].toInt();
         int h = s["decode_h"].toInt();
         QString txt = QString("接收: %1×%2 %3fps").arg(w).arg(h).arg(fps);
-        stats_recv_quality_->setText(txt);
+        ui.stats_recv_quality_->setText(txt);
         QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
-        stats_recv_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+        ui.stats_recv_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
     }
     // Send rate
     if (s.contains("send_kbps")) {
@@ -768,16 +738,50 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
         int target = s.value("target_kbps").toInt(0);
         double ratio = target > 0 ? (double)kbps / target : 1.0;
         QString txt = QString("发送码率: %1kbps").arg(kbps);
-        stats_send_rate_->setText(txt);
+        ui.stats_send_rate_->setText(txt);
         QString c = (ratio >= 0.8) ? "color:#27ae60;" : (ratio >= 0.5) ? "color:#f39c12;" : "color:#e74c3c;";
-        stats_send_rate_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+        ui.stats_send_rate_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
     }
     // Recv rate
     if (s.contains("recv_kbps")) {
         int kbps = s["recv_kbps"].toInt();
-        QString txt = QString("接收码率: %1kbps").arg(kbps);
-        stats_recv_rate_->setText(txt);
-        stats_recv_rate_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
+        ui.stats_recv_rate_->setText(QString("接收码率: %1kbps").arg(kbps));
+        ui.stats_recv_rate_->setStyleSheet("color:#27ae60;");
+    }
+    // Quality limitation reason (the most important diagnostic)
+    if (s.contains("quality_limit")) {
+        QString ql = s["quality_limit"].toString();
+        QString txt = QString("降质: %1").arg(ql);
+        ui.stats_limit_->setText(txt);
+        QString c = (ql == "none") ? "color:#27ae60;" : (ql == "cpu") ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_limit_->setStyleSheet(c);
+    }
+    // Encode time
+    if (s.contains("avg_encode_ms")) {
+        int ms = s["avg_encode_ms"].toInt();
+        setColored(ui.stats_encode_ms_, QString("编码: %1ms").arg(ms), ms, 20, 33);
+    }
+    // Decode time
+    if (s.contains("avg_decode_ms")) {
+        int ms = s["avg_decode_ms"].toInt();
+        setColored(ui.stats_decode_ms_, QString("解码: %1ms").arg(ms), ms, 10, 20);
+    }
+    // Available bandwidth
+    if (s.contains("avail_kbps")) {
+        int avail = s["avail_kbps"].toInt();
+        int target = s.value("target_kbps").toInt(0);
+        QString txt = QString("可用带宽: %1kbps").arg(avail);
+        ui.stats_avail_kbps_->setText(txt);
+        double ratio = target > 0 ? (double)avail / target : 2.0;
+        QString c = (ratio >= 1.5) ? "color:#27ae60;" : (ratio >= 1.0) ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_avail_kbps_->setStyleSheet(c);
+    }
+    // Freeze count (visible quality drops)
+    if (s.contains("freeze_cnt")) {
+        int fz = s["freeze_cnt"].toInt();
+        ui.stats_freeze_->setText(QString("冻结: %1").arg(fz));
+        QString c = (fz == 0) ? "color:#27ae60;" : (fz <= 3) ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_freeze_->setStyleSheet(c);
     }
 }
 
