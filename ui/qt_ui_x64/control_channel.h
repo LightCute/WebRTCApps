@@ -11,12 +11,6 @@ struct PeerInfo {
     QString name;
 };
 
-struct VideoCapInfo {
-    int width;
-    int height;
-    int max_fps;
-};
-
 class ControlChannel : public QObject
 {
     Q_OBJECT
@@ -42,8 +36,6 @@ public:
     int cmdSetAudioInputDevice(int device_idx);
     void cmdStartStats();
     void cmdStopStats();
-    void cmdQueryVideoCaps();
-    void cmdSetVideoParams(int width, int height, int fps);
 
 signals:
     void connected();
@@ -64,8 +56,6 @@ signals:
     void audioInputDevicesReceived(QList<QPair<int, QString>> devices);
     void audioOutputDevicesReceived(QList<QPair<int, QString>> devices);
     void statsReceived(const QJsonObject& stats);
-    void videoCapsReceived(const QList<VideoCapInfo>& caps);
-    void videoParamsChanged(int width, int height, int fps);
     void errorOccurred(const QString& message);
 
 private slots:

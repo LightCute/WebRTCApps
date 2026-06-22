@@ -1,0 +1,27 @@
+import("../../../webrtc.gni")
+
+rtc_executable("audio_test") {
+  testonly = true
+
+  sources = [ "main.cc" ]
+
+  deps = [
+    "../../../api/audio:audio_device",
+    "../../../api/audio:create_audio_device_module",
+    "../../../api/audio:audio_mixer_api",
+    "../../../api/environment",
+    "../../../api/environment:environment_factory",
+    "../../../api:field_trials",
+    "../../../api/task_queue",
+    "../../../modules/audio_device",
+    "../../../rtc_base:log_sinks",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:threading",
+    "../../../system_wrappers",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [ "pthread" ]
+}

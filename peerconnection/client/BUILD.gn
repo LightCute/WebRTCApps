@@ -4,8 +4,10 @@ if (is_linux || is_chromeos) {
   import("//build/config/linux/pkg_config.gni")
 }
 
-assert(is_linux || is_chromeos,
-       "apps/peerconnection/client currently supports Linux/ChromeOS only.")
+assert(is_linux || is_chromeos || is_android,
+       "apps/peerconnection/client currently supports Linux/ChromeOS/Android only.")
+
+if (is_linux || is_chromeos) {
 
 rtc_executable("peerconnection_client") {
   testonly = true
@@ -271,3 +273,4 @@ rtc_executable("mpp_codec_test") {
     "pthread",
   ]
 }
+}  # if (is_linux || is_chromeos)

@@ -1,0 +1,50 @@
+import("../../../webrtc.gni")
+
+rtc_executable("media_pipeline") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "media_pipeline.cc",
+    "media_pipeline.h",
+    "shm_common.cc",
+    "shm_common.h",
+    "shm_video_renderer.cc",
+    "shm_video_renderer.h",
+    "shm_video_writer.cc",
+    "shm_video_writer.h",
+  ]
+
+  deps = [
+    "../../../api/environment",
+    "../../../api/environment:environment_factory",
+    "../../../api/task_queue",
+    "../../../api:create_frame_generator",
+    "../../../api:make_ref_counted",
+    "../../../api:media_stream_interface",
+    "../../../api:scoped_refptr",
+    "../../../api/audio:audio_device",
+    "../../../api/audio:create_audio_device_module",
+    "../../../api/video:video_frame",
+    "../../../common_video",
+    "../../../media:video_common",
+    "../../../modules/video_capture:video_capture_internal_impl",
+    "../../../modules/video_capture:video_capture_module",
+    "../../../pc:video_track_source",
+    "../../../rtc_base:logging",
+    "../../../rtc_base:ssl_adapter",
+    "../../../rtc_base:threading",
+    "../../../system_wrappers:system_wrappers",
+    "../../../test:frame_generator_capturer",
+    "../../../test:platform_video_capturer",
+    "../../../test:test_video_capturer",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [
+    "pthread",
+    "dl",
+  ]
+}

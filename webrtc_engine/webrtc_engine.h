@@ -54,8 +54,6 @@ class WebRTCEngine : public EngineController,
   void DumpStats() override;
   void StartStatsPolling() override;
   void StopStatsPolling() override;
-  void QueryVideoCaps() override;
-  void SetVideoParams(int width, int height, int fps) override;
 
   // Lifecycle (called by main.cc, not part of EngineController)
   bool Init();

@@ -1045,23 +1045,6 @@ void WebRTCEngine::StopStatsPolling() {
   RTC_LOG(LS_INFO) << "Stats polling stopped";
 }
 
-void WebRTCEngine::QueryVideoCaps() {
-  if (!pipeline_) return;
-  std::string json = pipeline_->GetVideoCapabilities();
-  if (observer_) observer_->OnEngineEvent(json);
-}
 
-void WebRTCEngine::SetVideoParams(int width, int height, int fps) {
-  if (!pipeline_) return;
-  pipeline_->SetVideoParams(width, height, fps);
-  // Notify back
-  if (observer_) {
-    Json::Value root;
-    root["event"] = "video_params_changed";
-    root["width"] = width; root["height"] = height; root["fps"] = fps;
-    Json::StreamWriterBuilder f; f["indentation"] = "";
-    observer_->OnEngineEvent(Json::writeString(f, root));
-  }
-}
 
 #pragma GCC diagnostic pop

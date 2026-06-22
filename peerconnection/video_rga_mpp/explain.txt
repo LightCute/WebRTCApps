@@ -1,0 +1,112 @@
+3.1 你的代码中 DMA-BUF 端到端全流程
+plaintext
+编码器(导出者)
+  ↓ (DmaBufPool.Allocate 分配DMA内存)
+  ↓ (DmaBufServer 发送fd)
+Socket 传递fd(零拷贝)
+  ↓ (DmaBufClient 接收fd)
+解码器(导入者)
+  ↓ (DmaBufPool.ImportFd 导入fd)
+MPP/RGA硬件(DMA调度)
+  ↓ (全程硬件DMA搬运，CPU零拷贝)
+输出I420 DMA-BUF
+3.2 DMA-BUF 分配实现（导出者核心：dma_buf_pool.cc）
+你的代码中 DmaBufPool::Allocate() 是DMA-BUF 分配的底层实现，兼容 RK3588 两种硬件内存分配方式：
+方式 1：RK 官方 librga.so API（优先）
+直接调用瑞芯微 RGA 库的硬件 DMA 分配 API，原生支持 RK3588：
+cpp
+运行
+// shared/dma_buf_pool.cc：librga 分配DMA-BUF
+c_RkRgaGetAllocBuffer(&bo, w, h, bpp); // 分配硬件连续内存
+c_RkRgaGetBufferFd(&bo, &fd);         // 获取DMA-BUF fd（核心）
+c_RkRgaGetMmap(&bo);                   // 映射到用户空间
+API 来源：shared/rga_headers/RgaApi.h
+作用：RK3588 RGA 硬件直接管理的 DMA 内存，物理连续，适合硬件加速
+方式 2：Linux 标准 dma_heap API（降级兜底）
+如果 RGA 库分配失败，使用内核 CMA 内存分配：
+cpp
+运行
+// shared/dma_buf_pool.cc：dma_heap 分配DMA-BUF
+open("/dev/dma_heap/linux,cma"); // 打开RK3588 CMA硬件内存
+ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc); // 分配DMA内存
+mmap(nullptr, size, PROT_READ|PROT_WRITE, MAP_SHARED, alloc.fd, 0);
+作用：Linux 标准 DMA 内存，RK3588 默认预留 CMA 内存给硬件
+3.3 DMA-BUF 传递实现（用户核心：server/client）
+你的代码通过 Unix Socket + SCM_RIGHTS 传递fd，这是 Linux 跨进程传递 DMA-BUF 的唯一标准方式：
+发送端：DmaBufServer（enc）
+cpp
+运行
+// shared/dma_buf_server.cc：发送fd
+SendFds(client_fd, fds, num_fds); // sendmsg 传递SCM_RIGHTS
+核心：sendmsg + CMSG_SPACE，传递 fd，不传递数据
+接收端：DmaBufClient（dec）
+cpp
+运行
+// dec/dma_buf_client.cc：接收fd
+recvmsg(sock_fd_, &msg, 0); // 接收fd
+int* fds = reinterpret_cast<int*>(CMSG_DATA(cmsg)); // 解析fd
+核心：recvmsg 解析出编码器分配的 DMA-BUF fd
+3.4 DMA-BUF 导入实现（导入者核心：dma_buf_pool.cc）
+解码器接收 fd 后，导入 DMA-BUF，映射到用户空间：
+cpp
+运行
+// shared/dma_buf_pool.cc：ImportFd 导入外部DMA-BUF
+int dup_fd = dup(fd); // 复制fd（内核引用计数+1）
+void* ptr = mmap(nullptr, size, PROT_READ, MAP_SHARED, dup_fd, 0); // 映射内存
+作用：让解码器进程可以访问编码器分配的硬件内存
+零拷贝：内存始终在硬件中，不拷贝
+3.5 RK3588 DMA 调度 API（硬件核心：RGA + MPP）
+这是你最关心的：如何调用 API 调度 RK3588 DMA 硬件全程通过 fd 操作，CPU 不参与数据搬运，DMA 硬件自动执行。
+1. RGA 硬件 DMA 调度 API（你的代码全流程使用）
+RGA 是 RK3588 2D DMA 加速引擎，负责格式转换、缩放，直接操作 DMA-BUF fd：
+步骤 1：加载 RGA 驱动库
+cpp
+运行
+// enc/dec 代码中通用
+void* rga_lib = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+rga_blit_ = dlsym(rga_lib, "c_RkRgaBlit"); // RGA核心DMA调用函数
+步骤 2：配置 DMA-BUF fd（零拷贝核心）
+cpp
+运行
+// dec/main.cc DecSink::Decoded：RGA DMA配置
+rga_info_t src{}, dst{};
+src.fd = mpp_fd;          // 源：MPP输出的DMA-BUF fd（硬件内存）
+src.format = RK_FORMAT_YCbCr_420_SP; // NV12
+dst.fd = dst_fd;           // 目标：输出DMA-BUF fd（硬件内存）
+dst.format = RK_FORMAT_YCbCr_420_P;  // I420
+步骤 3：调用 RGA DMA 硬件执行
+cpp
+运行
+rga_blit_(&src, &dst, nullptr); // 硬件DMA执行转换，CPU休眠
+DMA 工作原理：RK3588 DMA 控制器自动从src.fd读取数据，转换后写入dst.fd
+CPU 零参与：全程硬件搬运，CPU 只发指令
+2. MPP 硬件 DMA 调度 API
+MPP 是 RK3588 视频解码 DMA 引擎，直接输出 DMA-BUF fd：
+cpp
+运行
+// dec/main.cc：MPP硬件输出DMA-BUF fd
+int mpp_fd = decoder_->GetLastNV12Fd(); // 解码后直接输出硬件fd
+MPP 解码 H264 → 直接写入 DMA-BUF → 返回 fd
+无缝对接 RGA 硬件，全程零拷贝
+3.6 DMA-BUF 释放与清理
+你的代码中 DmaBufPool 析构函数自动释放硬件内存：
+cpp
+运行
+// shared/dma_buf_pool.cc：析构释放DMA内存
+munmap(slots_[i].ptr, slots_[i].size); // 取消映射
+close(slots_[i].fd); // 关闭fd，内核引用计数-1，自动释放内存
+四、核心总结（结合你的代码）
+1. 文件描述符 (fd)
+Linux 进程访问硬件的整数钥匙
+传递fd= 传递硬件内存访问权，零拷贝
+内核通过引用计数管理，跨进程 / 硬件通用
+2. DMA-BUF 三大角色
+导出者：enc + DmaBufPool.Allocate → 分配 DMA 内存
+导入者：dec + DmaBufPool.ImportFd + MPP/RGA → 使用 fd 操作硬件
+用户：enc/dec主进程 → 传递 fd、同步流程
+3. 你的代码中 DMA + RK3588 API 核心
+分配：librga / dma_heap API 分配 RK3588 硬件 DMA 内存
+传递：Socket + SCM_RIGHTS 传递 fd
+导入：dup + mmap 导入外部 DMA-BUF
+调度：c_RkRgaBlit + MPP GetLastNV12Fd 调度硬件 DMA
+零拷贝：全程硬件 DMA 搬运，CPU 仅做调度

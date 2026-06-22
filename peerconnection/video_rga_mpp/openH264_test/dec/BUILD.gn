@@ -1,0 +1,24 @@
+import("../../../../../webrtc.gni")
+
+rtc_executable("openh264_dec") {
+  testonly = true
+  sources = [
+    "main.cc",
+    "../../../client/shm_common.cc", "../../../client/shm_common.h",
+    "../../../client/shm_video_writer.cc", "../../../client/shm_video_writer.h",
+  ]
+  deps = [
+    "../../../../../api/environment", "../../../../../api/environment:environment_factory",
+    "../../../../../api/video:video_frame",
+    "../../../../../api/video_codecs:video_codecs_api",
+    "../../../../../api/video_codecs:video_decoder_factory_template_open_h264_adapter",
+    "../../../../../api/video_codecs:video_decoder_factory_template",
+    "../../../../../modules/video_coding:video_codec_interface",
+    "../../../../../modules/video_coding:webrtc_h264",
+    "../../../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [ "pthread" ]
+}

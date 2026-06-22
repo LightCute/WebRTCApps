@@ -29,8 +29,6 @@ class EngineController {
   virtual void DumpStats() = 0;
   virtual void StartStatsPolling() = 0;
   virtual void StopStatsPolling() = 0;
-  virtual void QueryVideoCaps() = 0;
-  virtual void SetVideoParams(int width, int height, int fps) = 0;
 
   virtual bool connection_active() const = 0;
 };

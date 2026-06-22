@@ -1,0 +1,36 @@
+import("../../../../webrtc.gni")
+
+rtc_executable("dec_test") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "../../client/rk_mpp_codec.cc",
+    "../../client/rk_mpp_codec.h",
+    "../../client/rk_mpp_stubs.cc",
+    "../../client/shm_common.cc",
+    "../../client/shm_common.h",
+  ]
+
+  deps = [
+    "../../../../api/environment",
+    "../../../../api/environment:environment_factory",
+    "../../../../api/video:video_frame",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../api/video_codecs:video_decoder_factory_template_open_h264_adapter",
+    "../../../../modules/video_coding:video_codec_interface",
+    "../../../../modules/video_coding:webrtc_h264",
+    "../../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  include_dirs = [
+    "../../mpp/inc",
+    "../../mpp/osal/inc",
+    "../../mpp/utils",
+    "../../mpp/mpp/base/inc",
+  ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [ "dl", "pthread" ]
+}

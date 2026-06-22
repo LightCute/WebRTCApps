@@ -142,26 +142,6 @@ void ControlChannel::cmdStopStats() {
     obj["cmd"] = "stop_stats";
     sendJson(obj);
 }
-
-void ControlChannel::cmdQueryVideoCaps() {
-    QJsonObject obj;
-    obj["id"] = next_id_++;
-    obj["cmd"] = "query_video_caps";
-    sendJson(obj);
-}
-
-void ControlChannel::cmdSetVideoParams(int width, int height, int fps) {
-    QJsonObject obj;
-    obj["id"] = next_id_++;
-    obj["cmd"] = "set_video_params";
-    QJsonObject params;
-    params["width"] = width;
-    params["height"] = height;
-    params["fps"] = fps;
-    obj["params"] = params;
-    sendJson(obj);
-}
-
 void ControlChannel::onReadyRead() {
     read_buf_.append(sock_.readAll());
     if (read_buf_.size() > 1 << 20) {
@@ -262,16 +242,6 @@ void ControlChannel::handleEvent(const QJsonObject& event) {
         emit audioOutputDevicesReceived(devices);
     } else if (evt == "stats") {
         emit statsReceived(event);
-    } else if (evt == "video_caps") {
-        QList<VideoCapInfo> caps;
-        for (const auto& v : event["caps"].toArray()) {
-            QJsonObject c = v.toObject();
-            caps.append({c["width"].toInt(), c["height"].toInt(), c["max_fps"].toInt()});
-        }
-        emit videoCapsReceived(caps);
-    } else if (evt == "video_params_changed") {
-        emit videoParamsChanged(event["width"].toInt(), event["height"].toInt(),
-                                event["fps"].toInt());
     } else {
         qDebug() << "Unknown event:" << evt;
     }

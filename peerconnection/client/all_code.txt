@@ -2,8 +2,6 @@
 
 📂 .:
   └─ blocking_queue.h
-  └─ cli_runner.cc
-  └─ cli_runner.h
   └─ data_channel_manager.cc
   └─ data_channel_manager.h
   └─ defaults.cc
@@ -25,14 +23,6 @@
   └─ rk_mpp_encoder.cc
   └─ rk_mpp_encoder.h
   └─ rk_mpp_stubs.cc
-  └─ shm_audio_capturer.cc
-  └─ shm_audio_capturer.h
-  └─ shm_audio_reader.cc
-  └─ shm_audio_reader.h
-  └─ shm_audio_renderer.cc
-  └─ shm_audio_renderer.h
-  └─ shm_audio_writer.cc
-  └─ shm_audio_writer.h
   └─ shm_common.cc
   └─ shm_common.h
   └─ shm_video_renderer.cc
@@ -807,7 +797,7 @@ std::string GetTurnPassword();
 #endif  // APPS_PEERCONNECTION_CLIENT_DEFAULTS_H_
 
 ========== ./unix_socket_server.cc ==========
-Lines: 242
+Lines: 224
 
 // unix_socket_server.cc
 #include "unix_socket_server.h"
@@ -871,12 +861,12 @@ void UnixSocketServer::Wait() {
 void UnixSocketServer::SendToClient(const std::string& json) {
   if (client_fd_ < 0) return;
   std::string line = json + "\n";
-  write(client_fd_, line.c_str(), line.size());
+  (void)write(client_fd_, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendJson(int fd, const std::string& json) {
   std::string line = json + "\n";
-  write(fd, line.c_str(), line.size());
+  (void)write(fd, line.c_str(), line.size());
 }
 
 void UnixSocketServer::SendResponse(int id, bool ok, const std::string& error) {
@@ -925,39 +915,21 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
   } else if (cmd == "hangup") {
     engine_->HangUp();
     SendResponse(id, true);
+  } else if (cmd == "send_data") {
+    std::string text = root["params"].get("text", "").asString();
+    if (text.empty()) {
+      SendResponse(id, false, "Missing text in params");
+      return;
+    }
+    engine_->SendData(text);
+    SendResponse(id, true);
   } else if (cmd == "shutdown") {
     SendResponse(id, true);
     running_ = false;
     shutdown_cv_.notify_all();
-  } else if (cmd == "set_mute") {
-    bool audio_mute = root["params"].get("audio", false).asBool();
-    bool video_mute = root["params"].get("video", false).asBool();
-    if (audio_mute) engine_->SetAudioMuted(true);
-    if (video_mute) engine_->SetVideoPaused(true);
-    SendResponse(id, true);
-  } else if (cmd == "send_data") {
-    std::string text = root["params"].get("text", "").asString();
-    engine_->SendData(text);
-    SendResponse(id, true);
-  } else if (cmd == "query_devices") {
-    engine_->QueryDevices();
-    SendResponse(id, true);
-  } else if (cmd == "set_video_device") {
-    int idx = root["params"].get("device_idx", -1).asInt();
-    if (idx < 0) {
-      SendResponse(id, false, "Missing device_idx");
-      return;
-    }
-    engine_->SetVideoDevice(idx);
-    SendResponse(id, true);
-  } else if (cmd == "set_audio_input_device") {
-    int idx = root["params"].get("device_idx", -1).asInt();
-    if (idx < 0) {
-      SendResponse(id, false, "Missing device_idx");
-      return;
-    }
-    engine_->SetAudioInputDevice(idx);
-    SendResponse(id, true);
+  } else if (cmd == "get_local_sdp") {
+    engine_->GetLocalSdp();
+    // Response comes later via OnEngineEvent("local_sdp") or ("local_sdp_error")
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }
@@ -1134,53 +1106,6 @@ public:
     }
 
 };
-
-========== ./shm_audio_capturer.h ==========
-Lines: 43
-
-#ifndef APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
-#define APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
-
-#include <atomic>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include "api/media_stream_interface.h"
-#include "api/scoped_refptr.h"
-#include "apps/peerconnection/client/shm_audio_reader.h"
-
-// Reads captured audio from shared memory (produced by an external Qt process).
-// Implements AudioSourceInterface so it can be used as a drop-in audio source
-// for PeerConnectionFactory::CreateAudioTrack().
-class ShmAudioCapturer : public webrtc::AudioSourceInterface {
- public:
-  static webrtc::scoped_refptr<ShmAudioCapturer> Create(
-      const std::string& key_path, int proj_id);
-  ~ShmAudioCapturer() override;
-
-  void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
-  void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;
-  void RegisterObserver(webrtc::ObserverInterface*) override {}
-  void UnregisterObserver(webrtc::ObserverInterface*) override {}
-  webrtc::MediaSourceInterface::SourceState state() const override {
-    return webrtc::MediaSourceInterface::kLive;
-  }
-  bool remote() const override { return false; }
-
- protected:
-  ShmAudioCapturer() = default;
-  void CaptureLoop();
-
-  ShmAudioReader reader_;
-  std::mutex sinks_mutex_;
-  std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
-  std::thread capture_thread_;
-  std::atomic<bool> running_{false};
-};
-
-#endif  // APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_CAPTURER_H_
 
 ========== ./rk_mpp_codec.cc ==========
 Lines: 551
@@ -1814,7 +1739,7 @@ std::string GetPeerName() {
 }
 
 ========== ./media_pipeline.cc ==========
-Lines: 328
+Lines: 197
 
 #include "apps/peerconnection/client/media_pipeline.h"
 
@@ -1945,128 +1870,16 @@ MediaPipeline::CreateVideoSource() {
 }
 
 webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
-    webrtc::PeerConnectionFactoryInterface* factory,
-    webrtc::AudioSourceInterface* external_source) {
-  if (external_source) {
-    audio_source_ = external_source;
-  } else {
-    audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
-  }
+    webrtc::PeerConnectionFactoryInterface* factory) {
+  audio_source_ = factory->CreateAudioSource(webrtc::AudioOptions());
   return audio_source_.get();
 }
 
 // ---- Device management ----
 
-void MediaPipeline::SetVideoDevice(int device_idx) {
-  if (!video_source_) {
-    RTC_LOG(LS_WARNING) << "No local video source to swap";
-    return;
-  }
-  auto new_capturer = CreateCapturer(env_.task_queue_factory(), device_idx);
-  if (!new_capturer) {
-    RTC_LOG(LS_ERROR) << "Failed to create capturer for device " << device_idx;
-    return;
-  }
-  auto* capturer_source = static_cast<CapturerTrackSource*>(video_source_.get());
-  capturer_source->SwapCapturer(std::move(new_capturer));
-  video_device_idx_ = device_idx;
-}
 
-void MediaPipeline::SetAudioMuted(bool muted) {
-  RTC_LOG(LS_INFO) << "SetAudioMuted: " << (muted ? "true" : "false");
-  if (adm_ && muted)
-    adm_->StopRecording();
-}
 
-void MediaPipeline::SetVideoPaused(bool paused,
-                                    webrtc::PeerConnectionInterface* pc) {
-  RTC_LOG(LS_INFO) << "SetVideoPaused: " << (paused ? "true" : "false");
-  if (!pc) return;
-  auto senders = pc->GetSenders();
-  for (auto& sender : senders) {
-    if (sender->track() &&
-        sender->track()->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
-      sender->track()->set_enabled(!paused);
-    }
-  }
-}
 
-void MediaPipeline::QueryDevices() {
-  Json::Value video_arr(Json::arrayValue);
-  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
-  if (info) {
-    int n = info->NumberOfDevices();
-    char name[256], id[256];
-    for (int i = 0; i < n; ++i) {
-      if (info->GetDeviceName(i, name, sizeof(name), id, sizeof(id)) == 0) {
-        Json::Value dev;
-        dev["idx"] = i; dev["name"] = name;
-        video_arr.append(dev);
-      }
-    }
-  }
-  Json::StreamWriterBuilder factory;
-  factory["indentation"] = "";
-  Json::Value video_event;
-  video_event["event"] = "video_devices";
-  video_event["devices"] = video_arr;
-  if (event_cb_) event_cb_(Json::writeString(factory, video_event));
-
-  Json::Value audio_arr(Json::arrayValue);
-  if (adm_ && worker_thread_) {
-    audio_arr = worker_thread_->BlockingCall([this]() -> Json::Value {
-      Json::Value arr(Json::arrayValue);
-      int16_t n = adm_->RecordingDevices();
-      char name[webrtc::kAdmMaxDeviceNameSize];
-      char guid[webrtc::kAdmMaxGuidSize];
-      for (int16_t i = 0; i < n; ++i) {
-        if (adm_->RecordingDeviceName(i, name, guid) == 0) {
-          Json::Value dev;
-          dev["idx"] = i; dev["name"] = name;
-          arr.append(dev);
-        }
-      }
-      return arr;
-    });
-  }
-  if (!audio_arr.empty()) {
-    Json::Value audio_event;
-    audio_event["event"] = "audio_input_devices";
-    audio_event["devices"] = audio_arr;
-    if (event_cb_) event_cb_(Json::writeString(factory, audio_event));
-  }
-
-  if (audio_arr.empty()) {
-    FILE* fp = popen("arecord -l 2>/dev/null", "r");
-    if (fp) {
-      Json::Value alsa_arr(Json::arrayValue);
-      char line[256]; int idx = 0;
-      while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "card ") == line && strstr(line, "device ")) {
-          char* desc_begin = strrchr(line, '[');
-          char* desc_end = desc_begin ? strrchr(line, ']') : nullptr;
-          char name[256];
-          if (desc_begin && desc_end && desc_end > desc_begin) {
-            size_t len = desc_end - desc_begin - 1;
-            snprintf(name, sizeof(name), "%.*s", (int)len, desc_begin + 1);
-          } else {
-            snprintf(name, sizeof(name), "Capture device %d", idx);
-          }
-          Json::Value dev;
-          dev["idx"] = idx; dev["name"] = name;
-          alsa_arr.append(dev); idx++;
-        }
-      }
-      pclose(fp);
-      if (!alsa_arr.empty()) {
-        Json::Value alsa_event;
-        alsa_event["event"] = "audio_input_devices";
-        alsa_event["devices"] = alsa_arr;
-        if (event_cb_) event_cb_(Json::writeString(factory, alsa_event));
-      }
-    }
-  }
-}
 
 // ---- Renderers ----
 
@@ -2106,30 +1919,11 @@ void MediaPipeline::StopRemoteRenderer() {
   }
 }
 
-void MediaPipeline::StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track) {
-  if (remote_audio_renderer_) {
-    RTC_LOG(LS_WARNING) << "Remote audio SHM renderer already started";
-    return;
-  }
-  remote_audio_renderer_ = std::make_unique<ShmAudioRenderer>(
-      shm_audio_playout_key_path(), SHM_AUDIO_PLAYOUT_PROJ_ID);
-  track->AddSink(remote_audio_renderer_.get());
-  RTC_LOG(LS_INFO) << "Remote audio SHM renderer started";
-}
-
-void MediaPipeline::StopRemoteAudioRenderer() {
-  if (remote_audio_renderer_) {
-    remote_audio_renderer_.reset();
-    RTC_LOG(LS_INFO) << "Remote audio SHM renderer stopped";
-  }
-}
-
 // ---- Lifecycle ----
 
 void MediaPipeline::Shutdown() {
   local_renderer_.reset();
   remote_renderer_.reset();
-  remote_audio_renderer_.reset();
   video_source_ = nullptr;
   audio_source_ = nullptr;
   if (adm_ && worker_thread_) {
@@ -2318,116 +2112,8 @@ private:
     bool m_inited{false};
 };
 
-========== ./shm_audio_reader.cc ==========
-Lines: 104
-
-// shm_audio_reader.cc
-#include "shm_audio_reader.h"
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cerrno>
-#include <cstring>
-#include <cstdio>
-#include <ctime>
-
-ShmAudioReader::ShmAudioReader() = default;
-
-ShmAudioReader::~ShmAudioReader() {
-  if (m_shm_ptr) {
-    shmdt(m_shm_ptr);
-  }
-}
-
-bool ShmAudioReader::Init(const std::string& key_path, int proj_id) {
-  int fd = open(key_path.c_str(), O_RDONLY);
-  if (fd == -1) {
-    perror("shm_audio_reader: open key file");
-    return false;
-  }
-  close(fd);
-
-  key_t key = ftok(key_path.c_str(), proj_id);
-  if (key == -1) {
-    perror("shm_audio_reader: ftok");
-    return false;
-  }
-
-  m_shmid = shmget(key, SHM_AUDIO_CTRL_BLOCK_SIZE, 0666);
-  if (m_shmid == -1) {
-    perror("shm_audio_reader: shmget");
-    return false;
-  }
-
-  m_shm_ptr = static_cast<ShmAudioCtrlBlock*>(shmat(m_shmid, nullptr, 0));
-  if (m_shm_ptr == reinterpret_cast<void*>(-1)) {
-    perror("shm_audio_reader: shmat");
-    m_shm_ptr = nullptr;
-    return false;
-  }
-  m_inited = true;
-  return true;
-}
-
-bool ShmAudioReader::ReadFrame(AudioFrameHead& out_head, uint8_t* out_data,
-                               uint32_t buf_size) {
-  if (!m_inited || !out_data) return false;
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
-#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-
-  pthread_mutex_lock(&m_shm_ptr->mtx);
-
-  while (m_shm_ptr->frame_count <= 0) {
-    if (stop_requested_) {
-      pthread_mutex_unlock(&m_shm_ptr->mtx);
-      return false;
-    }
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 100 * 1000000; // 100ms timeout
-    if (ts.tv_nsec >= 1000000000) {
-      ts.tv_sec += 1;
-      ts.tv_nsec -= 1000000000;
-    }
-    int ret = pthread_cond_timedwait(&m_shm_ptr->cv_can_read,
-                                     &m_shm_ptr->mtx, &ts);
-    if (ret != 0 && ret != ETIMEDOUT) {
-      pthread_mutex_unlock(&m_shm_ptr->mtx);
-      return false;
-    }
-  }
-
-  RingAudioFrameItem& item = m_shm_ptr->ring[m_shm_ptr->r_idx];
-  out_head = item.head;
-  if (out_head.frame_len <= buf_size &&
-      out_head.frame_len <= AUDIO_FRAME_MAX_SIZE) {
-    memcpy(out_data, item.data, out_head.frame_len);
-    m_shm_ptr->r_idx = (m_shm_ptr->r_idx + 1) % AUDIO_RING_BUFFER_CNT;
-    m_shm_ptr->frame_count--;
-    pthread_cond_signal(&m_shm_ptr->cv_can_write);
-    pthread_mutex_unlock(&m_shm_ptr->mtx);
-    return true;
-  } else {
-    m_shm_ptr->r_idx = (m_shm_ptr->r_idx + 1) % AUDIO_RING_BUFFER_CNT;
-    m_shm_ptr->frame_count--;
-    pthread_cond_signal(&m_shm_ptr->cv_can_write);
-    pthread_mutex_unlock(&m_shm_ptr->mtx);
-    return false;
-  }
-
-#pragma GCC diagnostic pop
-}
-
-void ShmAudioReader::RequestStop() {
-  stop_requested_ = true;
-}
-
 ========== ./shm_common.h ==========
-Lines: 100
+Lines: 51
 
 // shm_common.h
 #pragma once
@@ -2445,21 +2131,6 @@ inline constexpr int         SHM_PROJ_ID  = 0x88;
 
 inline constexpr int FRAME_MAX_SIZE = 2 * 1024 * 1024;
 inline constexpr int RING_BUFFER_CNT = 8;
-inline constexpr int AUDIO_FRAME_MAX_SIZE = 1920 * 4;
-
-inline std::string shm_audio_cap_key_path() {
-    const char* dir = getenv("WEBRTC_RUNTIME_DIR");
-    return std::string(dir ? dir : "/tmp/webrtc_runtime") + "/shm_audio_cap";
-}
-
-inline std::string shm_audio_playout_key_path() {
-    const char* dir = getenv("WEBRTC_RUNTIME_DIR");
-    return std::string(dir ? dir : "/tmp/webrtc_runtime") + "/shm_audio_playout";
-}
-
-inline constexpr int SHM_AUDIO_CAP_PROJ_ID = 0x90;
-inline constexpr int SHM_AUDIO_PLAYOUT_PROJ_ID = 0x91;
-
 struct VideoFrameHead
 {
     int64_t ntp_time_ms;    // NTP timestamp in ms for A/V sync
@@ -2471,25 +2142,10 @@ struct VideoFrameHead
     uint8_t reserve[5];
 };
 
-struct AudioFrameHead
-{
-    int64_t ntp_time_ms;       // NTP timestamp in ms for A/V sync
-    uint32_t frame_len;        // PCM data length in bytes
-    uint32_t sample_rate;      // e.g. 48000
-    uint16_t channels;         // e.g. 2
-    uint16_t bits_per_sample;  // e.g. 16
-};
-
 struct RingVideoFrameItem
 {
     VideoFrameHead head;
     uint8_t data[FRAME_MAX_SIZE];
-};
-
-struct RingAudioFrameItem
-{
-    AudioFrameHead head;
-    uint8_t data[AUDIO_FRAME_MAX_SIZE];
 };
 
 struct ShmCtrlBlock
@@ -2507,136 +2163,9 @@ struct ShmCtrlBlock
     ~ShmCtrlBlock() = default;
 };
 
-inline constexpr int AUDIO_RING_BUFFER_CNT = 32;
-
-struct ShmAudioCtrlBlock
-{
-    pthread_mutex_t mtx;
-    pthread_cond_t cv_can_write;
-    pthread_cond_t cv_can_read;
-    // These fields are initialized by init_shm_audio_sync(), not by constructor
-    // (SHM mmap regions do not invoke constructors).
-    uint32_t w_idx;
-    uint32_t r_idx;
-    uint32_t frame_count;
-    RingAudioFrameItem ring[AUDIO_RING_BUFFER_CNT];
-    ShmAudioCtrlBlock() = default;
-    ~ShmAudioCtrlBlock() = default;
-};
-
 inline constexpr size_t SHM_CTRL_BLOCK_SIZE = sizeof(ShmCtrlBlock);
-inline constexpr size_t SHM_AUDIO_CTRL_BLOCK_SIZE = sizeof(ShmAudioCtrlBlock);
 
 int init_shm_sync(ShmCtrlBlock* shm);         // 0 on success, -1 on failure
-int init_shm_audio_sync(ShmAudioCtrlBlock* shm);
-
-========== ./shm_audio_renderer.cc ==========
-Lines: 76
-
-#include "apps/peerconnection/client/shm_audio_renderer.h"
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
-#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-
-#include <cstddef>
-#include <utility>
-
-#include "rtc_base/logging.h"
-
-ShmAudioRenderer::ShmAudioRenderer(const std::string& key_path,
-                                     int proj_id)
-    : writer_(std::make_unique<ShmAudioWriter>()),
-      io_thread_(&ShmAudioRenderer::IoLoop, this) {
-  if (!writer_->Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioRenderer: ShmAudioWriter::Init failed for "
-                      << key_path;
-  }
-}
-
-ShmAudioRenderer::~ShmAudioRenderer() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    stopped_ = true;
-  }
-  cv_.notify_all();
-  if (io_thread_.joinable()) {
-    io_thread_.join();
-  }
-}
-
-void ShmAudioRenderer::OnData(
-    const void* audio_data, int bits_per_sample, int sample_rate,
-    size_t number_of_channels, size_t number_of_frames,
-    std::optional<int64_t> absolute_capture_timestamp_ms) {
-  size_t byte_count =
-      number_of_frames * number_of_channels * (bits_per_sample / 8);
-  if (byte_count > AUDIO_FRAME_MAX_SIZE) {
-    RTC_LOG(LS_WARNING) << "ShmAudioRenderer: frame too large: " << byte_count;
-    return;
-  }
-
-  PendingAudio pending;
-  pending.head.ntp_time_ms = absolute_capture_timestamp_ms.value_or(0);
-  pending.head.frame_len = static_cast<uint32_t>(byte_count);
-  pending.head.sample_rate = static_cast<uint32_t>(sample_rate);
-  pending.head.channels = static_cast<uint16_t>(number_of_channels);
-  pending.head.bits_per_sample = static_cast<uint16_t>(bits_per_sample);
-  pending.data.assign(static_cast<const uint8_t*>(audio_data),
-                      static_cast<const uint8_t*>(audio_data) + byte_count);
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = std::move(pending);
-  }
-  cv_.notify_one();
-}
-
-void ShmAudioRenderer::IoLoop() {
-  while (true) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return pending_.has_value() || stopped_; });
-    if (stopped_) {
-      return;
-    }
-    if (pending_.has_value()) {
-      auto pending = std::move(*pending_);
-      pending_.reset();
-      lock.unlock();
-      writer_->WriteFrame(pending.head, pending.data.data());
-    }
-  }
-}
-
-#pragma GCC diagnostic pop
-
-========== ./shm_audio_reader.h ==========
-Lines: 24
-
-// shm_audio_reader.h
-#pragma once
-#include "shm_common.h"
-#include <atomic>
-#include <string>
-
-class ShmAudioReader {
- public:
-  ShmAudioReader();
-  ~ShmAudioReader();
-
-  ShmAudioReader(const ShmAudioReader&) = delete;
-  ShmAudioReader& operator=(const ShmAudioReader&) = delete;
-
-  bool Init(const std::string& key_path, int proj_id);
-  bool ReadFrame(AudioFrameHead& out_head, uint8_t* out_data, uint32_t buf_size);
-  void RequestStop();
-
- private:
-  int32_t m_shmid{-1};
-  ShmAudioCtrlBlock* m_shm_ptr{nullptr};
-  bool m_inited{false};
-  std::atomic<bool> stop_requested_{false};
-};
 
 ========== ./rk_mpp_codec.h ==========
 Lines: 68
@@ -2711,7 +2240,7 @@ class MppH264Decoder : public VideoDecoder {
 #endif  // APPS_PEERCONNECTION_CLIENT_RK_MPP_CODEC_H_
 
 ========== ./engine_controller.h ==========
-Lines: 37
+Lines: 33
 
 #ifndef APPS_PEERCONNECTION_CLIENT_ENGINE_CONTROLLER_H_
 #define APPS_PEERCONNECTION_CLIENT_ENGINE_CONTROLLER_H_
@@ -2739,12 +2268,8 @@ class EngineController {
   virtual void DisconnectFromServer() = 0;
   virtual void ConnectToPeer(int peer_id) = 0;
   virtual void HangUp() = 0;
-  virtual void SetAudioMuted(bool muted) = 0;
-  virtual void SetVideoPaused(bool paused) = 0;
   virtual void SendData(const std::string& text) = 0;
-  virtual void QueryDevices() = 0;
-  virtual void SetVideoDevice(int device_idx) = 0;
-  virtual void SetAudioInputDevice(int device_idx) = 0;
+  virtual void GetLocalSdp() = 0;
 
   virtual bool connection_active() const = 0;
 };
@@ -3005,7 +2530,7 @@ VideoEncoder::EncoderInfo MppH264Encoder::GetEncoderInfo() const {
 }  // namespace webrtc
 
 ========== ./flag_defs.h ==========
-Lines: 55
+Lines: 52
 
 /*
  *  Copyright 2012 The WebRTC Project Authors. All rights reserved.
@@ -3057,9 +2582,6 @@ ABSL_FLAG(
     "--force_fieldtrials=WebRTC-FooFeature/Enabled/ "
     "will assign the group Enabled to field trial WebRTC-FooFeature. Multiple "
     "trials are separated by \"/\"");
-
-ABSL_FLAG(std::string, audio_source, "adm",
-          "Audio capture source: 'adm' (AudioDeviceModule) or 'shm' (shared memory)");
 
 #endif  // APPS_PEERCONNECTION_CLIENT_FLAG_DEFS_H_
 
@@ -3325,7 +2847,7 @@ class MppH264Encoder : public VideoEncoder {
 #endif  // APPS_PEERCONNECTION_CLIENT_RK_MPP_ENCODER_H_
 
 ========== ./webrtc_engine.cc ==========
-Lines: 804
+Lines: 769
 
 /*
  *  Copyright 2026 The WebRTC Project Authors. All rights reserved.
@@ -3345,11 +2867,6 @@ Lines: 804
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-
-#include "absl/flags/declare.h"
-#include "absl/flags/flag.h"
-
-ABSL_DECLARE_FLAG(std::string, audio_source);
 
 #include <cstddef>
 #include <cstring>
@@ -3391,7 +2908,6 @@ ABSL_DECLARE_FLAG(std::string, audio_source);
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
 #include "apps/peerconnection/client/defaults.h"
-#include "apps/peerconnection/client/shm_audio_writer.h"
 #include "apps/peerconnection/client/shm_video_writer.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
 #include "json/json.h"
@@ -3589,29 +3105,9 @@ void WebRTCEngine::HangUpImpl() {
   //on_event_(BuildPeerListJson(signaling_->peers()));
 }
 
-void WebRTCEngine::SetAudioMuted(bool muted) {
-  if (signaling_thread_->IsCurrent()) {
-    SetAudioMutedImpl(muted);
-  } else {
-    signaling_thread_->PostTask([this, muted] { SetAudioMutedImpl(muted); });
-  }
-}
 
-void WebRTCEngine::SetAudioMutedImpl(bool muted) {
-  pipeline_->SetAudioMuted(muted);
-}
 
-void WebRTCEngine::SetVideoPaused(bool paused) {
-  if (signaling_thread_->IsCurrent()) {
-    SetVideoPausedImpl(paused);
-  } else {
-    signaling_thread_->PostTask([this, paused] { SetVideoPausedImpl(paused); });
-  }
-}
 
-void WebRTCEngine::SetVideoPausedImpl(bool paused) {
-  pipeline_->SetVideoPaused(paused, peer_connection_.get());
-}
 
 void WebRTCEngine::SendData(const std::string& text) {
   if (signaling_thread_->IsCurrent()) {
@@ -3627,54 +3123,39 @@ void WebRTCEngine::SendDataImpl(const std::string& text) {
 
 // ==================== Device Management ====================
 
-void WebRTCEngine::QueryDevices() {
+
+
+
+
+
+
+void WebRTCEngine::GetLocalSdp() {
   if (signaling_thread_->IsCurrent()) {
-    QueryDevicesImpl();
+    GetLocalSdpImpl();
   } else {
-    signaling_thread_->PostTask([this] { QueryDevicesImpl(); });
+    signaling_thread_->PostTask([this] { GetLocalSdpImpl(); });
   }
 }
 
-void WebRTCEngine::QueryDevicesImpl() {
-  pipeline_->QueryDevices();
-}
-
-void WebRTCEngine::SetVideoDevice(int device_idx) {
-  if (signaling_thread_->IsCurrent()) {
-    SetVideoDeviceImpl(device_idx);
-  } else {
-    signaling_thread_->PostTask([this, device_idx] { SetVideoDeviceImpl(device_idx); });
+void WebRTCEngine::GetLocalSdpImpl() {
+  if (peer_connection_) {
+    RTC_LOG(LS_ERROR) << "GetLocalSdp: already in a call, hang up first";
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"Already in a call, hang up first"})");
+    return;
   }
-}
-
-void WebRTCEngine::SetVideoDeviceImpl(int device_idx) {
-  pipeline_->SetVideoDevice(device_idx);
-}
-
-void WebRTCEngine::SetAudioInputDevice(int device_idx) {
-  if (signaling_thread_->IsCurrent()) {
-    SetAudioInputDeviceImpl(device_idx);
-  } else {
-    signaling_thread_->PostTask([this, device_idx] { SetAudioInputDeviceImpl(device_idx); });
+  collecting_sdp_ = true;
+  if (!InitializePeerConnection()) {
+    collecting_sdp_ = false;
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"Failed to initialize PeerConnection"})");
+    return;
   }
-}
-
-void WebRTCEngine::SetAudioInputDeviceImpl(int device_idx) {
-  if (pipeline_) pipeline_->set_audio_input_device_idx(device_idx);
-  if (!pipeline_ || !pipeline_->adm()) return;
-  // Apply device change. If not recording yet, recording will use this device
-  // when it starts via the factory. If already recording mid-call, restart.
-  worker_thread_->BlockingCall([this, device_idx] {
-    bool was_recording = pipeline_->adm()->Recording();
-    if (was_recording) {
-      pipeline_->adm()->StopRecording();
-      pipeline_->adm()->SetRecordingDevice(device_idx);
-      pipeline_->adm()->InitRecording();
-      pipeline_->adm()->StartRecording();
-    } else {
-      pipeline_->adm()->SetRecordingDevice(device_idx);
-    }
-  });
+  peer_connection_->CreateOffer(
+      this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
+  // OnSuccess will emit the SDP and clean up
 }
 
 bool WebRTCEngine::connection_active() const {
@@ -3693,9 +3174,6 @@ void WebRTCEngine::OnAddTrack(
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     auto* video_track = static_cast<webrtc::VideoTrackInterface*>(track);
     pipeline_->StartRemoteRenderer(video_track);
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(track);
-    pipeline_->StartRemoteAudioRenderer(audio_track);
   }
 }
 
@@ -3706,8 +3184,6 @@ void WebRTCEngine::OnRemoveTrack(
   auto* track = receiver->track().get();
   if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
     pipeline_->StopRemoteRenderer();
-  } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-    pipeline_->StopRemoteAudioRenderer();
   }
 }
 
@@ -3738,11 +3214,24 @@ void WebRTCEngine::OnIceCandidate(const webrtc::IceCandidate* candidate) {
 // ==================== CreateSessionDescriptionObserver ====================
 
 void WebRTCEngine::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
-  peer_connection_->SetLocalDescription(
-      DummySetSessionDescriptionObserver::Create().get(), desc);
-
   std::string sdp;
   desc->ToString(&sdp);
+
+  if (collecting_sdp_) {
+    collecting_sdp_ = false;
+    Json::Value j;
+    j["event"] = "local_sdp";
+    j["sdp"] = sdp;
+    Json::StreamWriterBuilder factory;
+    factory["indentation"] = "";
+    if (observer_) observer_->OnEngineEvent(Json::writeString(factory, j));
+    // Clean up — post to avoid re-entrancy in CreateOffer callback
+    signaling_thread_->PostTask([this] { DeletePeerConnection(); });
+    return;
+  }
+
+  peer_connection_->SetLocalDescription(
+      DummySetSessionDescriptionObserver::Create().get(), desc);
 
   Json::Value jmessage;
   jmessage[kSessionDescriptionTypeName] =
@@ -3755,6 +3244,13 @@ void WebRTCEngine::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 
 void WebRTCEngine::OnFailure(webrtc::RTCError error) {
   RTC_LOG(LS_ERROR) << ToString(error.type()) << ": " << error.message();
+  if (collecting_sdp_) {
+    collecting_sdp_ = false;
+    if (observer_)
+      observer_->OnEngineEvent(
+          R"({"event":"local_sdp_error","error":"CreateOffer failed"})");
+    signaling_thread_->PostTask([this] { DeletePeerConnection(); });
+  }
 }
 
 // ==================== PeerConnectionClientObserver ====================
@@ -4071,22 +3567,13 @@ void WebRTCEngine::AddTracks() {
     return;  // Already added tracks.
   }
 
-  // Audio track: create SHM source if requested, else ADM via pipeline
-  webrtc::scoped_refptr<webrtc::AudioSourceInterface> shm_source;
-  std::string audio_source = absl::GetFlag(FLAGS_audio_source);
-  if (audio_source == "shm") {
-    shm_source = ShmAudioCapturer::Create(
-        shm_audio_cap_key_path(), SHM_AUDIO_CAP_PROJ_ID);
-    if (!shm_source)
-      RTC_LOG(LS_ERROR) << "Failed to create ShmAudioCapturer, falling back to ADM";
-  }
-
-  auto audio_src = pipeline_->CreateAudioSource(factory_.get(), shm_source.get());
+  // Audio track
+  auto audio_src = pipeline_->CreateAudioSource(factory_.get());
   auto audio_track = factory_->CreateAudioTrack(kAudioLabel, audio_src);
-  auto result_or_error = peer_connection_->AddTrack(audio_track, {kStreamId});
-  if (!result_or_error.ok()) {
+  auto audio_result = peer_connection_->AddTrack(audio_track, {kStreamId});
+  if (!audio_result.ok()) {
     RTC_LOG(LS_ERROR) << "Failed to add audio track to PeerConnection: "
-                      << result_or_error.error().message();
+                      << audio_result.error().message();
   }
 
   auto video_source = pipeline_->CreateVideoSource();
@@ -4095,7 +3582,7 @@ void WebRTCEngine::AddTracks() {
         factory_->CreateVideoTrack(video_source, kVideoLabel));
     pipeline_->StartLocalRenderer(video_track_.get());
 
-    result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
+    auto result_or_error = peer_connection_->AddTrack(video_track_, {kStreamId});
     if (!result_or_error.ok()) {
       RTC_LOG(LS_ERROR) << "Failed to add video track to PeerConnection: "
                         << result_or_error.error().message();
@@ -4181,138 +3668,6 @@ class DataChannelManager : public webrtc::DataChannelObserver {
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_DATA_CHANNEL_MANAGER_H_
-
-========== ./shm_audio_writer.cc ==========
-Lines: 82
-
-// shm_audio_writer.cc
-#include "shm_audio_writer.h"
-#include <sys/shm.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cstring>
-#include <cstdio>
-
-ShmAudioWriter::ShmAudioWriter() = default;
-
-ShmAudioWriter::~ShmAudioWriter() {
-  if (m_shm_ptr != nullptr) {
-    shmdt(m_shm_ptr);
-  }
-}
-
-bool ShmAudioWriter::Init(const std::string& key_path, int proj_id) {
-  int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
-  if (fd == -1) {
-    perror("shm_audio_writer: open key file");
-    return false;
-  }
-  close(fd);
-
-  key_t key = ftok(key_path.c_str(), proj_id);
-  if (key == -1) {
-    perror("shm_audio_writer: ftok");
-    return false;
-  }
-
-  m_shmid = shmget(key, SHM_AUDIO_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
-  if (m_shmid == -1) {
-    perror("shm_audio_writer: shmget");
-    return false;
-  }
-
-  m_shm_ptr = static_cast<ShmAudioCtrlBlock*>(shmat(m_shmid, nullptr, 0));
-  if (m_shm_ptr == reinterpret_cast<void*>(-1)) {
-    perror("shm_audio_writer: shmat");
-    m_shm_ptr = nullptr;
-    return false;
-  }
-
-  if (init_shm_audio_sync(m_shm_ptr) != 0) {
-    perror("shm_audio_writer: init_shm_audio_sync");
-    return false;
-  }
-  m_inited = true;
-  return true;
-}
-
-bool ShmAudioWriter::WriteFrame(const AudioFrameHead& head, const uint8_t* data) {
-  if (!m_inited || !data) return false;
-  if (head.frame_len > AUDIO_FRAME_MAX_SIZE) return false;
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
-#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-
-  pthread_mutex_lock(&m_shm_ptr->mtx);
-
-  while (m_shm_ptr->frame_count >= AUDIO_RING_BUFFER_CNT) {
-    if (pthread_cond_wait(&m_shm_ptr->cv_can_write, &m_shm_ptr->mtx) != 0) {
-      pthread_mutex_unlock(&m_shm_ptr->mtx);
-      return false;
-    }
-  }
-
-  RingAudioFrameItem& item = m_shm_ptr->ring[m_shm_ptr->w_idx];
-  item.head = head;
-  memcpy(item.data, data, head.frame_len);
-
-  m_shm_ptr->w_idx = (m_shm_ptr->w_idx + 1) % AUDIO_RING_BUFFER_CNT;
-  m_shm_ptr->frame_count++;
-
-  pthread_cond_signal(&m_shm_ptr->cv_can_read);
-  pthread_mutex_unlock(&m_shm_ptr->mtx);
-  return true;
-
-#pragma GCC diagnostic pop
-}
-
-========== ./shm_audio_renderer.h ==========
-Lines: 42
-
-#ifndef APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
-#define APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
-
-#include <condition_variable>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <thread>
-#include <vector>
-
-#include "api/media_stream_interface.h"
-#include "apps/peerconnection/client/shm_audio_writer.h"
-#include "apps/peerconnection/client/shm_common.h"
-
-// Renders remote audio to shared memory for an external Qt process.
-// Runs a dedicated IO thread to avoid blocking the WebRTC signaling thread.
-class ShmAudioRenderer : public webrtc::AudioTrackSinkInterface {
- public:
-  ShmAudioRenderer(const std::string& key_path, int proj_id);
-  ~ShmAudioRenderer() override;
-  void OnData(const void* audio_data, int bits_per_sample,
-              int sample_rate, size_t number_of_channels,
-              size_t number_of_frames,
-              std::optional<int64_t> absolute_capture_timestamp_ms) override;
-
- private:
-  struct PendingAudio {
-    AudioFrameHead head;
-    std::vector<uint8_t> data;
-  };
-
-  void IoLoop();
-
-  std::unique_ptr<ShmAudioWriter> writer_;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::optional<PendingAudio> pending_;
-  bool stopped_ = false;
-  std::thread io_thread_;
-};
-
-#endif  // APPS_PEERCONNECTION_CLIENT_SHM_AUDIO_RENDERER_H_
 
 ========== ./json_helpers.h ==========
 Lines: 33
@@ -4460,7 +3815,7 @@ void ShmVideoRenderer::IoLoop() {
 #pragma GCC diagnostic pop
 
 ========== ./main.cc ==========
-Lines: 100
+Lines: 86
 
 // main.cc
 #include <cstdio>
@@ -4475,7 +3830,6 @@ Lines: 100
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials.h"
-#include "apps/peerconnection/client/cli_runner.h"
 #include "apps/peerconnection/client/flag_defs.h"
 #include "apps/peerconnection/client/unix_socket_server.h"
 #include "apps/peerconnection/client/webrtc_engine.h"
@@ -4484,7 +3838,6 @@ Lines: 100
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
 
-ABSL_FLAG(bool, standalone, false, "Run in standalone CLI mode (no Unix socket)");
 
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
@@ -4493,7 +3846,6 @@ int main(int argc, char* argv[]) {
       std::make_unique<webrtc::FieldTrials>(
           absl::GetFlag(FLAGS_force_fieldtrials)));
 
-  bool standalone = absl::GetFlag(FLAGS_standalone);
 
   // Set up a WebRTC main thread (PeerConnectionClient needs CurrentThread())
   webrtc::PhysicalSocketServer pss;
@@ -4537,23 +3889,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  if (standalone) {
-    CliRunner cli(&engine,
-                  absl::GetFlag(FLAGS_server),
-                  absl::GetFlag(FLAGS_port),
-                  absl::GetFlag(FLAGS_autoconnect),
-                  absl::GetFlag(FLAGS_autocall));
-    // Run CLI input loop on the main thread, event loop in a task
-    main_thread->PostTask([&] { cli.Run(); });
-    main_thread->Run();
-  } else {
-    std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
-    UnixSocketServer unix_server(sock_path, &engine);
-    engine.RegisterObserver(&unix_server);
-    unix_server.Start();
-    std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
-    unix_server.Wait();
-  }
+  std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
+  UnixSocketServer unix_server(sock_path, &engine);
+  engine.RegisterObserver(&unix_server);
+  unix_server.Start();
+  std::cout << "WebRTC daemon started. Listening on " << sock_path << std::endl;
+  unix_server.Wait();
 
   engine.Shutdown();
   webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);
@@ -4641,118 +3982,6 @@ const char* DataChannelStateToString(
     case webrtc::DataChannelInterface::kClosing:     return "closing";
     case webrtc::DataChannelInterface::kClosed:      return "closed";
     default:                                         return "unknown";
-  }
-}
-
-========== ./cli_runner.cc ==========
-Lines: 108
-
-// cli_runner.cc
-#include "cli_runner.h"
-
-#include <iostream>
-#include <sstream>
-
-#include "apps/peerconnection/client/engine_controller.h"
-
-CliRunner::CliRunner(EngineController* engine,
-                     const std::string& server,
-                     int port,
-                     bool autoconnect,
-                     bool autocall)
-    : engine_(engine),
-      server_(server),
-      port_(port),
-      autoconnect_(autoconnect),
-      autocall_(autocall) {}
-
-CliRunner::~CliRunner() { Stop(); }
-
-void CliRunner::OnEngineEvent(const std::string& json) {
-  std::cout << "[event] " << json << std::endl;
-  PrintPrompt();
-
-  if (autocall_ && !engine_->connection_active()) {
-    auto pos = json.find("\"peer_online\"");
-    if (pos != std::string::npos) {
-      auto id_pos = json.find("\"id\":");
-      if (id_pos != std::string::npos) {
-        int id = std::stoi(json.substr(id_pos + 5));
-        std::cout << "Auto-calling peer " << id << "..." << std::endl;
-        engine_->ConnectToPeer(id);
-        autocall_ = false;
-      }
-    }
-  }
-}
-
-void CliRunner::Run() {
-  engine_->RegisterObserver(this);
-
-  std::cout << "=== WebRTC CLI (standalone mode) ===" << std::endl;
-  std::cout << "Commands: connect, disconnect, call <id>, hangup, mute, unmute, pause, resume, send <text>, quit" << std::endl;
-
-  // Auto-connect if requested
-  if (autoconnect_) {
-    engine_->ConnectToServer(server_, port_);
-  }
-
-  running_ = true;
-  InputLoop();
-}
-
-void CliRunner::Stop() { running_ = false; }
-
-void CliRunner::PrintPrompt() {
-  std::cout << "> " << std::flush;
-}
-
-void CliRunner::InputLoop() {
-  PrintPrompt();
-  std::string line;
-  while (running_ && std::getline(std::cin, line)) {
-    HandleInput(line);
-    if (running_) PrintPrompt();
-  }
-}
-
-void CliRunner::HandleInput(const std::string& line) {
-  if (line.empty()) return;
-
-  std::istringstream iss(line);
-  std::string cmd;
-  iss >> cmd;
-
-  if (cmd == "connect") {
-    engine_->ConnectToServer(server_, port_);
-  } else if (cmd == "disconnect") {
-    engine_->DisconnectFromServer();
-  } else if (cmd == "call") {
-    int peer_id;
-    if (iss >> peer_id) {
-      engine_->ConnectToPeer(peer_id);
-    } else {
-      std::cout << "Usage: call <peer_id>" << std::endl;
-    }
-  } else if (cmd == "hangup") {
-    engine_->HangUp();
-  } else if (cmd == "mute") {
-    engine_->SetAudioMuted(true);
-  } else if (cmd == "unmute") {
-    engine_->SetAudioMuted(false);
-  } else if (cmd == "pause") {
-    engine_->SetVideoPaused(true);
-  } else if (cmd == "resume") {
-    engine_->SetVideoPaused(false);
-  } else if (cmd == "send") {
-    std::string text;
-    std::getline(iss, text);
-    if (!text.empty() && text[0] == ' ') text.erase(0, 1);
-    if (!text.empty()) engine_->SendData(text);
-  } else if (cmd == "quit" || cmd == "exit") {
-    running_ = false;
-  } else {
-    std::cout << "Unknown command: " << cmd << std::endl;
   }
 }
 
@@ -5118,102 +4347,6 @@ class ShmVideoRenderer : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
 
 #endif  // APPS_PEERCONNECTION_CLIENT_SHM_VIDEO_RENDERER_H_
 
-========== ./shm_audio_writer.h ==========
-Lines: 22
-
-// shm_audio_writer.h
-#pragma once
-#include "shm_common.h"
-#include <string>
-
-class ShmAudioWriter
-{
-public:
-    ShmAudioWriter();
-    ~ShmAudioWriter();
-
-    ShmAudioWriter(const ShmAudioWriter&) = delete;
-    ShmAudioWriter& operator=(const ShmAudioWriter&) = delete;
-
-    bool Init(const std::string& key_path, int proj_id);
-    bool WriteFrame(const AudioFrameHead& head, const uint8_t* data);
-
-private:
-    int32_t m_shmid{-1};
-    ShmAudioCtrlBlock* m_shm_ptr{nullptr};
-    bool m_inited{false};
-};
-
-========== ./shm_audio_capturer.cc ==========
-Lines: 66
-
-#include "apps/peerconnection/client/shm_audio_capturer.h"
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
-#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
-
-#include <cstddef>
-#include <vector>
-
-#include "api/make_ref_counted.h"
-#include "rtc_base/logging.h"
-
-webrtc::scoped_refptr<ShmAudioCapturer>
-ShmAudioCapturer::Create(const std::string& key_path, int proj_id) {
-  auto source = webrtc::make_ref_counted<ShmAudioCapturer>();
-  if (!source->reader_.Init(key_path, proj_id)) {
-    RTC_LOG(LS_ERROR) << "ShmAudioCapturer: ShmAudioReader::Init failed for "
-                      << key_path;
-    return nullptr;
-  }
-  source->running_ = true;
-  source->capture_thread_ =
-      std::thread(&ShmAudioCapturer::CaptureLoop, source.get());
-  return source;
-}
-
-ShmAudioCapturer::~ShmAudioCapturer() {
-  running_ = false;
-  reader_.RequestStop();
-  if (capture_thread_.joinable()) {
-    capture_thread_.join();
-  }
-}
-
-void ShmAudioCapturer::AddSink(webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.push_back(sink);
-}
-
-void ShmAudioCapturer::RemoveSink(webrtc::AudioTrackSinkInterface* sink) {
-  std::lock_guard<std::mutex> lock(sinks_mutex_);
-  sinks_.erase(std::remove(sinks_.begin(), sinks_.end(), sink), sinks_.end());
-}
-
-void ShmAudioCapturer::CaptureLoop() {
-  std::vector<uint8_t> buf(AUDIO_FRAME_MAX_SIZE);
-  while (running_) {
-    AudioFrameHead head;
-    if (!reader_.ReadFrame(head, buf.data(), AUDIO_FRAME_MAX_SIZE)) {
-      break;
-    }
-
-    std::lock_guard<std::mutex> lock(sinks_mutex_);
-    for (auto* sink : sinks_) {
-      if (sink) {
-        sink->OnData(buf.data(), head.bits_per_sample,
-                     static_cast<int>(head.sample_rate), head.channels,
-                     head.frame_len /
-                         (head.channels * (head.bits_per_sample / 8)),
-                     head.ntp_time_ms);
-      }
-    }
-  }
-}
-
-#pragma GCC diagnostic pop
-
 ========== ./peer_connection_client.h ==========
 Lines: 116
 
@@ -5335,7 +4468,7 @@ class PeerConnectionClient : public SignalingInterface {
 #endif  // APPS_PEERCONNECTION_CLIENT_PEER_CONNECTION_CLIENT_H_
 
 ========== ./webrtc_engine.h ==========
-Lines: 144
+Lines: 136
 
 // webrtc_engine.h
 #ifndef APPS_PEERCONNECTION_CLIENT_WEBRTC_ENGINE_H_
@@ -5364,7 +4497,6 @@ Lines: 144
 #include "apps/peerconnection/client/data_channel_manager.h"
 #include "apps/peerconnection/client/engine_controller.h"
 #include "apps/peerconnection/client/media_pipeline.h"
-#include "apps/peerconnection/client/shm_audio_capturer.h"
 #include "apps/peerconnection/client/signaling_interface.h"
 #include "rtc_base/thread.h"
 
@@ -5383,12 +4515,8 @@ class WebRTCEngine : public EngineController,
   void DisconnectFromServer() override;
   void ConnectToPeer(int peer_id) override;
   void HangUp() override;
-  void SetAudioMuted(bool muted) override;
-  void SetVideoPaused(bool paused) override;
   void SendData(const std::string& text) override;
-  void QueryDevices() override;
-  void SetVideoDevice(int device_idx) override;
-  void SetAudioInputDevice(int device_idx) override;
+  void GetLocalSdp() override;
   bool connection_active() const override;
 
   // Lifecycle (called by main.cc, not part of EngineController)
@@ -5442,12 +4570,8 @@ class WebRTCEngine : public EngineController,
   void DisconnectFromServerImpl();
   void ConnectToPeerImpl(int peer_id);
   void HangUpImpl();
-  void SetAudioMutedImpl(bool muted);
-  void SetVideoPausedImpl(bool paused);
   void SendDataImpl(const std::string& text);
-  void QueryDevicesImpl();
-  void SetVideoDeviceImpl(int device_idx);
-  void SetAudioInputDeviceImpl(int device_idx);
+  void GetLocalSdpImpl();
 
   EngineObserver* observer_ = nullptr;
   std::atomic<bool> connection_active_{false};
@@ -5475,6 +4599,7 @@ class WebRTCEngine : public EngineController,
   int peer_id_ = -1;
   int pending_hangup_peer_id_ = -1;
   bool loopback_ = false;
+  bool collecting_sdp_ = false;
   std::string server_;
   int server_port_ = 8888;
   std::deque<std::string*> pending_messages_;
@@ -5537,7 +4662,7 @@ class SignalingInterface {
 #endif  // APPS_PEERCONNECTION_CLIENT_SIGNALING_INTERFACE_H_
 
 ========== ./shm_common.cc ==========
-Lines: 71
+Lines: 37
 
 #include "shm_common.h"
 
@@ -5576,43 +4701,9 @@ int init_shm_sync(ShmCtrlBlock* shm) {
   return 0;
 }
 
-int init_shm_audio_sync(ShmAudioCtrlBlock* shm) {
-  pthread_mutexattr_t mtx_attr;
-  if (pthread_mutexattr_init(&mtx_attr) != 0) return -1;
-  if (pthread_mutexattr_setpshared(&mtx_attr, PTHREAD_PROCESS_SHARED) != 0) {
-    pthread_mutexattr_destroy(&mtx_attr);
-    return -1;
-  }
-  if (pthread_mutex_init(&shm->mtx, &mtx_attr) != 0) {
-    pthread_mutexattr_destroy(&mtx_attr);
-    return -1;
-  }
-  pthread_mutexattr_destroy(&mtx_attr);
-
-  pthread_condattr_t cv_attr;
-  if (pthread_condattr_init(&cv_attr) != 0) return -1;
-  if (pthread_condattr_setpshared(&cv_attr, PTHREAD_PROCESS_SHARED) != 0) {
-    pthread_condattr_destroy(&cv_attr);
-    return -1;
-  }
-  if (pthread_cond_init(&shm->cv_can_write, &cv_attr) != 0) {
-    pthread_condattr_destroy(&cv_attr);
-    return -1;
-  }
-  if (pthread_cond_init(&shm->cv_can_read, &cv_attr) != 0) {
-    pthread_condattr_destroy(&cv_attr);
-    return -1;
-  }
-  pthread_condattr_destroy(&cv_attr);
-
-  shm->w_idx = 0;
-  shm->r_idx = 0;
-  shm->frame_count = 0;
-  return 0;
-}
 
 ========== ./media_pipeline.h ==========
-Lines: 74
+Lines: 63
 
 #ifndef APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
 #define APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
@@ -5626,7 +4717,6 @@ Lines: 74
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
-#include "apps/peerconnection/client/shm_audio_renderer.h"
 #include "apps/peerconnection/client/shm_video_renderer.h"
 #include "rtc_base/thread.h"
 
@@ -5644,18 +4734,13 @@ class MediaPipeline {
   // ---- Sources ----
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
   webrtc::AudioSourceInterface* CreateAudioSource(
-      webrtc::PeerConnectionFactoryInterface* factory,
-      webrtc::AudioSourceInterface* external_source = nullptr);
+      webrtc::PeerConnectionFactoryInterface* factory);
 
   // ---- Events ----
   using EventCallback = std::function<void(const std::string& json)>;
   void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
   // ---- Device management ----
-  void SetVideoDevice(int device_idx);
-  void SetAudioMuted(bool muted);
-  void SetVideoPaused(bool paused, webrtc::PeerConnectionInterface* pc);
-  void QueryDevices();
 
   void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
@@ -5665,9 +4750,6 @@ class MediaPipeline {
   void StopLocalRenderer();
   void StartRemoteRenderer(webrtc::VideoTrackInterface* track);
   void StopRemoteRenderer();
-  void StartRemoteAudioRenderer(webrtc::AudioTrackInterface* track);
-  void StopRemoteAudioRenderer();
-
   // ---- Lifecycle ----
   void Shutdown();
 
@@ -5680,59 +4762,12 @@ class MediaPipeline {
 
   std::unique_ptr<ShmVideoRenderer> local_renderer_;
   std::unique_ptr<ShmVideoRenderer> remote_renderer_;
-  std::unique_ptr<ShmAudioRenderer> remote_audio_renderer_;
-
   EventCallback event_cb_;
   int video_device_idx_ = -1;
   int audio_input_device_idx_ = -1;
 };
 
 #endif  // APPS_PEERCONNECTION_CLIENT_MEDIA_PIPELINE_H_
-
-========== ./cli_runner.h ==========
-Lines: 41
-
-// cli_runner.h
-#ifndef APPS_PEERCONNECTION_CLIENT_CLI_RUNNER_H_
-#define APPS_PEERCONNECTION_CLIENT_CLI_RUNNER_H_
-
-#include <atomic>
-#include <string>
-
-#include "apps/peerconnection/client/engine_controller.h"
-
-class EngineController;
-
-class CliRunner : public EngineObserver {
- public:
-  CliRunner(EngineController* engine,
-            const std::string& server,
-            int port,
-            bool autoconnect,
-            bool autocall);
-  ~CliRunner();
-
-  void Run();
-  void Stop();
-
-  // EngineObserver
-  void OnEngineEvent(const std::string& json) override;
-
-  static void PrintPrompt();
-
- private:
-  void InputLoop();
-  void HandleInput(const std::string& line);
-
-  EngineController* engine_;
-  std::string server_;
-  int port_;
-  bool autoconnect_;
-  bool autocall_;
-  std::atomic<bool> running_{false};
-};
-
-#endif
 
 ========== ./pc_factory.cc ==========
 Lines: 91
@@ -5831,5 +4866,5 @@ PcComponents PcFactory::Create(webrtc::Thread* network_thread,
 
 
 =====================================
-Total files: 43
-Total lines: 5608
+Total files: 33
+Total lines: 4693

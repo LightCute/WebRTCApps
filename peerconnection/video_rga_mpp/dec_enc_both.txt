@@ -1,0 +1,2068 @@
+========== 工程目录结构（仅含代码文件）==========
+
+📂 ./enc:
+  └─ main.cc
+  └─ rga_nv12_encoder.cc
+  └─ rga_nv12_encoder.h
+
+📂 ./dec:
+  └─ dma_buf_client.cc
+  └─ dma_buf_client.h
+  └─ main.cc
+  └─ rga_i420_decoder.cc
+  └─ rga_i420_decoder.h
+
+📂 ./shared:
+  └─ dma_buf_pool.cc
+  └─ dma_buf_pool.h
+  └─ dma_buf_server.cc
+  └─ dma_buf_server.h
+
+📂 ./shared/rga_headers:
+  └─ RgaApi.h
+  └─ drmrga.h
+  └─ rga.h
+
+==================================================
+========== 所有代码文件内容 ==========
+
+
+========== ./enc/rga_nv12_encoder.cc ==========
+Lines: 172
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/video_rga_mpp/enc/rga_nv12_encoder.h"
+
+#include <dlfcn.h>
+#include <pthread.h>
+#include <cstdio>
+#include <cstring>
+
+#include "apps/peerconnection/client/rk_mpp_codec.h"
+#include "api/scoped_refptr.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_pool.h"
+#include "api/video/nv12_buffer.h"
+#include "rtc_base/logging.h"
+
+extern "C" {
+#include "rga.h"
+#include "drmrga.h"
+}
+
+RgaNv12Encoder::RgaNv12Encoder() = default;
+
+RgaNv12Encoder::~RgaNv12Encoder() {
+  if (encoder_) encoder_->Release();
+  if (rga_lib_) dlclose(rga_lib_);
+}
+
+bool RgaNv12Encoder::Init(webrtc::Environment& env) {
+  rga_lib_ = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+  if (!rga_lib_) {
+    RTC_LOG(LS_WARNING) << "RgaNv12Encoder: dlopen librga.so failed";
+    return false;
+  }
+  rga_blit_ = reinterpret_cast<int(*)(void*,void*,void*)>(
+      dlsym(rga_lib_, "c_RkRgaBlit"));
+  if (!rga_blit_) { dlclose(rga_lib_); rga_lib_ = nullptr; return false; }
+
+  encoder_ = webrtc::MppH264EncoderTemplateAdapter::CreateEncoder(
+      env, webrtc::SdpVideoFormat("H264"));
+  if (!encoder_) {
+    RTC_LOG(LS_WARNING) << "RgaNv12Encoder: MPP encoder not available";
+    dlclose(rga_lib_); rga_lib_ = nullptr;
+    return false;
+  }
+  encoder_->RegisterEncodeCompleteCallback(this);
+  loaded_ = true;
+  return true;
+}
+
+void RgaNv12Encoder::SetOutput(DmaBufPool* h264_pool, ShmCtrlBlock* ctrl) {
+  h264_pool_ = h264_pool;
+  ctrl_ = ctrl;
+}
+
+bool RgaNv12Encoder::InitEncoder(int w, int h) {
+  webrtc::VideoCodec codec = {};
+  codec.codecType = webrtc::kVideoCodecH264;
+  codec.width = w; codec.height = h;
+  codec.maxFramerate = 30;
+  codec.minBitrate = 500; codec.maxBitrate = 2000;
+  codec.SetFrameDropEnabled(false);
+  codec.H264()->keyFrameInterval = 30;
+  if (encoder_->InitEncode(&codec,
+       webrtc::VideoEncoder::Settings(
+           webrtc::VideoEncoder::Capabilities(false), 1, 0)) != 0) {
+    RTC_LOG(LS_ERROR) << "RgaNv12Encoder: InitEncode failed";
+    return false;
+  }
+  enc_width_ = w; enc_height_ = h;
+  return true;
+}
+
+int32_t RgaNv12Encoder::OnRawFrame(uint8_t* videoFrame, size_t videoFrameLength,
+                                   const webrtc::VideoCaptureCapability& frameInfo,
+                                   webrtc::VideoRotation rotation, int64_t captureTime) {
+  if (!loaded_ || !h264_pool_ || !ctrl_) return 0;
+
+  int w = frameInfo.width, h = frameInfo.height;
+  if (w <= 0 || h <= 0) return 0;
+
+  if (!encoder_ || w != enc_width_ || h != enc_height_) {
+    if (!InitEncoder(w, h)) return 0;
+  }
+
+  int ys = w * h, uvs = ys / 2;
+  size_t nv12_size = ys + uvs;
+  if (nv12_buf_.size() < nv12_size) nv12_buf_.resize(nv12_size);
+
+  // RGA: YUYV → NV12 (DMA, zero CPU)
+  rga_info_t src;
+  memset(&src, 0, sizeof(src));
+  src.virAddr = videoFrame;
+  src.format = RK_FORMAT_YUYV_422;
+  src.rect.width = w; src.rect.height = h;
+  src.rect.wstride = w; src.rect.hstride = h;
+  src.rect.format = RK_FORMAT_YUYV_422;
+  src.mmuFlag = 1; src.sync_mode = 0;
+
+  rga_info_t dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.virAddr = nv12_buf_.data();
+  dst.format = RK_FORMAT_YCbCr_420_SP;
+  dst.rect.width = w; dst.rect.height = h;
+  dst.rect.wstride = w; dst.rect.hstride = h;
+  dst.rect.format = RK_FORMAT_YCbCr_420_SP;
+  dst.mmuFlag = 1; dst.sync_mode = 0;
+
+  if (rga_blit_(&src, &dst, nullptr) != 0) return 0;
+
+  // Build NV12 VideoFrame for MPP encoder
+  webrtc::scoped_refptr<webrtc::NV12Buffer> nv12 = webrtc::NV12Buffer::Create(w, h);
+  memcpy(nv12->MutableDataY(), nv12_buf_.data(), ys);
+  memcpy(nv12->MutableDataUV(), nv12_buf_.data() + ys, uvs);
+
+  webrtc::VideoFrame enc_frame = webrtc::VideoFrame::Builder()
+      .set_video_frame_buffer(nv12)
+      .set_rtp_timestamp(0)
+      .set_timestamp_ms(captureTime)
+      .set_ntp_time_ms(captureTime)
+      .build();
+
+  encoder_->Encode(enc_frame, nullptr);
+  return 0;
+}
+
+webrtc::EncodedImageCallback::Result RgaNv12Encoder::OnEncodedImage(
+    const webrtc::EncodedImage& encoded_image,
+    const webrtc::CodecSpecificInfo*) {
+  if (!h264_pool_ || !ctrl_ || !encoded_image.data() || encoded_image.size() == 0)
+    return Result(Result::OK);
+
+  pthread_mutex_lock(&ctrl_->mtx);
+  while (ctrl_->frame_count >= RING_BUFFER_CNT) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 100 * 1000000;
+    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+    int ret = pthread_cond_timedwait(&ctrl_->cv_can_write, &ctrl_->mtx, &ts);
+    if (ret == ETIMEDOUT) { pthread_mutex_unlock(&ctrl_->mtx); return Result(Result::OK); }
+  }
+  uint32_t w_idx = ctrl_->w_idx;
+  pthread_mutex_unlock(&ctrl_->mtx);
+
+  size_t sz = h264_pool_->GetSlotSize(w_idx);
+  if (encoded_image.size() > sz) return Result(Result::OK);
+
+  void* dst = h264_pool_->GetPtr(w_idx);
+  memcpy(dst, encoded_image.data(), encoded_image.size());
+
+  pthread_mutex_lock(&ctrl_->mtx);
+  RingVideoFrameItem& item = ctrl_->ring[w_idx];
+  memset(&item.head, 0, sizeof(item.head));
+  item.head.frame_len = static_cast<uint32_t>(encoded_image.size());
+  item.head.width = static_cast<uint16_t>(enc_width_);
+  item.head.height = static_cast<uint16_t>(enc_height_);
+  item.head.frame_type = (encoded_image._frameType ==
+                          webrtc::VideoFrameType::kVideoFrameKey) ? 1 : 2;
+  item.head.ntp_time_ms = encoded_image.capture_time_ms_;
+  ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
+  ctrl_->frame_count++;
+  pthread_cond_signal(&ctrl_->cv_can_read);
+  pthread_mutex_unlock(&ctrl_->mtx);
+
+  return Result(Result::OK);
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./enc/rga_nv12_encoder.h ==========
+Lines: 56
+
+#ifndef APPS_PEERCONNECTION_VIDEO_RGA_MPP_ENC_RGA_NV12_ENCODER_H_
+#define APPS_PEERCONNECTION_VIDEO_RGA_MPP_ENC_RGA_NV12_ENCODER_H_
+
+#include <memory>
+#include <vector>
+
+#include "api/video/video_frame.h"
+#include "api/video_codecs/video_encoder.h"
+#include "modules/video_capture/raw_video_sink_interface.h"
+#include "modules/video_capture/video_capture_defines.h"
+
+class DmaBufPool;
+struct ShmCtrlBlock;
+
+namespace webrtc {
+class Environment;
+}
+
+// Receives raw YUYV from VCM, RGA-converts to NV12, feeds MPP H.264 hardware
+// encoder, writes H264 bitstream to DmaBufPool. Implements EncodedImageCallback
+// to capture encoder output.
+class RgaNv12Encoder : public webrtc::RawVideoSinkInterface,
+                       public webrtc::EncodedImageCallback {
+ public:
+  RgaNv12Encoder();
+  ~RgaNv12Encoder() override;
+
+  bool Init(webrtc::Environment& env);
+  void SetOutput(DmaBufPool* h264_pool, ShmCtrlBlock* ctrl);
+
+  // RawVideoSinkInterface
+  int32_t OnRawFrame(uint8_t* videoFrame, size_t videoFrameLength,
+                     const webrtc::VideoCaptureCapability& frameInfo,
+                     webrtc::VideoRotation rotation,
+                     int64_t captureTime) override;
+
+  // EncodedImageCallback
+  Result OnEncodedImage(const webrtc::EncodedImage& encoded_image,
+                        const webrtc::CodecSpecificInfo* codec_specific_info) override;
+
+ private:
+  bool InitEncoder(int width, int height);
+
+  bool loaded_ = false;
+  int enc_width_ = 0, enc_height_ = 0;
+
+  void* rga_lib_ = nullptr;
+  int (*rga_blit_)(void*, void*, void*) = nullptr;
+  std::vector<uint8_t> nv12_buf_;
+
+  std::unique_ptr<webrtc::VideoEncoder> encoder_;
+  DmaBufPool* h264_pool_ = nullptr;
+  ShmCtrlBlock* ctrl_ = nullptr;
+};
+
+#endif
+
+========== ./enc/main.cc ==========
+Lines: 238
+
+// video_rga_mpp_enc — V4L2 → RGA YUYV→NV12 → MppH264Encoder (WebRTC) → H264 DMA-BUF
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "api/environment/environment_factory.h"
+#include "api/scoped_refptr.h"
+#include "api/video/nv12_buffer.h"
+#include "api/video/video_frame.h"
+#include "api/video_codecs/video_encoder.h"
+#include "apps/peerconnection/client/rk_mpp_codec.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_pool.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_server.h"
+#include "modules/video_capture/raw_video_sink_interface.h"
+#include "modules/video_capture/video_capture.h"
+#include "modules/video_capture/video_capture_factory.h"
+#include "rtc_base/logging.h"
+
+extern "C" {
+#include "rga.h"
+#include "drmrga.h"
+}
+
+ABSL_FLAG(int, device_idx, -1, "V4L2 device index");
+ABSL_FLAG(std::string, ctrl_shm, "/home/elf/webrtc_runtime/shm_h264_ctrl",
+          "Control block SHM key path");
+ABSL_FLAG(int, ctrl_proj_id, 0x8e, "Control block ftok project ID");
+ABSL_FLAG(std::string, socket_path, "/home/elf/webrtc_runtime/h264_socket",
+          "Unix socket path for H264 dma-buf fd handoff");
+
+static std::atomic<bool> g_running{true};
+static ShmCtrlBlock* g_ctrl = nullptr;  // for cond broadcast on shutdown
+static void sigint_handler(int) {
+  g_running = false;
+  if (g_ctrl) {
+    pthread_cond_broadcast(&g_ctrl->cv_can_write);
+    pthread_cond_broadcast(&g_ctrl->cv_can_read);
+  }
+}
+
+static ShmCtrlBlock* InitCtrlShm(const std::string& key_path, int proj_id) {
+  int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
+  if (fd >= 0) close(fd);
+  key_t key = ftok(key_path.c_str(), proj_id);
+  if (key == -1) { perror("ftok"); return nullptr; }
+  int shmid = shmget(key, SHM_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
+  if (shmid == -1) { perror("shmget"); return nullptr; }
+  auto* ptr = static_cast<ShmCtrlBlock*>(shmat(shmid, nullptr, 0));
+  if (ptr == (void*)-1) { perror("shmat"); return nullptr; }
+  if (init_shm_sync(ptr) != 0) { perror("init_shm_sync"); return nullptr; }
+  std::cout << "  ctrl_shm created: " << key_path << " proj_id=0x"
+            << std::hex << proj_id << std::dec << std::endl;
+  return ptr;
+}
+
+// ── Encoded callback: writes H264 to DmaBufPool ──
+class EncCallback : public webrtc::EncodedImageCallback {
+ public:
+  EncCallback(DmaBufPool* pool, ShmCtrlBlock* ctrl, int w, int h)
+      : pool_(pool), ctrl_(ctrl), width_(w), height_(h) {}
+  Result OnEncodedImage(const webrtc::EncodedImage& img,
+                        const webrtc::CodecSpecificInfo*) override {
+    if (!pool_ || !ctrl_ || !img.data() || img.size() == 0) return Result(Result::OK);
+    size_t sz = pool_->GetSlotSize(0);
+    if (img.size() > sz) return Result(Result::OK);
+
+    pthread_mutex_lock(&ctrl_->mtx);
+    while (ctrl_->frame_count >= RING_BUFFER_CNT) {
+      struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 100000000;
+      if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+      pthread_cond_timedwait(&ctrl_->cv_can_write, &ctrl_->mtx, &ts);
+    }
+    uint32_t w_idx = ctrl_->w_idx;
+    pthread_mutex_unlock(&ctrl_->mtx);
+
+    memcpy(pool_->GetPtr(w_idx), img.data(), img.size());
+    pthread_mutex_lock(&ctrl_->mtx);
+    RingVideoFrameItem& item = ctrl_->ring[w_idx];
+    memset(&item.head, 0, sizeof(item.head));
+    item.head.frame_len = static_cast<uint32_t>(img.size());
+    item.head.width = static_cast<uint16_t>(width_);
+    item.head.height = static_cast<uint16_t>(height_);
+    item.head.frame_type = (img._frameType == webrtc::VideoFrameType::kVideoFrameKey) ? 1 : 2;
+    ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
+    ctrl_->frame_count++;
+    pthread_cond_signal(&ctrl_->cv_can_read);
+    pthread_mutex_unlock(&ctrl_->mtx);
+    return Result(Result::OK);
+  }
+ private: DmaBufPool* pool_; ShmCtrlBlock* ctrl_; int width_, height_;
+};
+
+// ── RawVideoSinkInterface: RGA YUYV→NV12 → WebRTC encoder ──
+struct RgaEncoderSink : public webrtc::RawVideoSinkInterface {
+  int (*rga_blit)(void*,void*,void*) = nullptr;
+  std::vector<uint8_t> nv12_buf;
+  webrtc::VideoEncoder* encoder = nullptr;
+  int32_t OnRawFrame(uint8_t* videoFrame, size_t, const webrtc::VideoCaptureCapability& info,
+                     webrtc::VideoRotation, int64_t captureTime) override {
+    int w = info.width, h = info.height, ys = w * h, uvs = ys / 2;
+    if (w <= 0 || h <= 0) return 0;
+    if (nv12_buf.size() < (size_t)(ys + uvs)) nv12_buf.resize(ys + uvs);
+    rga_info_t src{}, dst{};
+    src.virAddr = videoFrame; src.format = RK_FORMAT_YUYV_422;
+    src.rect.width = w; src.rect.height = h; src.rect.wstride = w; src.rect.hstride = h;
+    src.rect.format = RK_FORMAT_YUYV_422; src.mmuFlag = 1; src.sync_mode = 0;
+    dst.virAddr = nv12_buf.data(); dst.format = RK_FORMAT_YCbCr_420_SP;
+    dst.rect.width = w; dst.rect.height = h; dst.rect.wstride = w; dst.rect.hstride = h;
+    dst.rect.format = RK_FORMAT_YCbCr_420_SP; dst.mmuFlag = 1; dst.sync_mode = 0;
+    if (rga_blit(&src, &dst, nullptr) != 0) return 0;
+    webrtc::scoped_refptr<webrtc::NV12Buffer> nv12 = webrtc::NV12Buffer::Create(w, h);
+    memcpy(nv12->MutableDataY(), nv12_buf.data(), ys);
+    memcpy(nv12->MutableDataUV(), nv12_buf.data() + ys, uvs);
+    encoder->Encode(webrtc::VideoFrame::Builder()
+        .set_video_frame_buffer(nv12).set_timestamp_us(captureTime * 1000).build(), nullptr);
+    return 0;
+  }
+};
+
+int main(int argc, char* argv[]) {
+  absl::ParseCommandLine(argc, argv);
+  webrtc::Environment env = webrtc::CreateEnvironment();
+  int device_idx = absl::GetFlag(FLAGS_device_idx);
+  const int kWidth = 640, kHeight = 480, kFps = 30;
+  const size_t kH264SlotSize = 256 * 1024;
+
+  std::cout << "video_rga_mpp_enc (WebRTC MppH264Encoder) starting" << std::endl;
+
+  // 1. VCM setup
+  std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> device_info(
+      webrtc::VideoCaptureFactory::CreateDeviceInfo());
+  if (!device_info || device_info->NumberOfDevices() <= 0) {
+    std::cerr << "No video capture devices" << std::endl; return 1;
+  }
+  int ndev = static_cast<int>(device_info->NumberOfDevices());
+  auto try_device = [&](int idx) -> webrtc::scoped_refptr<webrtc::VideoCaptureModule> {
+    char dn[256], un[256];
+    if (device_info->GetDeviceName(idx, dn, sizeof(dn), un, sizeof(un)) != 0) return nullptr;
+    auto v = webrtc::VideoCaptureFactory::Create(un); if (!v) return nullptr;
+    webrtc::VideoCaptureCapability cap;
+    cap.width = kWidth; cap.height = kHeight; cap.maxFPS = kFps;
+    cap.videoType = webrtc::VideoType::kYUY2; cap.interlaced = false;
+    if (v->StartCapture(cap) != 0) return nullptr;
+    if (!v->CaptureStarted()) return nullptr;
+    return v;
+  };
+  webrtc::scoped_refptr<webrtc::VideoCaptureModule> vcm;
+  if (device_idx >= 0 && device_idx < ndev) vcm = try_device(device_idx);
+  if (!vcm)
+    for (int i = 0; i < ndev; ++i)
+      if ((vcm = try_device(i))) { std::cout << "  selected device " << i << std::endl; break; }
+  if (!vcm) { std::cerr << "Failed to start capture" << std::endl; return 1; }
+
+  // 2. DMA-BUF pool + ctrl SHM + socket server
+  auto h264_pool = std::make_unique<DmaBufPool>();
+  if (h264_pool->Allocate(kH264SlotSize) != 0) {
+    std::cerr << "H264 DmaBufPool allocation failed" << std::endl; return 1;
+  }
+  std::cout << "  H264 pool: " << DmaBufPool::kNumSlots << " slots x "
+            << (kH264SlotSize/1024) << "KB" << std::endl;
+  ShmCtrlBlock* ctrl = InitCtrlShm(absl::GetFlag(FLAGS_ctrl_shm), absl::GetFlag(FLAGS_ctrl_proj_id));
+  if (!ctrl) { std::cerr << "Ctrl SHM init failed" << std::endl; return 1; }
+  g_ctrl = ctrl;
+  int fds[DmaBufPool::kNumSlots];
+  for (int i = 0; i < DmaBufPool::kNumSlots; ++i) fds[i] = h264_pool->GetFd(i);
+  DmaBufServer server;
+  server.Start(absl::GetFlag(FLAGS_socket_path), fds, DmaBufPool::kNumSlots);
+  std::cout << "  h264 socket listening on " << absl::GetFlag(FLAGS_socket_path) << std::endl;
+
+  // 3. RGA + WebRTC MPP encoder
+  void* rga_lib = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+  auto rga_blit = rga_lib ? reinterpret_cast<int(*)(void*,void*,void*)>(dlsym(rga_lib, "c_RkRgaBlit")) : nullptr;
+  if (!rga_blit) { std::cerr << "RGA not available" << std::endl; return 1; }
+
+  auto encoder = webrtc::MppH264EncoderTemplateAdapter::CreateEncoder(
+      env, webrtc::SdpVideoFormat("H264"));
+  if (!encoder) { std::cerr << "MPP encoder not available" << std::endl; return 1; }
+
+  webrtc::VideoCodec codec = {};
+  codec.codecType = webrtc::kVideoCodecH264; codec.width = kWidth; codec.height = kHeight;
+  codec.maxFramerate = 30; codec.minBitrate = 500; codec.maxBitrate = 2000;
+  codec.H264()->keyFrameInterval = 30;
+  encoder->InitEncode(&codec, webrtc::VideoEncoder::Settings(
+      webrtc::VideoEncoder::Capabilities(false), 1, 0));
+  EncCallback cb(h264_pool.get(), ctrl, kWidth, kHeight);
+  encoder->RegisterEncodeCompleteCallback(&cb);
+  std::cout << "  MPP encoder ready (WebRTC VideoEncoder)" << std::endl;
+
+  RgaEncoderSink sink;
+  sink.rga_blit = rga_blit; sink.encoder = encoder.get();
+
+  // 4. Start capture
+  vcm->RegisterCaptureDataCallback(&sink);
+  std::cout << "Capture at " << kWidth << "x" << kHeight << "@" << kFps
+            << "fps. Ctrl+C to stop." << std::endl;
+
+  struct sigaction sa = {};
+  sa.sa_handler = sigint_handler;
+  sa.sa_flags = 0;  // no SA_RESTART — allow syscalls to get EINTR
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+  while (g_running) sleep(1);
+
+  // 5. Shutdown — broadcast cv to wake blocked threads
+  std::cout << "\nShutting down..." << std::endl;
+  g_running = false;
+  if (ctrl) {
+    pthread_mutex_lock(&ctrl->mtx);
+    pthread_cond_broadcast(&ctrl->cv_can_write);
+    pthread_cond_broadcast(&ctrl->cv_can_read);
+    pthread_mutex_unlock(&ctrl->mtx);
+  }
+  vcm->StopCapture(); vcm->DeRegisterCaptureDataCallback();
+  encoder->Release();
+  if (ctrl) shmdt(ctrl);
+  if (rga_lib) dlclose(rga_lib);
+  std::cout << "Done." << std::endl; return 0;
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./dec/rga_i420_decoder.h ==========
+Lines: 39
+
+#ifndef APPS_PEERCONNECTION_VIDEO_RGA_MPP_DEC_RGA_I420_DECODER_H_
+#define APPS_PEERCONNECTION_VIDEO_RGA_MPP_DEC_RGA_I420_DECODER_H_
+
+#include <memory>
+#include <vector>
+
+#include "api/video_codecs/video_decoder.h"
+#include "api/video/video_frame.h"
+
+class DmaBufPool;
+struct ShmCtrlBlock;
+
+namespace webrtc {
+class Environment;
+}
+
+// Receives decoded NV12 frames from MPP decoder, RGA-converts to I420,
+// writes to I420 DmaBufPool for consumer.
+class RgaI420Decoder : public webrtc::DecodedImageCallback {
+ public:
+  RgaI420Decoder();
+  ~RgaI420Decoder() override;
+
+  bool Init();
+  void SetOutput(DmaBufPool* i420_pool, ShmCtrlBlock* ctrl);
+
+  // DecodedImageCallback
+  int32_t Decoded(webrtc::VideoFrame& frame) override;
+
+ private:
+  bool loaded_ = false;
+  void* rga_lib_ = nullptr;
+  int (*rga_blit_)(void*, void*, void*) = nullptr;
+
+  DmaBufPool* i420_pool_ = nullptr;
+  ShmCtrlBlock* ctrl_ = nullptr;
+};
+
+#endif
+
+========== ./dec/dma_buf_client.cc ==========
+Lines: 59
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/video_rga_mpp/dec/dma_buf_client.h"
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+
+DmaBufClient::~DmaBufClient() {
+  if (sock_fd_ >= 0) close(sock_fd_);
+}
+
+std::vector<int> DmaBufClient::ReceiveFds(const std::string& socket_path,
+                                          int expected_count) {
+  std::vector<int> result;
+  sock_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sock_fd_ < 0) { perror("DmaBufClient: socket"); return result; }
+
+  struct sockaddr_un addr = {};
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+  for (int retry = 0; retry < 30; ++retry) {
+    if (connect(sock_fd_, (struct sockaddr*)&addr, sizeof(addr)) == 0) break;
+    usleep(100000);
+  }
+
+  char dummy;
+  struct iovec iov = { &dummy, 1 };
+  size_t cmsg_size = CMSG_SPACE(expected_count * sizeof(int));
+  char* cmsg_buf = new char[cmsg_size]();
+  struct msghdr msg = {};
+  msg.msg_iov = &iov; msg.msg_iovlen = 1;
+  msg.msg_control = cmsg_buf; msg.msg_controllen = cmsg_size;
+
+  if (recvmsg(sock_fd_, &msg, 0) < 0) {
+    perror("DmaBufClient: recvmsg");
+    delete[] cmsg_buf;
+    return result;
+  }
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+  if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+    int* fds = reinterpret_cast<int*>(CMSG_DATA(cmsg));
+    int num_fds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+    for (int i = 0; i < num_fds; ++i) result.push_back(fds[i]);
+  }
+  delete[] cmsg_buf;
+  return result;
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./dec/dma_buf_client.h ==========
+Lines: 20
+
+#ifndef APPS_PEERCONNECTION_VIDEO_RGA_MPP_DEC_DMA_BUF_CLIENT_H_
+#define APPS_PEERCONNECTION_VIDEO_RGA_MPP_DEC_DMA_BUF_CLIENT_H_
+
+#include <string>
+#include <vector>
+
+class DmaBufClient {
+ public:
+  DmaBufClient() = default;
+  ~DmaBufClient();
+
+  // Connect to producer's Unix socket and receive dma-buf fds.
+  // Returns received fd list. Retries up to 3 seconds.
+  std::vector<int> ReceiveFds(const std::string& socket_path, int expected_count);
+
+ private:
+  int sock_fd_ = -1;
+};
+
+#endif
+
+========== ./dec/main.cc ==========
+Lines: 264
+
+// video_rga_mpp_dec — H264 DMA-BUF → MppH264Decoder (WebRTC) → RGA NV12→I420 → I420 DMA-BUF
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "api/environment/environment_factory.h"
+#include "api/video/i420_buffer.h"
+#include "api/video_codecs/sdp_video_format.h"
+#include "api/video_codecs/video_decoder.h"
+#include "apps/peerconnection/client/rk_mpp_codec.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/video_rga_mpp/dec/dma_buf_client.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_pool.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_server.h"
+#include "rtc_base/logging.h"
+
+extern "C" {
+#include "rga.h"
+#include "drmrga.h"
+}
+
+ABSL_FLAG(std::string, h264_socket, "/home/elf/webrtc_runtime/h264_socket",
+          "Unix socket to receive H264 dma-buf fds from enc");
+ABSL_FLAG(std::string, h264_ctrl_shm, "/home/elf/webrtc_runtime/shm_h264_ctrl",
+          "Control block SHM for H264 ring sync");
+ABSL_FLAG(int, h264_ctrl_proj_id, 0x8e, "H264 ctrl block proj_id");
+ABSL_FLAG(std::string, i420_ctrl_shm, "/home/elf/webrtc_runtime/shm_i420_ctrl",
+          "Control block SHM for I420 ring sync");
+ABSL_FLAG(int, i420_ctrl_proj_id, 0x8f, "I420 ctrl block proj_id");
+ABSL_FLAG(std::string, i420_socket, "/home/elf/webrtc_runtime/i420_socket",
+          "Unix socket to send I420 dma-buf fds to consumer");
+
+static std::atomic<bool> g_running{true};
+static ShmCtrlBlock* g_h264_ctrl = nullptr;
+static ShmCtrlBlock* g_i420_ctrl = nullptr;
+static void sigint_handler(int) {
+  g_running = false;
+  if (g_h264_ctrl) {
+    pthread_cond_broadcast(&g_h264_ctrl->cv_can_read);
+    pthread_cond_broadcast(&g_h264_ctrl->cv_can_write);
+  }
+  if (g_i420_ctrl) {
+    pthread_cond_broadcast(&g_i420_ctrl->cv_can_write);
+    pthread_cond_broadcast(&g_i420_ctrl->cv_can_read);
+  }
+}
+
+static ShmCtrlBlock* AttachShm(const std::string& kp, int pid) {
+  key_t key = ftok(kp.c_str(), pid);
+  if (key == -1) { perror("ftok"); return nullptr; }
+  int shmid = shmget(key, SHM_CTRL_BLOCK_SIZE, 0666);
+  if (shmid == -1) { perror("shmget"); return nullptr; }
+  auto* p = (ShmCtrlBlock*)shmat(shmid, nullptr, 0);
+  return (p == (void*)-1) ? nullptr : p;
+}
+
+static ShmCtrlBlock* CreateShm(const std::string& kp, int pid) {
+  int fd = open(kp.c_str(), O_CREAT | O_WRONLY, 0666);
+  if (fd >= 0) close(fd);
+  key_t key = ftok(kp.c_str(), pid);
+  if (key == -1) { perror("ftok"); return nullptr; }
+  int shmid = shmget(key, SHM_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
+  if (shmid == -1) { perror("shmget"); return nullptr; }
+  auto* p = (ShmCtrlBlock*)shmat(shmid, nullptr, 0);
+  if (p == (void*)-1) { perror("shmat"); return nullptr; }
+  if (init_shm_sync(p) != 0) { perror("init_shm_sync"); return nullptr; }
+  return p;
+}
+
+// ── Decoded callback: RGA NV12→I420 → DmaBufPool ──
+class DecSink : public webrtc::DecodedImageCallback {
+ public:
+  DecSink(DmaBufPool* pool, ShmCtrlBlock* ctrl, void* rga_lib,
+          webrtc::MppH264Decoder* dec)
+      : pool_(pool), ctrl_(ctrl), decoder_(dec) {
+    rga_blit_ = reinterpret_cast<int(*)(void*,void*,void*)>(dlsym(rga_lib, "c_RkRgaBlit"));
+  }
+  int32_t Decoded(webrtc::VideoFrame& frame) override {
+    if (!pool_ || !ctrl_ || !rga_blit_) return 0;
+    int w = frame.width(), h = frame.height();
+    if (w <= 0 || h <= 0) return 0;
+    int ys = w * h, uvs = ys / 4; size_t total = ys + 2 * uvs;
+
+    pthread_mutex_lock(&ctrl_->mtx);
+    while (ctrl_->frame_count >= RING_BUFFER_CNT) {
+      struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 100000000;
+      if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+      pthread_cond_timedwait(&ctrl_->cv_can_write, &ctrl_->mtx, &ts);
+    }
+    uint32_t w_idx = ctrl_->w_idx;
+    pthread_mutex_unlock(&ctrl_->mtx);
+
+    int dst_fd = pool_->GetFd(w_idx);
+    rga_info_t src{}, dst{};
+    // Try zero-copy: use MPP dma-buf fd as RGA source
+    int mpp_fd = decoder_ ? decoder_->GetLastNV12Fd() : -1;
+    if (mpp_fd >= 0) {
+      // Zero-copy: RGA reads NV12 directly from MPP dma-buf fd
+      src.fd = mpp_fd;
+      src.format = RK_FORMAT_YCbCr_420_SP;
+    } else {
+      // Fallback: RGA reads NV12 from NV12Buffer CPU memory (still DMA hardware)
+      auto* nv12 = frame.video_frame_buffer()->GetNV12();
+      if (nv12) {
+        src.virAddr = const_cast<uint8_t*>(nv12->DataY());
+        src.format = RK_FORMAT_YCbCr_420_SP;
+      } else {
+        return 0;  // unexpected: MPP decoder always outputs NV12
+      }
+    }
+    src.rect.width = w; src.rect.height = h; src.rect.wstride = w; src.rect.hstride = h;
+    src.rect.format = src.format; src.mmuFlag = 1; src.sync_mode = 0;
+    dst.fd = dst_fd; dst.format = RK_FORMAT_YCbCr_420_P;
+    dst.rect.width = w; dst.rect.height = h; dst.rect.wstride = w; dst.rect.hstride = h;
+    dst.rect.format = RK_FORMAT_YCbCr_420_P; dst.mmuFlag = 1; dst.sync_mode = 0;
+    if (rga_blit_(&src, &dst, nullptr) != 0) return 0;
+
+    pthread_mutex_lock(&ctrl_->mtx);
+    RingVideoFrameItem& item = ctrl_->ring[w_idx];
+    memset(&item.head, 0, sizeof(item.head));
+    item.head.frame_len = total; item.head.width = w; item.head.height = h;
+    ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT; ctrl_->frame_count++;
+    pthread_cond_signal(&ctrl_->cv_can_read);
+    pthread_mutex_unlock(&ctrl_->mtx);
+    return 0;
+  }
+ private: DmaBufPool* pool_; ShmCtrlBlock* ctrl_;
+  webrtc::MppH264Decoder* decoder_;
+  int (*rga_blit_)(void*,void*,void*) = nullptr;
+};
+
+int main(int argc, char* argv[]) {
+  absl::ParseCommandLine(argc, argv);
+  webrtc::Environment env = webrtc::CreateEnvironment();
+  const int kW = 640, kH = 480;
+
+  std::cout << "video_rga_mpp_dec (WebRTC MppH264Decoder) starting" << std::endl;
+
+  // 1. Receive H264 dma-buf fds from enc
+  DmaBufClient client;
+  auto h264_fds = client.ReceiveFds(absl::GetFlag(FLAGS_h264_socket), DmaBufPool::kNumSlots);
+  if (h264_fds.size() != DmaBufPool::kNumSlots) {
+    std::cerr << "Failed to receive H264 fds from enc" << std::endl; return 1;
+  }
+  std::cout << "  received " << h264_fds.size() << " H264 fds from enc" << std::endl;
+
+  auto h264_pool = std::make_unique<DmaBufPool>();
+  for (size_t i = 0; i < h264_fds.size(); ++i) h264_pool->ImportFd(i, h264_fds[i], 256 * 1024);
+
+  // 2. Attach H264 ctrl SHM (created by enc)
+  auto* h264_ctrl = AttachShm(absl::GetFlag(FLAGS_h264_ctrl_shm), absl::GetFlag(FLAGS_h264_ctrl_proj_id));
+  if (!h264_ctrl) { std::cerr << "Failed to attach H264 ctrl SHM" << std::endl; return 1; }
+  g_h264_ctrl = h264_ctrl;
+
+  // 3. Load RGA
+  void* rga_lib = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+  if (!rga_lib) { std::cerr << "RGA not available" << std::endl; return 1; }
+  std::cout << "  RGA loaded" << std::endl;
+
+  // 4. WebRTC MPP decoder
+  auto decoder = webrtc::MppH264DecoderTemplateAdapter::CreateDecoder(
+      env, webrtc::SdpVideoFormat("H264"));
+  if (!decoder) { std::cerr << "MPP decoder not available" << std::endl; return 1; }
+  decoder->Configure(webrtc::VideoDecoder::Settings());
+  std::cout << "  MPP decoder ready (WebRTC VideoDecoder)" << std::endl;
+
+  // 5. I420 DMA-BUF pool + ctrl SHM + socket server
+  auto i420_pool = std::make_unique<DmaBufPool>();
+  if (i420_pool->Allocate(kW * kH * 3 / 2) != 0) {
+    std::cerr << "I420 DmaBufPool allocation failed" << std::endl; return 1;
+  }
+  std::cout << "  I420 pool: " << DmaBufPool::kNumSlots << " slots x "
+            << (kW * kH * 3 / 2 / 1024) << "KB" << std::endl;
+
+  auto* i420_ctrl = CreateShm(absl::GetFlag(FLAGS_i420_ctrl_shm), absl::GetFlag(FLAGS_i420_ctrl_proj_id));
+  if (!i420_ctrl) { std::cerr << "I420 ctrl SHM failed" << std::endl; return 1; }
+  g_i420_ctrl = i420_ctrl;
+
+  int i420_fds[DmaBufPool::kNumSlots];
+  for (int i = 0; i < DmaBufPool::kNumSlots; ++i) i420_fds[i] = i420_pool->GetFd(i);
+  DmaBufServer i420_server;
+  i420_server.Start(absl::GetFlag(FLAGS_i420_socket), i420_fds, DmaBufPool::kNumSlots);
+  std::cout << "  i420 socket listening on " << absl::GetFlag(FLAGS_i420_socket) << std::endl;
+
+  DecSink sink(i420_pool.get(), i420_ctrl, rga_lib,
+               static_cast<webrtc::MppH264Decoder*>(decoder.get()));
+  decoder->RegisterDecodeCompleteCallback(&sink);
+
+  // 6. Main loop: read H264 from DMA-BUF, decode, output I420
+  std::cout << "Decoder loop started. Ctrl+C to stop." << std::endl;
+  struct sigaction sa = {};
+  sa.sa_handler = sigint_handler;
+  sa.sa_flags = 0;  // no SA_RESTART
+  sigaction(SIGINT, &sa, nullptr);
+  sigaction(SIGTERM, &sa, nullptr);
+
+  std::vector<uint8_t> h264_buf;
+  int count = 0;
+
+  while (g_running) {
+    pthread_mutex_lock(&h264_ctrl->mtx);
+    while (h264_ctrl->frame_count <= 0 && g_running) {
+      struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 100000000;
+      if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+      pthread_cond_timedwait(&h264_ctrl->cv_can_read, &h264_ctrl->mtx, &ts);
+    }
+    if (!g_running) { pthread_mutex_unlock(&h264_ctrl->mtx); break; }
+
+    uint32_t ri = h264_ctrl->r_idx, len = h264_ctrl->ring[ri].head.frame_len;
+    uint8_t ft = h264_ctrl->ring[ri].head.frame_type;
+    h264_buf.resize(len);
+    memcpy(h264_buf.data(), h264_pool->GetPtr(ri), len);
+    h264_ctrl->r_idx = (ri + 1) % RING_BUFFER_CNT; h264_ctrl->frame_count--;
+    pthread_cond_signal(&h264_ctrl->cv_can_write);
+    pthread_mutex_unlock(&h264_ctrl->mtx);
+
+    webrtc::EncodedImage img;
+    img.SetEncodedData(webrtc::EncodedImageBuffer::Create(h264_buf.data(), len));
+    img._frameType = (ft == 1) ? webrtc::VideoFrameType::kVideoFrameKey
+                               : webrtc::VideoFrameType::kVideoFrameDelta;
+    decoder->Decode(img, 0);
+    count++;
+  }
+
+  std::cout << "\nShutting down. Processed " << count << " frames." << std::endl;
+  g_running = false;
+  if (h264_ctrl) {
+    pthread_mutex_lock(&h264_ctrl->mtx);
+    pthread_cond_broadcast(&h264_ctrl->cv_can_read);
+    pthread_cond_broadcast(&h264_ctrl->cv_can_write);
+    pthread_mutex_unlock(&h264_ctrl->mtx);
+  }
+  if (i420_ctrl) {
+    pthread_mutex_lock(&i420_ctrl->mtx);
+    pthread_cond_broadcast(&i420_ctrl->cv_can_write);
+    pthread_cond_broadcast(&i420_ctrl->cv_can_read);
+    pthread_mutex_unlock(&i420_ctrl->mtx);
+  }
+  decoder->Release();
+  if (h264_ctrl) shmdt(h264_ctrl);
+  if (i420_ctrl) shmdt(i420_ctrl);
+  if (rga_lib) dlclose(rga_lib);
+  return 0;
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./dec/rga_i420_decoder.cc ==========
+Lines: 112
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/video_rga_mpp/dec/rga_i420_decoder.h"
+
+#include <dlfcn.h>
+#include <pthread.h>
+#include <cstdio>
+#include <cstring>
+
+#include "api/scoped_refptr.h"
+#include "apps/peerconnection/client/shm_common.h"
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_pool.h"
+#include "rtc_base/logging.h"
+
+extern "C" {
+#include "rga.h"
+#include "drmrga.h"
+}
+
+RgaI420Decoder::RgaI420Decoder() = default;
+
+RgaI420Decoder::~RgaI420Decoder() {
+  if (rga_lib_) dlclose(rga_lib_);
+}
+
+bool RgaI420Decoder::Init() {
+  rga_lib_ = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+  if (!rga_lib_) {
+    RTC_LOG(LS_WARNING) << "RgaI420Decoder: dlopen librga.so failed";
+    return false;
+  }
+  rga_blit_ = reinterpret_cast<int(*)(void*,void*,void*)>(
+      dlsym(rga_lib_, "c_RkRgaBlit"));
+  if (!rga_blit_) { dlclose(rga_lib_); rga_lib_ = nullptr; return false; }
+  loaded_ = true;
+  return true;
+}
+
+void RgaI420Decoder::SetOutput(DmaBufPool* i420_pool, ShmCtrlBlock* ctrl) {
+  i420_pool_ = i420_pool;
+  ctrl_ = ctrl;
+}
+
+int32_t RgaI420Decoder::Decoded(webrtc::VideoFrame& frame) {
+  if (!loaded_ || !i420_pool_ || !ctrl_) return 0;
+
+  int w = frame.width(), h = frame.height();
+  if (w <= 0 || h <= 0) return 0;
+
+  int ys = w * h, uvs = ys / 4;
+  size_t total = ys + 2 * uvs;
+
+  // MPP decoder produces I420 (CPU NV12→I420 conversion)
+  auto i420 = frame.video_frame_buffer()->ToI420();
+  if (!i420) return 0;
+
+  // Wait for write slot
+  pthread_mutex_lock(&ctrl_->mtx);
+  while (ctrl_->frame_count >= RING_BUFFER_CNT)
+    pthread_cond_wait(&ctrl_->cv_can_write, &ctrl_->mtx);
+  uint32_t w_idx = ctrl_->w_idx;
+  pthread_mutex_unlock(&ctrl_->mtx);
+
+  // RGA destination: dma-buf fd (zero CPU copy to consumer)
+  int dst_fd = i420_pool_->GetFd(w_idx);
+
+  rga_info_t src;
+  memset(&src, 0, sizeof(src));
+  src.virAddr = const_cast<uint8_t*>(i420->DataY());
+  src.format = RK_FORMAT_YCbCr_420_P;
+  src.rect.width = w; src.rect.height = h;
+  src.rect.wstride = w; src.rect.hstride = h;
+  src.rect.format = RK_FORMAT_YCbCr_420_P;
+  src.mmuFlag = 1; src.sync_mode = 0;
+
+  rga_info_t dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.fd = dst_fd;
+  dst.format = RK_FORMAT_YCbCr_420_P;
+  dst.rect.width = w; dst.rect.height = h;
+  dst.rect.wstride = w; dst.rect.hstride = h;
+  dst.rect.format = RK_FORMAT_YCbCr_420_P;
+  dst.mmuFlag = 1; dst.sync_mode = 0;
+
+  if (rga_blit_(&src, &dst, nullptr) != 0) {
+    static int errs = 0;
+    if (errs++ < 3) RTC_LOG(LS_WARNING) << "RgaI420Decoder: blit failed";
+    return 0;
+  }
+
+  // Update ctrl block
+  pthread_mutex_lock(&ctrl_->mtx);
+  RingVideoFrameItem& item = ctrl_->ring[w_idx];
+  memset(&item.head, 0, sizeof(item.head));
+  item.head.frame_len = static_cast<uint32_t>(total);
+  item.head.width = static_cast<uint16_t>(w);
+  item.head.height = static_cast<uint16_t>(h);
+  item.head.frame_type = 0;
+  item.head.ntp_time_ms = frame.ntp_time_ms();
+  ctrl_->w_idx = (w_idx + 1) % RING_BUFFER_CNT;
+  ctrl_->frame_count++;
+  pthread_cond_signal(&ctrl_->cv_can_read);
+  pthread_mutex_unlock(&ctrl_->mtx);
+
+  return 0;
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./shared/dma_buf_pool.cc ==========
+Lines: 187
+
+// dma_buf_pool.cc — DMA-BUF allocation via librga (adapts to kernel allocator)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/video_capture_shm_RGA/dma_buf_pool.h"
+
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+// RGA types needed for bo_t (avoid RgaApi.h — its <linux/stddef.h> breaks libc)
+extern "C" {
+#include "rga.h"
+#include "drmrga.h"
+}
+
+DmaBufPool::DmaBufPool() {
+  for (int i = 0; i < kNumSlots; ++i) {
+    slots_[i].fd = -1;
+    slots_[i].ptr = nullptr;
+    slots_[i].size = 0;
+  }
+}
+
+DmaBufPool::~DmaBufPool() {
+  for (int i = 0; i < kNumSlots; ++i) {
+    if (slots_[i].ptr && slots_[i].ptr != MAP_FAILED) {
+      munmap(slots_[i].ptr, slots_[i].size);
+    }
+    if (slots_[i].fd >= 0) {
+      close(slots_[i].fd);
+    }
+  }
+}
+
+int DmaBufPool::Allocate(size_t frame_size) {
+  // Try librga allocation first (handles ION/DRM/dma-heap transparently)
+  void* lib = dlopen("librga.so", RTLD_NOW | RTLD_GLOBAL);
+  if (!lib) {
+    fprintf(stderr, "DmaBufPool: dlopen librga.so failed: %s\n", dlerror());
+    goto fallback_dma_heap;
+  }
+
+  {
+    auto fn_alloc = reinterpret_cast<int(*)(bo_t*, int, int, int)>(
+        dlsym(lib, "c_RkRgaGetAllocBuffer"));
+    auto fn_get_fd = reinterpret_cast<int(*)(bo_t*, int*)>(
+        dlsym(lib, "c_RkRgaGetBufferFd"));
+    auto fn_mmap = reinterpret_cast<int(*)(bo_t*)>(
+        dlsym(lib, "c_RkRgaGetMmap"));
+    auto fn_free = reinterpret_cast<int(*)(bo_t*)>(
+        dlsym(lib, "c_RkRgaFree"));
+    auto fn_unmap = reinterpret_cast<int(*)(bo_t*)>(
+        dlsym(lib, "c_RkRgaUnmap"));
+
+    if (fn_alloc && fn_get_fd && fn_mmap) {
+      // bpp=12 for I420 packed (8 bits Y + 2 bits U + 2 bits V per pixel avg)
+      const int bpp = 12;
+      const int w = 640, h = 480;
+      bool ok = true;
+
+      for (int i = 0; i < kNumSlots && ok; ++i) {
+        bo_t bo;
+        memset(&bo, 0, sizeof(bo));
+        if (fn_alloc(&bo, w, h, bpp) != 0) {
+          fprintf(stderr, "DmaBufPool: c_RkRgaGetAllocBuffer[%d] failed\n", i);
+          ok = false;
+          break;
+        }
+
+        int fd = -1;
+        if (fn_get_fd(&bo, &fd) != 0 || fd < 0) {
+          fprintf(stderr, "DmaBufPool: c_RkRgaGetBufferFd[%d] failed\n", i);
+          fn_free(&bo);
+          ok = false;
+          break;
+        }
+
+        if (fn_mmap(&bo) != 0) {
+          fprintf(stderr, "DmaBufPool: c_RkRgaGetMmap[%d] failed\n", i);
+          close(fd);
+          fn_free(&bo);
+          ok = false;
+          break;
+        }
+
+        slots_[i].fd = fd;
+        slots_[i].ptr = bo.ptr;
+        slots_[i].size = bo.size;
+      }
+
+      if (ok) {
+        fprintf(stderr, "DmaBufPool: allocated %d buffers via librga (%zu bytes each)\n",
+                kNumSlots, slots_[0].size);
+        return 0;
+      }
+
+      // Clean up partially-allocated slots
+      for (int j = kNumSlots - 1; j >= 0; --j) {
+        if (slots_[j].fd < 0) continue;
+        bo_t bo;
+        memset(&bo, 0, sizeof(bo));
+        bo.fd = slots_[j].fd;
+        bo.ptr = slots_[j].ptr;
+        bo.size = slots_[j].size;
+        fn_unmap(&bo);
+        fn_free(&bo);
+        close(slots_[j].fd);
+        slots_[j].fd = -1;
+        slots_[j].ptr = nullptr;
+      }
+      // Fall through to dma_heap
+    }
+  }
+
+fallback_dma_heap:
+  // Try /dev/dma_heap/linux,cma as fallback
+  fprintf(stderr, "DmaBufPool: librga alloc failed, trying dma_heap...\n");
+
+  int heap_fd = open("/dev/dma_heap/linux,cma", O_RDONLY | O_CLOEXEC);
+  if (heap_fd < 0) {
+    heap_fd = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+  }
+  if (heap_fd < 0) {
+    fprintf(stderr, "DmaBufPool: dma_heap also unavailable: %s\n", strerror(errno));
+    return -errno;
+  }
+
+  for (int i = 0; i < kNumSlots; ++i) {
+    struct { uint64_t len; uint32_t fd; uint32_t fd_flags; uint64_t heap_flags; } alloc = {};
+    alloc.len = frame_size;
+    alloc.fd_flags = O_RDWR | O_CLOEXEC;
+    if (ioctl(heap_fd, 0xc0184800 /* DMA_HEAP_IOCTL_ALLOC */, &alloc) < 0) {
+      fprintf(stderr, "DmaBufPool: DMA_HEAP_IOCTL_ALLOC[%d] failed: %s\n",
+              i, strerror(errno));
+      close(heap_fd);
+      return -errno;
+    }
+
+    void* ptr = mmap(nullptr, frame_size, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, (int)alloc.fd, 0);
+    if (ptr == MAP_FAILED) {
+      close((int)alloc.fd);
+      close(heap_fd);
+      return -errno;
+    }
+    slots_[i].fd = (int)alloc.fd;
+    slots_[i].ptr = ptr;
+    slots_[i].size = frame_size;
+  }
+  close(heap_fd);
+  return 0;
+}
+
+bool DmaBufPool::ImportFd(int index, int fd, size_t size) {
+  if (index < 0 || index >= kNumSlots || fd < 0) return false;
+
+  int dup_fd = dup(fd);
+  if (dup_fd < 0) {
+    perror("DmaBufPool::ImportFd: dup");
+    return false;
+  }
+
+  void* ptr = mmap(nullptr, size, PROT_READ, MAP_SHARED, dup_fd, 0);
+  if (ptr == MAP_FAILED) {
+    perror("DmaBufPool::ImportFd: mmap");
+    close(dup_fd);
+    return false;
+  }
+
+  slots_[index].fd = dup_fd;
+  slots_[index].ptr = ptr;
+  slots_[index].size = size;
+  return true;
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./shared/dma_buf_pool.h ==========
+Lines: 58
+
+// dma_buf_pool.h — CMA dma-buf ring buffer pool (shared by producer & consumer)
+#ifndef APPS_PEERCONNECTION_VIDEO_CAPTURE_SHM_RGA_DMA_BUF_POOL_H_
+#define APPS_PEERCONNECTION_VIDEO_CAPTURE_SHM_RGA_DMA_BUF_POOL_H_
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+struct DmaBufSlot {
+  int fd = -1;           // dma-buf fd
+  void* ptr = nullptr;   // mmap'd userspace pointer
+  size_t size = 0;       // buffer size in bytes
+};
+
+// Pool of CMA-allocated dma-buf slots for zero-copy frame exchange.
+//
+// Producer: calls Allocate() → uses slots[idx].fd as RGA destination.
+// Consumer: receives fds via Unix socket → calls ImportFd() → uses slots[idx].ptr to read.
+//
+// The actual allocation uses /dev/dma_heap/linux,cma (CMA physically-contiguous
+// memory required by RGA DMA engine).
+class DmaBufPool {
+ public:
+  static constexpr int kNumSlots = 8;  // ring buffer depth
+
+  DmaBufPool();
+  ~DmaBufPool();
+
+  // Allocate kNumSlots CMA buffers of frame_size bytes each.
+  // Returns 0 on success, -errno on failure.
+  int Allocate(size_t frame_size);
+
+  // Import a single dma-buf fd into a slot (consumer side).
+  // The fd is duplicated; caller still owns the original.
+  bool ImportFd(int index, int fd, size_t size);
+
+  // Export the fd for a slot (for passing over Unix socket).
+  int GetFd(int index) const { return slots_[index].fd; }
+
+  // Get mmap'd pointer for a slot (consumer reads from this).
+  void* GetPtr(int index) const { return slots_[index].ptr; }
+
+  size_t GetSlotSize(int index) const { return slots_[index].size; }
+
+ private:
+  DmaBufSlot slots_[kNumSlots];
+};
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+#endif  // APPS_PEERCONNECTION_VIDEO_CAPTURE_SHM_RGA_DMA_BUF_POOL_H_
+
+========== ./shared/dma_buf_server.h ==========
+Lines: 27
+
+// dma_buf_server.h — Unix socket server to pass dma-buf fds to consumer
+#ifndef APPS_PEERCONNECTION_VIDEO_RGA_MPP_SHARED_DMA_BUF_SERVER_H_
+#define APPS_PEERCONNECTION_VIDEO_RGA_MPP_SHARED_DMA_BUF_SERVER_H_
+
+#include <atomic>
+#include <string>
+#include <thread>
+
+// Sends dma-buf fds to a single consumer via Unix domain socket.
+// Stop() closes the server socket to unblock pending accept(), then joins.
+class DmaBufServer {
+ public:
+  DmaBufServer() = default;
+  ~DmaBufServer();
+
+  // Start server thread. Returns 0 on success.
+  int Start(const std::string& socket_path, const int* fds, int num_fds);
+
+  // Shutdown: unblock accept(), join thread, cleanup.
+  void Stop();
+
+ private:
+  std::thread thread_;
+  int server_fd_ = -1;
+};
+
+#endif
+
+========== ./shared/dma_buf_server.cc ==========
+Lines: 119
+
+// dma_buf_server.cc — Unix socket server to pass dma-buf fds
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+
+#include "apps/peerconnection/video_rga_mpp/shared/dma_buf_server.h"
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+static int SendFds(int client_fd, const int* fds, int num_fds) {
+  char dummy = 'F';
+  struct iovec iov = { .iov_base = &dummy, .iov_len = 1 };
+
+  size_t cmsg_size = CMSG_SPACE(num_fds * sizeof(int));
+  char* cmsg_buf = new char[cmsg_size];
+  memset(cmsg_buf, 0, cmsg_size);
+
+  struct msghdr msg = {};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cmsg_buf;
+  msg.msg_controllen = cmsg_size;
+
+  struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(num_fds * sizeof(int));
+  memcpy(CMSG_DATA(cmsg), fds, num_fds * sizeof(int));
+
+  ssize_t sent = sendmsg(client_fd, &msg, 0);
+  delete[] cmsg_buf;
+  return (sent >= 0) ? 0 : -errno;
+}
+
+DmaBufServer::~DmaBufServer() {
+  Stop();
+}
+
+int DmaBufServer::Start(const std::string& socket_path, const int* fds,
+                        int num_fds) {
+  if (thread_.joinable()) return -1;  // already started
+
+  unlink(socket_path.c_str());
+
+  server_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (server_fd_ < 0) {
+    perror("DmaBufServer: socket");
+    return -1;
+  }
+
+  struct sockaddr_un addr = {};
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+  if (bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    perror("DmaBufServer: bind");
+    close(server_fd_); server_fd_ = -1;
+    return -1;
+  }
+
+  if (listen(server_fd_, 1) < 0) {
+    perror("DmaBufServer: listen");
+    close(server_fd_); server_fd_ = -1;
+    unlink(socket_path.c_str());
+    return -1;
+  }
+
+  std::string path_copy = socket_path;
+  std::vector<int> fd_copy(fds, fds + num_fds);
+  int fd = server_fd_;  // capture for lambda
+
+  thread_ = std::thread([path_copy, fd_copy, fd]() {
+    fprintf(stderr, "DmaBufServer: waiting for consumer on %s...\n",
+            path_copy.c_str());
+
+    int client_fd = accept(fd, nullptr, nullptr);
+    if (client_fd < 0) {
+      // accept() failed — likely because Stop() closed server_fd
+      if (errno != EBADF && errno != EINVAL)
+        perror("DmaBufServer: accept");
+      return;
+    }
+
+    if (SendFds(client_fd, fd_copy.data(), (int)fd_copy.size()) < 0) {
+      fprintf(stderr, "DmaBufServer: sendmsg failed: %s\n", strerror(errno));
+    } else {
+      fprintf(stderr, "DmaBufServer: sent %d fds to consumer\n",
+              (int)fd_copy.size());
+    }
+
+    close(client_fd);
+    close(fd);
+    unlink(path_copy.c_str());
+  });
+
+  return 0;
+}
+
+void DmaBufServer::Stop() {
+  if (server_fd_ >= 0) {
+    shutdown(server_fd_, SHUT_RDWR);
+    close(server_fd_);
+    server_fd_ = -1;
+  }
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
+#pragma clang diagnostic pop
+#pragma GCC diagnostic pop
+
+========== ./shared/rga_headers/drmrga.h ==========
+Lines: 358
+
+/*
+ * Copyright (C) 2016 Rockchip Electronics Co., Ltd.
+ * Authors:
+ *  Zhiqin Wei <wzq@rock-chips.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef _rk_drm_rga_
+#define _rk_drm_rga_
+
+#include <stdint.h>
+#include <errno.h>
+#include <sys/cdefs.h>
+
+#include "rga.h"
+
+#ifdef ANDROID
+#define DRMRGA_HARDWARE_MODULE_ID "librga"
+
+#include <hardware/gralloc.h>
+#include <hardware/hardware.h>
+#include <system/graphics.h>
+#include <cutils/native_handle.h>
+
+#if defined(ANDROID_12) || defined(USE_HARDWARE_ROCKCHIP)
+#include <hardware/hardware_rockchip.h>
+#endif
+
+#endif
+
+#define RGA_BLIT_SYNC   0x5017
+#define RGA_BLIT_ASYNC  0x5018
+
+#ifndef ANDROID /* LINUX */
+/* flip source image horizontally (around the vertical axis) */
+#define HAL_TRANSFORM_FLIP_H     0x01
+/* flip source image vertically (around the horizontal axis)*/
+#define HAL_TRANSFORM_FLIP_V     0x02
+/* rotate source image 90 degrees clockwise */
+#define HAL_TRANSFORM_ROT_90     0x04
+/* rotate source image 180 degrees */
+#define HAL_TRANSFORM_ROT_180    0x03
+/* rotate source image 270 degrees clockwise */
+#define HAL_TRANSFORM_ROT_270    0x07
+#endif
+
+#define HAL_TRANSFORM_FLIP_H_V   0x08
+
+/*****************************************************************************/
+
+/* for compatibility */
+#define DRM_RGA_MODULE_API_VERSION      HWC_MODULE_API_VERSION_0_1
+#define DRM_RGA_DEVICE_API_VERSION      HWC_DEVICE_API_VERSION_0_1
+#define DRM_RGA_API_VERSION             HWC_DEVICE_API_VERSION
+
+#define DRM_RGA_TRANSFORM_ROT_MASK      0x0000000F
+#define DRM_RGA_TRANSFORM_ROT_0         0x00000000
+#define DRM_RGA_TRANSFORM_ROT_90        HAL_TRANSFORM_ROT_90
+#define DRM_RGA_TRANSFORM_ROT_180       HAL_TRANSFORM_ROT_180
+#define DRM_RGA_TRANSFORM_ROT_270       HAL_TRANSFORM_ROT_270
+
+#define DRM_RGA_TRANSFORM_FLIP_MASK     0x00000003
+#define DRM_RGA_TRANSFORM_FLIP_H        HAL_TRANSFORM_FLIP_H
+#define DRM_RGA_TRANSFORM_FLIP_V        HAL_TRANSFORM_FLIP_V
+
+enum {
+    AWIDTH                      = 0,
+    AHEIGHT,
+    ASTRIDE,
+    AFORMAT,
+    ASIZE,
+    ATYPE,
+};
+/*****************************************************************************/
+
+#ifndef ANDROID /* LINUX */
+/* memory type definitions. */
+enum drm_rockchip_gem_mem_type {
+    /* Physically Continuous memory and used as default. */
+    ROCKCHIP_BO_CONTIG  = 1 << 0,
+    /* cachable mapping. */
+    ROCKCHIP_BO_CACHABLE    = 1 << 1,
+    /* write-combine mapping. */
+    ROCKCHIP_BO_WC      = 1 << 2,
+    ROCKCHIP_BO_SECURE  = 1 << 3,
+    ROCKCHIP_BO_MASK    = ROCKCHIP_BO_CONTIG | ROCKCHIP_BO_CACHABLE |
+                ROCKCHIP_BO_WC | ROCKCHIP_BO_SECURE
+};
+
+typedef struct bo {
+    int fd;
+    void *ptr;
+    size_t size;
+    size_t offset;
+    size_t pitch;
+    unsigned handle;
+} bo_t;
+#endif
+
+/*
+   @value size:     user not need care about.For avoid read/write out of memory
+ */
+typedef struct rga_rect {
+    int xoffset;
+    int yoffset;
+    int width;
+    int height;
+    int wstride;
+    int hstride;
+    int format;
+    int size;
+} rga_rect_t;
+
+typedef struct rga_nn {
+    int nn_flag;
+    int scale_r;
+    int scale_g;
+    int scale_b;
+    int offset_r;
+    int offset_g;
+    int offset_b;
+} rga_nn_t;
+
+typedef struct rga_dither {
+    int enable;
+    int mode;
+    int lut0_l;
+    int lut0_h;
+    int lut1_l;
+    int lut1_h;
+} rga_dither_t;
+
+struct rga_mosaic_info {
+    uint8_t enable;
+    uint8_t mode;
+};
+
+struct rga_pre_intr_info {
+    uint8_t enable;
+
+    uint8_t read_intr_en;
+    uint8_t write_intr_en;
+    uint8_t read_hold_en;
+    uint32_t read_threshold;
+    uint32_t write_start;
+    uint32_t write_step;
+};
+
+/* MAX(min, (max - channel_value)) */
+struct rga_osd_invert_factor {
+    uint8_t alpha_max;
+    uint8_t alpha_min;
+    uint8_t yg_max;
+    uint8_t yg_min;
+    uint8_t crb_max;
+    uint8_t crb_min;
+};
+
+struct rga_color {
+    union {
+        struct {
+            uint8_t red;
+            uint8_t green;
+            uint8_t blue;
+            uint8_t alpha;
+        };
+        uint32_t value;
+    };
+};
+
+struct rga_osd_bpp2 {
+    uint8_t  ac_swap;           // ac swap flag
+                                // 0: CA
+                                // 1: AC
+    uint8_t  endian_swap;       // rgba2bpp endian swap
+                                // 0: Big endian
+                                // 1: Little endian
+    struct rga_color color0;
+    struct rga_color color1;
+};
+
+struct rga_osd_mode_ctrl {
+    uint8_t mode;               // OSD cal mode:
+                                //   0b'1: statistics mode
+                                //   1b'1: auto inversion overlap mode
+    uint8_t direction_mode;     // horizontal or vertical
+                                //   0: horizontal
+                                //   1: vertical
+    uint8_t width_mode;         // using @fix_width or LUT width
+                                //   0: fix width
+                                //   1: LUT width
+    uint16_t block_fix_width;   // OSD block fixed width
+                                //   real width = (fix_width + 1) * 2
+    uint8_t block_num;          // OSD block num
+    uint16_t flags_index;       // auto invert flags index
+
+    /* invertion config */
+    uint8_t color_mode;         // selete color
+                                //   0: src1 color
+                                //   1: config data color
+    uint8_t invert_flags_mode;  // invert flag selete
+                                //   0: use RAM flag
+                                //   1: usr last result
+    uint8_t default_color_sel;  // default color mode
+                                //   0: default is bright
+                                //   1: default is dark
+    uint8_t invert_enable;      // invert channel enable
+                                //   1 << 0: aplha enable
+                                //   1 << 1: Y/G disable
+                                //   1 << 2: C/RB disable
+    uint8_t invert_mode;        // invert cal mode
+                                //   0: normal(max-data)
+                                //   1: swap
+    uint8_t invert_thresh;      // if luma > thresh, osd_flag to be 1
+    uint8_t unfix_index;        // OSD width config index
+};
+
+struct rga_osd_info {
+    uint8_t  enable;
+
+    struct rga_osd_mode_ctrl mode_ctrl;
+    struct rga_osd_invert_factor cal_factor;
+    struct rga_osd_bpp2 bpp2_info;
+
+    union {
+        struct {
+            uint32_t last_flags1;
+            uint32_t last_flags0;
+        };
+        uint64_t last_flags;
+    };
+
+    union {
+        struct {
+            uint32_t cur_flags1;
+            uint32_t cur_flags0;
+        };
+        uint64_t cur_flags;
+    };
+};
+
+/*
+   @value fd:     use fd to share memory, it can be ion shard fd,and dma fd.
+   @value virAddr:userspace address
+   @value phyAddr:use phy address
+   @value hnd:    use buffer_handle_t
+ */
+typedef struct rga_info {
+    int fd;
+    void *virAddr;
+    void *phyAddr;
+#ifndef ANDROID /* LINUX */
+    unsigned hnd;
+#else /* Android */
+    buffer_handle_t hnd;
+#endif
+    int format;
+    rga_rect_t rect;
+    unsigned int blend;
+    int bufferSize;
+    int rotation;
+    int color;
+    int testLog;
+    int mmuFlag;
+    int colorkey_en;
+    int colorkey_mode;
+    int colorkey_max;
+    int colorkey_min;
+    int scale_mode;
+    int color_space_mode;
+    int sync_mode;
+    rga_nn_t nn;
+    rga_dither_t dither;
+    int rop_code;
+    int rd_mode;
+    unsigned short is_10b_compact;
+    unsigned short is_10b_endian;
+
+    int in_fence_fd;
+    int out_fence_fd;
+
+    int core;
+    int priority;
+
+    unsigned short enable;
+
+    int handle;
+
+    struct rga_mosaic_info mosaic_info;
+
+    struct rga_osd_info osd_info;
+
+    struct rga_pre_intr_info pre_intr;
+
+    int mpi_mode;
+
+    union {
+        int ctx_id;
+        int job_handle;
+    };
+
+    char reserve[402];
+} rga_info_t;
+
+
+typedef struct drm_rga {
+    rga_rect_t src;
+    rga_rect_t dst;
+} drm_rga_t;
+
+/*
+   @fun rga_set_rect:For use to set the rects esayly
+
+   @param rect:The rect user want to set,like setting the src rect:
+   drm_rga_t rects;
+   rga_set_rect(rects.src,0,0,1920,1080,1920,NV12);
+   mean to set the src rect to the value.
+ */
+static inline int rga_set_rect(rga_rect_t *rect,
+                               int x, int y, int w, int h, int sw, int sh, int f) {
+    if (!rect)
+        return -EINVAL;
+
+    rect->xoffset = x;
+    rect->yoffset = y;
+    rect->width = w;
+    rect->height = h;
+    rect->wstride = sw;
+    rect->hstride = sh;
+    rect->format = f;
+
+    return 0;
+}
+
+#ifndef ANDROID /* LINUX */
+static inline void rga_set_rotation(rga_info_t *info, int angle) {
+    if (angle == 90)
+        info->rotation = HAL_TRANSFORM_ROT_90;
+    else if (angle == 180)
+        info->rotation = HAL_TRANSFORM_ROT_180;
+    else if (angle == 270)
+        info->rotation = HAL_TRANSFORM_ROT_270;
+}
+#endif
+/*****************************************************************************/
+
+#endif
+
+========== ./shared/rga_headers/RgaApi.h ==========
+Lines: 81
+
+/*
+ * Copyright (C) 2016 Rockchip Electronics Co., Ltd.
+ * Authors:
+ *    Zhiqin Wei <wzq@rock-chips.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#ifndef _rockchip_rga_c_h_
+#define _rockchip_rga_c_h_
+
+#include <stdint.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <sys/mman.h>
+#include <linux/stddef.h>
+
+#include "drmrga.h"
+#include "rga.h"
+
+#ifdef __cplusplus
+extern "C"{
+#endif
+
+/*
+ * Compatible with the old version of C interface.The new
+ * version of the C interface no longer requires users to
+ * initialize rga, so RgaInit and RgaDeInit are just for
+ * compatibility with the old C interface, so please do
+ * not use ctx, because it is usually a NULL.
+ */
+#define RgaInit(ctx) ({ \
+    int ret = 0; \
+    ret = c_RkRgaInit(); \
+    c_RkRgaGetContext(ctx); \
+    ret;\
+})
+#define RgaDeInit(ctx) { \
+    (void)ctx;        /* unused */ \
+    c_RkRgaDeInit(); \
+}
+#define RgaBlit(...) c_RkRgaBlit(__VA_ARGS__)
+#define RgaCollorFill(...) c_RkRgaColorFill(__VA_ARGS__)
+#define RgaFlush() c_RkRgaFlush()
+
+int  c_RkRgaInit();
+void c_RkRgaDeInit();
+void c_RkRgaGetContext(void **ctx);
+int  c_RkRgaBlit(rga_info_t *src, rga_info_t *dst, rga_info_t *src1);
+int  c_RkRgaColorFill(rga_info_t *dst);
+int  c_RkRgaFlush();
+
+#ifndef ANDROID /* linux */
+int c_RkRgaGetAllocBuffer(bo_t *bo_info, int width, int height, int bpp);
+int c_RkRgaGetAllocBufferCache(bo_t *bo_info, int width, int height, int bpp);
+int c_RkRgaGetMmap(bo_t *bo_info);
+int c_RkRgaUnmap(bo_t *bo_info);
+int c_RkRgaFree(bo_t *bo_info);
+int c_RkRgaGetBufferFd(bo_t *bo_info, int *fd);
+#endif /* #ifndef ANDROID */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* #ifndef _rockchip_rga_c_h_ */
+
+========== ./shared/rga_headers/rga.h ==========
+Lines: 185
+
+/*
+ * Copyright (C) 2016 Rockchip Electronics Co., Ltd.
+ * Authors:
+ *    Zhiqin Wei <wzq@rock-chips.com>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef _RGA_DRIVER_H_
+#define _RGA_DRIVER_H_
+
+
+#ifndef ENABLE
+#define ENABLE 1
+#endif
+
+#ifndef DISABLE
+#define DISABLE 0
+#endif
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+/* In order to be compatible with RK_FORMAT_XX and HAL_PIXEL_FORMAT_XX,
+ * RK_FORMAT_XX is shifted to the left by 8 bits to distinguish.  */
+typedef enum _Rga_SURF_FORMAT {
+    RK_FORMAT_RGBA_8888    = 0x0 << 8,  /* [0:31] R:G:B:A 8:8:8:8 little endian */
+    RK_FORMAT_RGBX_8888    = 0x1 << 8,  /* [0:31] R:G:B:X 8:8:8:8 little endian */
+    RK_FORMAT_RGB_888      = 0x2 << 8,  /* [0:23] R:G:B 8:8:8 little endian */
+    RK_FORMAT_BGRA_8888    = 0x3 << 8,  /* [0:31] B:G:R:A 8:8:8:8 little endian */
+    RK_FORMAT_RGB_565      = 0x4 << 8,  /* [0:15] R:G:B 5:6:5 little endian */
+    RK_FORMAT_RGBA_5551    = 0x5 << 8,  /* [0:15] R:G:B:A 5:5:5:1 little endian */
+    RK_FORMAT_RGBA_4444    = 0x6 << 8,  /* [0:15] R:G:B:A 4:4:4:4 little endian */
+    RK_FORMAT_BGR_888      = 0x7 << 8,  /* [0:23] B:G:R 8:8:8 little endian */
+
+    RK_FORMAT_YCbCr_422_SP = 0x8 << 8,  /* 2 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x1 subsampled [0:15] Cb:Cr 8:8 */
+    RK_FORMAT_YCbCr_422_P  = 0x9 << 8,  /* 3 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x1 subsampled [0:7] Cb
+                                         * plane 2: 2x1 subsampled [0:7] Cr */
+    RK_FORMAT_YCbCr_420_SP = 0xa << 8,  /* 2 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x2 subsampled [0:15] Cr:Cb 8:8 */
+    RK_FORMAT_YCbCr_420_P  = 0xb << 8,  /* 3 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x2 subsampled [0:7] Cb
+                                         * plane 2: 2x2 subsampled [0:7] Cr */
+
+    RK_FORMAT_YCrCb_422_SP = 0xc << 8,  /* 2 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x1 subsampled [0:15] Cb:Cr 8:8 */
+    RK_FORMAT_YCrCb_422_P  = 0xd << 8,  /* 3 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x1 subsampled [0:7] Cr
+                                         * plane 2: 2x1 subsampled [0:7] Cb */
+    RK_FORMAT_YCrCb_420_SP = 0xe << 8,  /* 2 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x2 subsampled [0:15] Cb:Cr 8:8 */
+    RK_FORMAT_YCrCb_420_P  = 0xf << 8,  /* 3 plane YCbCr little endian
+                                         * plane 0: [0:7] Y
+                                         * plane 1: 2x2 subsampled [0:7] Cr
+                                         * plane 2: 2x2 subsampled [0:7] Cb */
+
+    RK_FORMAT_BPP1         = 0x10 << 8, /* [0] little endian */
+    RK_FORMAT_BPP2         = 0x11 << 8, /* [0:1] little endian */
+    RK_FORMAT_BPP4         = 0x12 << 8, /* [0:3] little endian */
+    RK_FORMAT_BPP8         = 0x13 << 8, /* [0:7] little endian */
+
+    RK_FORMAT_Y4           = 0x14 << 8, /* [0:3] Y little endian */
+    RK_FORMAT_YCbCr_400    = 0x15 << 8, /* [0:7] Y little endian */
+
+    RK_FORMAT_BGRX_8888    = 0x16 << 8, /* [0:31] B:G:R:X 8:8:8:8 little endian */
+
+    RK_FORMAT_YVYU_422     = 0x18 << 8, /* [0:31] Y0:Cr0:Y1:cb0 8:8:8:8 little endian */
+    RK_FORMAT_YVYU_420     = 0x19 << 8, /* ODD : [0:31] Y0:Cr0:Y1:cb0 8:8:8:8 little endian
+                                         * EVEN: [0:31] Y2:Y3:X:X 8:8:8:8 little endian */
+    RK_FORMAT_VYUY_422     = 0x1a << 8, /* [0:31] Cr0:Y0:Cb0:Y1 8:8:8:8 little endian */
+    RK_FORMAT_VYUY_420     = 0x1b << 8, /* ODD : [0:31] Cr0:Y0:Cb0:Y1 8:8:8:8 little endian
+                                         * EVEN: [0:31] Y2:Y3:X:X 8:8:8:8 little endian */
+    RK_FORMAT_YUYV_422     = 0x1c << 8, /* [0:31] Y0:Cb0:Y1:cr0 8:8:8:8 little endian */
+    RK_FORMAT_YUYV_420     = 0x1d << 8, /* ODD : [0:31] Y0:Cb0:Y1:cr0 8:8:8:8 little endian
+                                         * EVEN: [0:31] Y2:Y3:X:X 8:8:8:8 little endian */
+    RK_FORMAT_UYVY_422     = 0x1e << 8, /* [0:31] Cb0:Y0:Cr0:Y1 8:8:8:8 little endian */
+    RK_FORMAT_UYVY_420     = 0x1f << 8, /* ODD : [0:31] Cb0:Y0:Cr0:Y1 8:8:8:8 little endian
+                                         * EVEN: [0:31] Y2:Y3:X:X 8:8:8:8 little endian */
+
+    RK_FORMAT_YCbCr_420_SP_10B = 0x20 << 8, /* 2 plane YCbCr little endian
+                                             * plane 0: [0:9] Y
+                                             * plane 1: 2x2 subsampled [0:19] Cb:Cr 10: 10 (default)
+                                             * or
+                                             * plane 1: 2x2 subsampled [0:23] Cb:Cr 16: 16 */
+    RK_FORMAT_YCrCb_420_SP_10B = 0x21 << 8, /* 2 plane YCbCr little endian
+                                             * plane 0: [0:9] Y
+                                             * plane 1: 2x2 subsampled [0:19] Cr:Cb 10: 10 (default)
+                                             * or
+                                             * plane 1: 2x2 subsampled [0:23] Cr:Cb 16: 16 */
+    RK_FORMAT_YCbCr_422_SP_10B = 0x22 << 8, /* 2 plane YCbCr little endian
+                                             * plane 0: [0:9] Y
+                                             * plane 1: 2x1 subsampled [0:19] Cb:Cr 10:10  (default)
+                                             * or
+                                             * plane 1: 2x1 subsampled [0:23] Cb:Cr 16: 16 */
+    RK_FORMAT_YCrCb_422_SP_10B = 0x23 << 8, /* 2 plane YCbCr little endian
+                                             * plane 0: [0:9] Y
+                                             * plane 1: 2x1 subsampled [0:19] Cr:Cb 10:10  (default)
+                                             * or
+                                             * plane 1: 2x1 subsampled [0:23] Cr:Cb 16: 16 */
+    /* For compatibility with misspellings */
+    RK_FORMAT_YCbCr_422_10b_SP = RK_FORMAT_YCbCr_422_SP_10B << 8,
+    RK_FORMAT_YCrCb_422_10b_SP = RK_FORMAT_YCrCb_422_SP_10B << 8,
+
+    RK_FORMAT_BGR_565      = 0x24 << 8, /* [0:16] B:G:R 5:6:5 little endian */
+    RK_FORMAT_BGRA_5551    = 0x25 << 8, /* [0:16] B:G:R:A 5:5:5:1 little endian */
+    RK_FORMAT_BGRA_4444    = 0x26 << 8, /* [0:16] B:G:R:A 4:4:4:4 little endian */
+
+    RK_FORMAT_ARGB_8888    = 0x28 << 8, /* [0:31] A:R:G:B 8:8:8:8 little endian */
+    RK_FORMAT_XRGB_8888    = 0x29 << 8, /* [0:31] X:R:G:B 8:8:8:8 little endian */
+    RK_FORMAT_ARGB_5551    = 0x2a << 8, /* [0:16] A:R:G:B 5:5:5:1 little endian */
+    RK_FORMAT_ARGB_4444    = 0x2b << 8, /* [0:16] A:R:G:B 4:4:4:4 little endian */
+    RK_FORMAT_ABGR_8888    = 0x2c << 8, /* [0:31] A:B:G:R 8:8:8:8 little endian */
+    RK_FORMAT_XBGR_8888    = 0x2d << 8, /* [0:31] X:B:G:R 8:8:8:8 little endian */
+    RK_FORMAT_ABGR_5551    = 0x2e << 8, /* [0:16] A:B:G:R 5:5:5:1 little endian */
+    RK_FORMAT_ABGR_4444    = 0x2f << 8, /* [0:16] A:B:G:R 4:4:4:4 little endian */
+
+    RK_FORMAT_RGBA2BPP     = 0x30 << 8, /* [0:1] Color:Alpha 1:1 little endian */
+
+    RK_FORMAT_UNKNOWN      = 0x100 << 8,
+} RgaSURF_FORMAT;
+
+enum {
+    yuv2rgb_mode0            = 0x0,     /* BT.601 MPEG */
+    yuv2rgb_mode1            = 0x1,     /* BT.601 JPEG */
+    yuv2rgb_mode2            = 0x2,     /* BT.709      */
+
+    rgb2yuv_601_full                = 0x1 << 8,
+    rgb2yuv_709_full                = 0x2 << 8,
+    yuv2yuv_601_limit_2_709_limit   = 0x3 << 8,
+    yuv2yuv_601_limit_2_709_full    = 0x4 << 8,
+    yuv2yuv_709_limit_2_601_limit   = 0x5 << 8,
+    yuv2yuv_709_limit_2_601_full    = 0x6 << 8,     //not support
+    yuv2yuv_601_full_2_709_limit    = 0x7 << 8,
+    yuv2yuv_601_full_2_709_full     = 0x8 << 8,     //not support
+    yuv2yuv_709_full_2_601_limit    = 0x9 << 8,     //not support
+    yuv2yuv_709_full_2_601_full     = 0xa << 8,     //not support
+    rgb2yuv_709_limit               = 0xb << 8,
+    yuv2rgb_709_full                = 0xc << 8,     //not support
+    yuv2yuv_601_limit_2_601_full    = 0xd << 8,     //not support
+    yuv2yuv_601_full_2_601_limit    = 0xe << 8,     //not support
+    yuv2yuv_709_limit_2_709_full    = 0xf << 8,     //not support
+    yuv2yuv_709_full_2_709_limit    = 0x10 << 8,     //not support
+    full_csc_mask = 0xf00,
+};
+
+enum {
+    RGA3_SCHEDULER_CORE0    = 1 << 0,
+    RGA3_SCHEDULER_CORE1    = 1 << 1,
+    RGA2_SCHEDULER_CORE0    = 1 << 2,
+};
+
+/* RGA3 rd_mode */
+enum
+{
+    raster_mode             = 0x1 << 0,
+    fbc_mode                = 0x1 << 1,
+    tile_mode               = 0x1 << 2,
+};
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /*_RK29_IPP_DRIVER_H_*/
+
+
+=====================================
+Total files: 15
+Total lines: 1975

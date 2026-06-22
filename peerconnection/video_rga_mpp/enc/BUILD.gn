@@ -1,0 +1,44 @@
+import("../../../../webrtc.gni")
+
+rtc_executable("video_rga_mpp_enc") {
+  testonly = true
+
+  sources = [
+    "main.cc",
+    "../shared/dma_buf_pool.cc",
+    "../shared/dma_buf_pool.h",
+    "../shared/dma_buf_server.cc",
+    "../shared/dma_buf_server.h",
+    "../../client/rk_mpp_codec.cc",
+    "../../client/rk_mpp_codec.h",
+    "../../client/rk_mpp_stubs.cc",
+    "../../client/shm_common.cc",
+    "../../client/shm_common.h",
+  ]
+
+  deps = [
+    "../../../../api/environment",
+    "../../../../api/environment:environment_factory",
+    "../../../../api/video:video_frame",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../api/video_codecs:video_encoder_factory_template",
+    "../../../../api/video_codecs:video_encoder_factory_template_open_h264_adapter",
+    "../../../../modules/video_capture:video_capture_internal_impl",
+    "../../../../modules/video_capture:video_capture_module",
+    "../../../../modules/video_coding:video_codec_interface",
+    "../../../../modules/video_coding:webrtc_h264",
+    "../../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/flags:flag",
+    "//third_party/abseil-cpp/absl/flags:parse",
+  ]
+
+  include_dirs = [
+    "../shared/rga_headers",
+    "../../mpp/inc",
+    "../../mpp/osal/inc",
+    "../../mpp/utils",
+    "../../mpp/mpp/base/inc",
+  ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  libs = [ "dl", "pthread" ]
+}

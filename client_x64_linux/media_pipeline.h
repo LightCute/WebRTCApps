@@ -30,8 +30,6 @@ class MediaPipeline : public IMediaPipeline {
   CreateVideoSource() override;
   webrtc::AudioSourceInterface* CreateAudioSource(
       webrtc::PeerConnectionFactoryInterface* factory) override;
-  std::string GetVideoCapabilities() override;
-  void SetVideoParams(int width, int height, int fps) override;
 
   // ---- Events ----
   using EventCallback = std::function<void(const std::string& json)>;

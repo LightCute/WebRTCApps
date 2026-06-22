@@ -1,0 +1,92 @@
+# Copyright 2026 The WebRTC Project Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license
+# that can be found in the LICENSE file in the root of the source
+# tree. An additional intellectual property rights grant can be found
+# in the file PATENTS.  All contributing project authors may
+# be found in the AUTHORS file in the root of the source tree.
+
+import("//webrtc.gni")
+import("//build/config/android/rules.gni")
+import("//third_party/jni_zero/jni_zero.gni")
+
+rtc_android_apk("client_android") {
+  apk_name = "ClientAndroid"
+  android_manifest = "AndroidManifest.xml"
+  min_sdk_version = 23
+  target_sdk_version = 35
+
+  sources = [
+    "java/org/light/webrtc/MainActivity.java",
+  ]
+
+  deps = [
+    ":resources",
+    "//rtc_base:base_java",
+    "//sdk/android:peerconnection_java",
+  ]
+
+  shared_libraries = [ ":client_android_jni" ]
+}
+
+generate_jni("generated_jni") {
+  sources = [ "java/org/light/webrtc/MainActivity.java" ]
+  namespace = "org_light_webrtc"
+}
+
+rtc_shared_library("client_android_jni") {
+  sources = [
+    "jni/jni_bridge.cc",
+
+    # Reused from ../client/ (compiled directly, not via deps)
+    "../client/peer_connection_client.cc",
+    "../client/peer_connection_client.h",
+    "../client/data_channel_manager.cc",
+    "../client/data_channel_manager.h",
+    "../client/json_helpers.cc",
+    "../client/json_helpers.h",
+    "../client/defaults.cc",
+    "../client/defaults.h",
+  ]
+
+  suppressed_configs += [ "//build/config/android:hide_all_but_jni_onload" ]
+  configs += [ "//build/config/android:hide_all_but_jni" ]
+
+  deps = [
+    ":generated_jni",
+    "//api:create_modular_peer_connection_factory",
+    "//api:data_channel_interface",
+    "//api:jsep",
+    "//api:libjingle_peerconnection_api",
+    "//api:make_ref_counted",
+    "//api:peer_connection_interface",
+    "//api:rtc_error",
+    "//api:scoped_refptr",
+    "//api/task_queue:pending_task_safety_flag",
+    "//api/environment",
+    "//api/environment:environment_factory",
+    "//media:rtc_audio_video",
+    "//pc:libjingle_peerconnection",
+    "//rtc_base:checks",
+    "//rtc_base:logging",
+    "//rtc_base:net_helpers",
+    "//rtc_base:refcount",
+    "//rtc_base:socket",
+    "//rtc_base:socket_address",
+    "//rtc_base:ssl_adapter",
+    "//rtc_base:threading",
+    "//rtc_base:timeutils",
+    "//third_party/jsoncpp",
+  ]
+
+  include_dirs = [ "//" ]
+
+  cflags = [ "-Wno-deprecated-declarations" ]
+}
+
+android_resources("resources") {
+  custom_package = "org.light.webrtc"
+  sources = [
+    "res/layout/activity_main.xml",
+    "res/values/strings.xml",
+  ]
+}
