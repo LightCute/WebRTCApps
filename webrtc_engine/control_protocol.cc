@@ -1,5 +1,5 @@
 // protocol_handler.cc
-#include "apps/webrtc_engine/protocol_handler.h"
+#include "apps/webrtc_engine/control_protocol.h"
 
 #include <sstream>
 
@@ -10,19 +10,19 @@
 #include "json/writer.h"
 #include "rtc_base/logging.h"
 
-ProtocolHandler::ProtocolHandler(IPipeTransport* transport,
+ControlProtocol::ControlProtocol(IPipeTransport* transport,
                                  EngineController* engine)
     : transport_(transport), engine_(engine) {}
 
-void ProtocolHandler::OnLineReceived(const std::string& line) {
+void ControlProtocol::OnLineReceived(const std::string& line) {
   HandleCommand(line);
 }
 
-void ProtocolHandler::SendEvent(const std::string& json) {
+void ControlProtocol::SendEvent(const std::string& json) {
   transport_->Send(json);
 }
 
-void ProtocolHandler::SendResponse(int id, bool ok, const std::string& error) {
+void ControlProtocol::SendResponse(int id, bool ok, const std::string& error) {
   Json::Value resp;
   resp["id"] = id;
   resp["ok"] = ok;
@@ -32,7 +32,7 @@ void ProtocolHandler::SendResponse(int id, bool ok, const std::string& error) {
   transport_->Send(Json::writeString(factory, resp));
 }
 
-void ProtocolHandler::HandleCommand(const std::string& raw_json) {
+void ControlProtocol::HandleCommand(const std::string& raw_json) {
   Json::Value root;
   Json::CharReaderBuilder factory;
   std::string errors;

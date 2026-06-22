@@ -1,6 +1,6 @@
-// protocol_handler.h — JSON-RPC command parser, transport-agnostic.
-#ifndef APPS_WEBRTC_ENGINE_PROTOCOL_HANDLER_H_
-#define APPS_WEBRTC_ENGINE_PROTOCOL_HANDLER_H_
+// control_protocol.h — JSON-RPC command parser, transport-agnostic.
+#ifndef APPS_WEBRTC_ENGINE_CONTROL_PROTOCOL_H_
+#define APPS_WEBRTC_ENGINE_CONTROL_PROTOCOL_H_
 
 #include <functional>
 #include <string>
@@ -8,9 +8,9 @@
 class EngineController;
 class IPipeTransport;
 
-class ProtocolHandler {
+class ControlProtocol {
  public:
-  ProtocolHandler(IPipeTransport* transport, EngineController* engine);
+  ControlProtocol(IPipeTransport* transport, EngineController* engine);
 
   // Called by transport when a complete line arrives.
   void OnLineReceived(const std::string& line);
@@ -29,4 +29,4 @@ class ProtocolHandler {
   EngineController* engine_;
 };
 
-#endif  // APPS_WEBRTC_ENGINE_PROTOCOL_HANDLER_H_
+#endif  // APPS_WEBRTC_ENGINE_CONTROL_PROTOCOL_H_
