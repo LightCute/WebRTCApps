@@ -544,12 +544,10 @@ void MainWindow::startVideoSources() {
     QString rdir = qEnvironmentVariable("WEBRTC_RUNTIME_DIR",
                                         "/tmp/webrtc_runtime");
 
-    local_source_ = new DmaBufVideoSource(
-        rdir + "/shm_video_buf_local", 0x89,
-        rdir + "/shm_video_buf_local_socket", this);
-    remote_source_ = new DmaBufVideoSource(
-        rdir + "/shm_video_buf_remote", 0x8a,
-        rdir + "/shm_video_buf_remote_socket", this);
+    local_source_ = new DmaBufVideoSource(this);
+    local_source_->setSocketPath(rdir + "/shm_video_buf_local_socket");
+    remote_source_ = new DmaBufVideoSource(this);
+    remote_source_->setSocketPath(rdir + "/shm_video_buf_remote_socket");
 
     connect(local_source_, &DmaBufVideoSource::frameReady, this,
             [this](const QImage& f, int w, int h) {
@@ -589,19 +587,19 @@ void MainWindow::startVideoSources() {
     connect(remote_source_, &DmaBufVideoSource::errorOccurred, this,
             [this](const QString& e) { log("Remote video error: " + e); });
 
-    local_source_->start();
-    remote_source_->start();
+    local_source_->Start(rdir + "/shm_video_buf_local", 0x89);
+    remote_source_->Start(rdir + "/shm_video_buf_remote", 0x8a);
     log("Video sources started (DMA-BUF + RGA)");
 }
 
 void MainWindow::stopVideoSources() {
     if (local_source_) {
-        local_source_->stop();
+        local_source_->Stop();
         local_source_->deleteLater();
         local_source_ = nullptr;
     }
     if (remote_source_) {
-        remote_source_->stop();
+        remote_source_->Stop();
         remote_source_->deleteLater();
         remote_source_ = nullptr;
     }
