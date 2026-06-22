@@ -1,4 +1,4 @@
-#include "apps/client_arm64_linux/media_pipeline.h"
+#include "apps/peerconnection/client_arm64/media_pipeline.h"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
@@ -19,7 +19,7 @@
 #include "api/test/create_frame_generator.h"
 #include "api/video/video_sink_interface.h"
 #include "api/video/video_source_interface.h"
-#include "apps/client_arm64_linux/shm_common.h"
+#include "apps/peerconnection/client_arm64/shm_common.h"
 #include "json/json.h"
 #include "modules/video_capture/video_capture.h"
 #include "modules/video_capture/video_capture_factory.h"
