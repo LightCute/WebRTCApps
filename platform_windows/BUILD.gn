@@ -1,0 +1,76 @@
+import("../../webrtc.gni")
+
+if (is_win) {
+  rtc_executable("client_win") {
+    testonly = true
+
+    sources = [
+      "main_win.cc",
+      "pipe_transport_win.cc",
+      "pipe_transport_win.h",
+      "win_shm.cc",
+      "win_shm.h",
+      # Shared media pipeline (采集层 WebRTC 已跨平台)
+      "../client_x64_linux/media_pipeline.cc",
+      "../client_x64_linux/media_pipeline.h",
+      "../client_x64_linux/pc_factory.cc",
+      "../client_x64_linux/pc_factory.h",
+      "../client_x64_linux/pc_factory_x64.cc",
+      "../client_x64_linux/pc_factory_x64.h",
+      "../client_x64_linux/shm_common.cc",
+      "../client_x64_linux/shm_common.h",
+      "../client_x64_linux/shm_video_renderer.cc",
+      "../client_x64_linux/shm_video_renderer.h",
+      "../client_x64_linux/shm_video_writer.cc",
+      "../client_x64_linux/shm_video_writer.h",
+    ]
+
+    deps = [
+      "..//webrtc_engine:webrtc_engine",
+      "../../api:create_frame_generator",
+      "../../api:create_modular_peer_connection_factory",
+      "../../api:data_channel_interface",
+      "../../api:enable_media",
+      "../../api:field_trials",
+      "../../api:jsep",
+      "../../api:make_ref_counted",
+      "../../api:media_stream_interface",
+      "../../api:peer_connection_interface",
+      "../../api:rtc_error",
+      "../../api:scoped_refptr",
+      "../../api/audio:audio_device",
+      "../../api/audio:create_audio_device_module",
+      "../../api/environment",
+      "../../api/environment:environment_factory",
+      "../../api/video:video_frame",
+      "../../api/video_codecs:video_codecs_api",
+      "../../api/video_codecs:video_decoder_factory_template",
+      "../../api/video_codecs:video_decoder_factory_template_dav1d_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_libvpx_vp8_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_libvpx_vp9_adapter",
+      "../../api/video_codecs:video_decoder_factory_template_open_h264_adapter",
+      "../../api/video_codecs:video_encoder_factory_template",
+      "../../api/video_codecs:video_encoder_factory_template_libaom_av1_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_libvpx_vp8_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_libvpx_vp9_adapter",
+      "../../api/video_codecs:video_encoder_factory_template_open_h264_adapter",
+      "../../common_video",
+      "../../media:video_common",
+      "../../modules/audio_device",
+      "../../modules/video_capture:video_capture_module",
+      "../../pc:video_track_source",
+      "../../rtc_base:logging",
+      "../../rtc_base:threading",
+      "../../system_wrappers:system_wrappers",
+      "../../test:frame_generator_capturer",
+      "../../test:platform_video_capturer",
+      "../../test:test_video_capturer",
+      "//third_party/abseil-cpp/absl/flags:flag",
+      "//third_party/abseil-cpp/absl/flags:parse",
+      "//third_party/jsoncpp",
+    ]
+
+    cflags = [ "-Wno-deprecated-declarations" ]
+    libs = [ "ws2_32.lib", "winmm.lib" ]
+  }
+}
