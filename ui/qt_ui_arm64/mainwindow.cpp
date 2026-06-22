@@ -445,6 +445,20 @@ void MainWindow::initConnections() {
     stats_timer_ = new QTimer(this);
     stats_timer_->setInterval(1000);
     connect(stats_timer_, &QTimer::timeout, this, &MainWindow::onUpdateStats);
+
+    // Stats monitoring button
+    connect(ui.stats_monitor_btn_, &QPushButton::clicked, this, [this]() {
+        if (!stats_monitoring_) {
+            channel_->cmdStartStats();
+            stats_monitoring_ = true;
+            ui.stats_monitor_btn_->setText("测量关闭");
+        } else {
+            channel_->cmdStopStats();
+            stats_monitoring_ = false;
+            ui.stats_monitor_btn_->setText("测量启动");
+        }
+    });
+    connect(channel_, &ControlChannel::statsReceived, this, &MainWindow::onStatsReceived);
 }
 
 void MainWindow::onProcessStateChanged(WebRtcProcessManager::State state) {
@@ -624,6 +638,79 @@ void MainWindow::onUpdateStats() {
     remote_frame_count_ = 0;
     local_frame_count_ = 0;
 }
+void MainWindow::onStatsReceived(const QJsonObject& s) {
+    
+
+    auto color = [](double v, double green, double yellow) -> QString {
+        if (v <= green) return "color:#27ae60;";
+        if (v <= yellow) return "color:#f39c12;";
+        return "color:#e74c3c;";
+    };
+    auto setColored = [](QLabel* lb, const QString& text, double val, double green, double yellow) {
+        QString c = (val <= green) ? "color:#27ae60;" : (val <= yellow) ? "color:#f39c12;" : "color:#e74c3c;";
+        lb->setText(text);
+        lb->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    };
+
+    // Connection state
+    QString iceType = s.value("local_cand_type").toString();
+    bool writable = s.value("ice_writable").toBool();
+    if (writable) {
+        ui.stats_conn_->setText(QString("连接: 正常 (%1)").arg(iceType));
+        ui.stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#27ae60;");
+    } else {
+        ui.stats_conn_->setText("连接: 检查中");
+        ui.stats_conn_->setStyleSheet("font-size:11px; padding:1px 2px; color:#f39c12;");
+    }
+
+    // RTT (ms)
+    if (s.contains("rtt_s")) {
+        double rtt = s["rtt_s"].toDouble() * 1000.0;
+        setColored(ui.stats_rtt_, QString("延迟: %1ms").arg(rtt, 0, 'f', 1), rtt, 50, 200);
+    }
+    // Loss rate
+    if (s.contains("loss_rate_pct")) {
+        double loss = s["loss_rate_pct"].toDouble();
+        setColored(ui.stats_loss_, QString("丢包: %1%").arg(loss, 0, 'f', 1), loss, 1, 3);
+    }
+    // Send quality
+    if (s.contains("encode_fps") && s.contains("encode_h")) {
+        int fps = s["encode_fps"].toInt();
+        int w = s["encode_w"].toInt();
+        int h = s["encode_h"].toInt();
+        QString txt = QString("发送: %1×%2 %3fps").arg(w).arg(h).arg(fps);
+        ui.stats_send_quality_->setText(txt);
+        QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_send_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Recv quality
+    if (s.contains("decode_fps") && s.contains("decode_h")) {
+        int fps = s["decode_fps"].toInt();
+        int w = s["decode_w"].toInt();
+        int h = s["decode_h"].toInt();
+        QString txt = QString("接收: %1×%2 %3fps").arg(w).arg(h).arg(fps);
+        ui.stats_recv_quality_->setText(txt);
+        QString c = (fps >= 25) ? "color:#27ae60;" : (fps >= 15) ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_recv_quality_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Send rate
+    if (s.contains("send_kbps")) {
+        int kbps = s["send_kbps"].toInt();
+        int target = s.value("target_kbps").toInt(0);
+        double ratio = target > 0 ? (double)kbps / target : 1.0;
+        QString txt = QString("发送码率: %1kbps").arg(kbps);
+        ui.stats_send_rate_->setText(txt);
+        QString c = (ratio >= 0.8) ? "color:#27ae60;" : (ratio >= 0.5) ? "color:#f39c12;" : "color:#e74c3c;";
+        ui.stats_send_rate_->setStyleSheet("font-size:11px; padding:1px 2px; " + c);
+    }
+    // Recv rate
+    if (s.contains("recv_kbps")) {
+        int kbps = s["recv_kbps"].toInt();
+        ui.stats_recv_rate_->setText(QString("接收码率: %1kbps").arg(kbps));
+        ui.stats_recv_rate_->setStyleSheet("color:#27ae60;");
+    }
+    // Quality limitation reason (the most important diagnostic)
+    if (s.contains("quality_limit")) {
 
 void MainWindow::log(const QString& msg) {
     ui.log_area_->appendPlainText(msg);

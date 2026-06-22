@@ -117,6 +117,8 @@ private:
 
     // Stats
     QTimer* stats_timer_;
+    bool stats_monitoring_ = false;
+    void onStatsReceived(const QJsonObject& stats);
     int remote_width_ = 0, remote_height_ = 0;
     int local_width_ = 0, local_height_ = 0;
     uint64_t remote_frame_count_ = 0;

@@ -29,6 +29,7 @@ HEADERS += \
     mainwindow.h \
     gl_video_widget.h \
     dma_buf_video_source.h \
+    shm_video_source_interface.h \
     dma_buf_reader.h \
     shm_common.h \
     control_channel.h \

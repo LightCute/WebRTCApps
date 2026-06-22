@@ -34,6 +34,8 @@ public:
     int cmdQueryDevices();
     int cmdSetVideoDevice(int device_idx);
     int cmdSetAudioInputDevice(int device_idx);
+    void cmdStartStats();
+    void cmdStopStats();
 
 signals:
     void connected();
@@ -53,6 +55,7 @@ signals:
     void videoDevicesReceived(QList<QPair<int, QString>> devices);
     void audioInputDevicesReceived(QList<QPair<int, QString>> devices);
     void audioOutputDevicesReceived(QList<QPair<int, QString>> devices);
+    void statsReceived(const QJsonObject& stats);
     void errorOccurred(const QString& message);
 
 private slots:

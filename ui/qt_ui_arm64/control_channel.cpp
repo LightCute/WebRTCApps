@@ -128,6 +128,20 @@ int ControlChannel::cmdSendData(const QString& text) {
     return id;
 }
 
+
+void ControlChannel::cmdStartStats() {
+    QJsonObject obj;
+    obj["id"] = next_id_++;
+    obj["cmd"] = "start_stats";
+    sendJson(obj);
+}
+
+void ControlChannel::cmdStopStats() {
+    QJsonObject obj;
+    obj["id"] = next_id_++;
+    obj["cmd"] = "stop_stats";
+    sendJson(obj);
+}
 void ControlChannel::onReadyRead() {
     read_buf_.append(sock_.readAll());
     if (read_buf_.size() > 1 << 20) {
@@ -226,6 +240,8 @@ void ControlChannel::handleEvent(const QJsonObject& event) {
             devices.append({d["idx"].toInt(), d["name"].toString()});
         }
         emit audioOutputDevicesReceived(devices);
+    } else if (evt == "stats") {
+        emit statsReceived(event);
     } else {
         qDebug() << "Unknown event:" << evt;
     }
