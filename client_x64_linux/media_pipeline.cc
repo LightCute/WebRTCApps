@@ -143,50 +143,6 @@ webrtc::AudioSourceInterface* MediaPipeline::CreateAudioSource(
 
 
 
-
-std::string MediaPipeline::GetVideoCapabilities() {
-  Json::Value root;
-  root["event"] = "video_caps";
-  Json::Value caps(Json::arrayValue);
-  auto info = webrtc::VideoCaptureFactory::CreateDeviceInfo();
-  if (!info || info->NumberOfDevices() == 0) {
-    Json::Value c;
-    c["width"] = 640; c["height"] = 480; c["max_fps"] = 30;
-    caps.append(c);
-    root["caps"] = caps;
-    Json::StreamWriterBuilder f; f["indentation"] = "";
-    return Json::writeString(f, root);
-  }
-  int idx = video_device_idx_ >= 0 ? video_device_idx_ : 0;
-  char name[256], guid[256];
-  if (info->GetDeviceName(idx, name, sizeof(name), guid, sizeof(guid)) != 0)
-    idx = 0;
-  int n = info->NumberOfCapabilities(guid);
-  for (int i = 0; i < n && i < 20; i++) {
-    webrtc::VideoCaptureCapability cap;
-    if (info->GetCapability(guid, i, cap) == 0) {
-      Json::Value c;
-      c["width"] = cap.width; c["height"] = cap.height; c["max_fps"] = cap.maxFPS;
-      caps.append(c);
-    }
-  }
-  if (caps.empty()) {
-    Json::Value c;
-    c["width"] = 640; c["height"] = 480; c["max_fps"] = 30;
-    caps.append(c);
-  }
-  root["caps"] = caps;
-  Json::StreamWriterBuilder f; f["indentation"] = "";
-  return Json::writeString(f, root);
-}
-
-void MediaPipeline::SetVideoParams(int width, int height, int fps) {
-  if (!video_source_) return;
-  webrtc::VideoSinkWants wants;
-  wants.max_pixel_count = width * height;
-  wants.max_framerate_fps = fps;
-  video_source_->AddOrUpdateSink(nullptr, wants);
-}
 // ---- Renderers ----
 
 void MediaPipeline::StartLocalRenderer(webrtc::VideoTrackInterface* track) {
