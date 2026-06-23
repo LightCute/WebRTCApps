@@ -54,11 +54,6 @@
         </property>
         <item>
          <widget class="QLabel" name="chat_title_">
-          <property name="font">
-           <weight>75</weight>
-           <pointsize>16</pointsize>
-           <bold>true</bold>
-          </property>
           <property name="text">
            <string>陪护机器人</string>
           </property>
@@ -254,9 +249,6 @@
                </property>
                <item row="1" column="0">
                 <widget class="QLabel" name="stats_loss_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>丢包: --%</string>
                  </property>
@@ -264,9 +256,6 @@
                </item>
                <item row="0" column="0">
                 <widget class="QLabel" name="stats_conn_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>连接: --</string>
                  </property>
@@ -274,9 +263,6 @@
                </item>
                <item row="0" column="1">
                 <widget class="QLabel" name="stats_rtt_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>延迟: --ms</string>
                  </property>
@@ -284,9 +270,6 @@
                </item>
                <item row="1" column="1">
                 <widget class="QLabel" name="stats_limit_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>降质: --</string>
                  </property>
@@ -294,9 +277,6 @@
                </item>
                <item row="2" column="0">
                 <widget class="QLabel" name="stats_send_quality_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>发送: --</string>
                  </property>
@@ -304,9 +284,6 @@
                </item>
                <item row="2" column="1">
                 <widget class="QLabel" name="stats_encode_ms_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>编码: --ms</string>
                  </property>
@@ -314,9 +291,6 @@
                </item>
                <item row="3" column="0">
                 <widget class="QLabel" name="stats_recv_quality_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>接收: --</string>
                  </property>
@@ -324,9 +298,6 @@
                </item>
                <item row="3" column="1">
                 <widget class="QLabel" name="stats_decode_ms_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>解码: --ms</string>
                  </property>
@@ -334,9 +305,6 @@
                </item>
                <item row="4" column="0">
                 <widget class="QLabel" name="stats_send_rate_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>发送码率: --</string>
                  </property>
@@ -344,9 +312,6 @@
                </item>
                <item row="4" column="1">
                 <widget class="QLabel" name="stats_avail_kbps_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>可用带宽: --</string>
                  </property>
@@ -354,9 +319,6 @@
                </item>
                <item row="5" column="0">
                 <widget class="QLabel" name="stats_recv_rate_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>接收码率: --</string>
                  </property>
@@ -364,9 +326,6 @@
                </item>
                <item row="5" column="1">
                 <widget class="QLabel" name="stats_freeze_">
-          <property name="font">
-           <pointsize>12</pointsize>
-          </property>
                  <property name="text">
                   <string>冻结: 0</string>
                  </property>

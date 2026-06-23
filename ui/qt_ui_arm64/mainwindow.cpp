@@ -151,6 +151,10 @@ void MainWindow::initUi() {
     ui.send_button_->setObjectName("sendButton");
     ui.log_area_->setObjectName("logArea");
 
+    // Unified font sizes (Qt5 uic doesn't support <pointsize> in .ui)
+    ui.stats_group_->setStyleSheet("QLabel { font-size: 12px; }");
+    ui.chat_title_->setStyleSheet("font-size: 16px; font-weight: bold;");
+
     // ---- Toolbar ----
     toolbar_ = addToolBar("Main");
     toolbar_->setMovable(false);
@@ -475,7 +479,9 @@ void MainWindow::initConnections() {
         ui.chat_list_input_->clear();
         ui.chat_list_input_->setFocus();
     });
-    connect(ui.chat_list_input_, &QLineEdit::returnPressed, ui.send_list_btn_, &QPushButton::clicked);
+    connect(ui.chat_list_input_, &QLineEdit::returnPressed, this, [this]() {
+        ui.send_list_btn_->clicked();
+    });
 
     // Stats timer
     stats_timer_ = new QTimer(this);
