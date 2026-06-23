@@ -258,6 +258,8 @@ void MainWindow::initConnections() {
         switchToListMode();
         ui.chat_input_->setEnabled(false);
         ui.send_button_->setEnabled(false);
+        ui.chat_list_input_->setEnabled(false);
+        ui.send_list_btn_->setEnabled(false);
 
         bool was_first = first_connect_;
         first_connect_ = true; // force auto-reconnect after restart
@@ -281,11 +283,11 @@ void MainWindow::initConnections() {
         bool open = (state == "open");
         ui.chat_input_->setEnabled(open);
         ui.send_button_->setEnabled(open);
-        if (open) chatLog("--- DataChannel open ---");
+        if (open) ui.chat_display_->appendPlainText("--- DataChannel open ---");
     });
     connect(channel_, &ControlChannel::dataReceived, this,
             [this](const QString& text) {
-        chatLog("Peer: " + text);
+        ui.chat_display_->appendPlainText("Peer: " + text);
         handleRemoteKey(text);
         if (text == "AI:ON:yolov5") {
             stopAi();
@@ -465,6 +467,15 @@ void MainWindow::initConnections() {
     // DataChannel send
     connect(ui.send_button_, &QPushButton::clicked, this, &MainWindow::doSendMessage);
     connect(ui.chat_input_, &QLineEdit::returnPressed, this, &MainWindow::doSendMessage);
+    connect(ui.send_list_btn_, &QPushButton::clicked, this, [this]() {
+        QString text = ui.chat_list_input_->text().trimmed();
+        if (text.isEmpty()) return;
+        channel_->cmdSendData(text);
+        ui.chat_display_->appendPlainText("Me: " + text);
+        ui.chat_list_input_->clear();
+        ui.chat_list_input_->setFocus();
+    });
+    connect(ui.chat_list_input_, &QLineEdit::returnPressed, ui.send_list_btn_, &QPushButton::clicked);
 
     // Stats timer
     stats_timer_ = new QTimer(this);
@@ -697,7 +708,7 @@ void MainWindow::doSendMessage() {
     QString text = ui.chat_input_->text().trimmed();
     if (text.isEmpty()) return;
     channel_->cmdSendData(text);
-    chatLog("Me: " + text);
+    ui.chat_display_->appendPlainText("Me: " + text);
     ui.chat_input_->clear();
     ui.chat_input_->setFocus();
 }
@@ -830,7 +841,7 @@ void MainWindow::log(const QString& msg) {
 }
 
 void MainWindow::chatLog(const QString& msg) {
-    ui.chat_display_->appendPlainText(msg);
+    ui.chat_list_->appendPlainText(msg);
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
@@ -1000,6 +1011,8 @@ void MainWindow::toggleVoiceChat()
         voice_mgr_->start(vc_socket);
         voice_chat_running_ = true;
         action_voice_chat_->setText("停止语音");
+        ui.chat_list_input_->setEnabled(true);
+        ui.send_list_btn_->setEnabled(true);
         QTimer::singleShot(500, this, [this]() {
             voice_client_->connectToServer();
         });
@@ -1016,6 +1029,8 @@ void MainWindow::stopVoiceChat()
     voice_chat_running_ = false;
     action_voice_chat_->setText("语音对话");
     action_voice_chat_->setEnabled(false);
+    ui.chat_list_input_->setEnabled(false);
+    ui.send_list_btn_->setEnabled(false);
     updateVoiceChatEnabled();
     log("Voice chat stopped");
 }

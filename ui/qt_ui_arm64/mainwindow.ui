@@ -53,6 +53,84 @@
          <number>0</number>
         </property>
         <item>
+         <widget class="QLabel" name="chat_title_">
+          <property name="font">
+           <weight>75</weight>
+           <pointsize>16</pointsize>
+           <bold>true</bold>
+          </property>
+          <property name="text">
+           <string>陪护机器人</string>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignmentFlag::AlignCenter</set>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPlainTextEdit" name="chat_list_">
+          <property name="minimumSize">
+           <size>
+            <width>0</width>
+            <height>250</height>
+           </size>
+          </property>
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="placeholderText">
+           <string>语音对话消息...</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QWidget" name="chatListInputRow" native="true">
+          <layout class="QHBoxLayout" name="chatListInputLayout">
+           <property name="spacing">
+            <number>4</number>
+           </property>
+           <property name="leftMargin">
+            <number>0</number>
+           </property>
+           <property name="topMargin">
+            <number>0</number>
+           </property>
+           <property name="rightMargin">
+            <number>0</number>
+           </property>
+           <property name="bottomMargin">
+            <number>0</number>
+           </property>
+           <item>
+            <widget class="QLineEdit" name="chat_list_input_">
+             <property name="enabled">
+              <bool>false</bool>
+             </property>
+             <property name="placeholderText">
+              <string>输入消息...</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="send_list_btn_">
+             <property name="enabled">
+              <bool>false</bool>
+             </property>
+             <property name="maximumSize">
+              <size>
+               <width>80</width>
+               <height>16777215</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>发送</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item>
          <widget class="QTreeWidget" name="peer_tree_">
           <property name="maximumSize">
            <size>
@@ -176,6 +254,9 @@
                </property>
                <item row="1" column="0">
                 <widget class="QLabel" name="stats_loss_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>丢包: --%</string>
                  </property>
@@ -183,6 +264,9 @@
                </item>
                <item row="0" column="0">
                 <widget class="QLabel" name="stats_conn_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>连接: --</string>
                  </property>
@@ -190,6 +274,9 @@
                </item>
                <item row="0" column="1">
                 <widget class="QLabel" name="stats_rtt_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>延迟: --ms</string>
                  </property>
@@ -197,6 +284,9 @@
                </item>
                <item row="1" column="1">
                 <widget class="QLabel" name="stats_limit_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>降质: --</string>
                  </property>
@@ -204,6 +294,9 @@
                </item>
                <item row="2" column="0">
                 <widget class="QLabel" name="stats_send_quality_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>发送: --</string>
                  </property>
@@ -211,6 +304,9 @@
                </item>
                <item row="2" column="1">
                 <widget class="QLabel" name="stats_encode_ms_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>编码: --ms</string>
                  </property>
@@ -218,6 +314,9 @@
                </item>
                <item row="3" column="0">
                 <widget class="QLabel" name="stats_recv_quality_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>接收: --</string>
                  </property>
@@ -225,6 +324,9 @@
                </item>
                <item row="3" column="1">
                 <widget class="QLabel" name="stats_decode_ms_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>解码: --ms</string>
                  </property>
@@ -232,6 +334,9 @@
                </item>
                <item row="4" column="0">
                 <widget class="QLabel" name="stats_send_rate_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>发送码率: --</string>
                  </property>
@@ -239,6 +344,9 @@
                </item>
                <item row="4" column="1">
                 <widget class="QLabel" name="stats_avail_kbps_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>可用带宽: --</string>
                  </property>
@@ -246,6 +354,9 @@
                </item>
                <item row="5" column="0">
                 <widget class="QLabel" name="stats_recv_rate_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>接收码率: --</string>
                  </property>
@@ -253,6 +364,9 @@
                </item>
                <item row="5" column="1">
                 <widget class="QLabel" name="stats_freeze_">
+          <property name="font">
+           <pointsize>12</pointsize>
+          </property>
                  <property name="text">
                   <string>冻结: 0</string>
                  </property>
