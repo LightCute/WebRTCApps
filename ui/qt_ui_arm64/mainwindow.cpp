@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QSplitter>
 #include <QDateTime>
 #include <QDebug>
 
@@ -556,6 +557,42 @@ void MainWindow::onPeerDoubleClicked(QTreeWidgetItem* item, int column) {
     doCall(peer_id);
 }
 
+bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == remote_container_ && event->type() == QEvent::Resize) {
+        int cw = remote_container_->width();
+        int ch = remote_container_->height();
+
+        // --- PIP (local_video_) ---
+        constexpr double PIP_SCALE = 0.22;
+        constexpr int PIP_MIN_W = 160;
+        constexpr int PIP_MAX_W = 480;
+        constexpr int PIP_MARGIN = 16;
+
+        int pip_w = qBound(PIP_MIN_W, int(cw * PIP_SCALE), PIP_MAX_W);
+        int pip_h = pip_w * 3 / 4;
+        int pip_x = cw - pip_w - PIP_MARGIN;
+        int pip_y = PIP_MARGIN;
+
+        QRect currentGeo = local_video_->geometry();
+        if (currentGeo.x() != pip_x || currentGeo.y() != pip_y ||
+            currentGeo.width() != pip_w || currentGeo.height() != pip_h) {
+            local_video_->setGeometry(pip_x, pip_y, pip_w, pip_h);
+        }
+
+        // --- stats_label_ ---
+        constexpr int STATS_W = 420;
+        constexpr int STATS_H = 28;
+        constexpr int STATS_BOTTOM_MARGIN = 8;
+        int stats_x = (cw - STATS_W) / 2;
+        int stats_y = ch - STATS_H - STATS_BOTTOM_MARGIN;
+        stats_label_->setGeometry(stats_x, stats_y, STATS_W, STATS_H);
+
+        local_video_->raise();
+        stats_label_->raise();
+    }
+    return QMainWindow::eventFilter(obj, event);
+}
+
 void MainWindow::doCall(int peer_id) {
     stopVoiceChat();
     channel_->cmdCall(peer_id);
@@ -575,7 +612,18 @@ void MainWindow::switchToCallMode() {
     ui.stack_->setCurrentIndex(1);
     centralWidget()->layout()->setContentsMargins(0, 0, 0, 0);
     ui.log_area_->setVisible(false);
+    stats_label_->show();
+    stats_label_->raise();
     stats_timer_->start();
+    // Force initial 80:20 splitter ratio after layout recalculation.
+    QTimer::singleShot(0, this, [this]() {
+        auto* sp = centralWidget()->findChild<QSplitter*>("callSplitter");
+        if (!sp) return;
+        int totalW = sp->width();
+        if (totalW > 0) {
+            sp->setSizes({totalW * 80 / 100, totalW * 20 / 100});
+        }
+    });
 }
 
 void MainWindow::startVideoSources() {
