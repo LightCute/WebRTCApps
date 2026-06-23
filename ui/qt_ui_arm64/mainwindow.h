@@ -91,6 +91,11 @@ private:
     DmaBufVideoSource* remote_source_ = nullptr;
     SerialWorker* serial_ = nullptr;
 
+    // Programmatic overlay widgets (not in .ui)
+    QWidget* remote_container_ = nullptr;
+    GlVideoWidget* local_video_ = nullptr;
+    QLabel* stats_label_ = nullptr;
+
     // AI detection
     AiReceiver* ai_receiver_ = nullptr;
     QProcess* ai_proc_ = nullptr;

@@ -10,29 +10,21 @@ extern "C" {
 #include "drmrga.h"
 }
 
-DmaBufVideoSource::DmaBufVideoSource(QObject* parent)
-    : IShmVideoSource(parent) {}
+DmaBufVideoSource::DmaBufVideoSource(const QString& ctrl_shm_path,
+                                     int proj_id, const QString& socket_path,
+                                     QObject* parent)
+    : QObject(parent), ctrl_shm_path_(ctrl_shm_path),
+      socket_path_(socket_path), proj_id_(proj_id) {}
 
 DmaBufVideoSource::~DmaBufVideoSource() {
-    Stop();
+    stop();
     if (rga_lib_) dlclose(rga_lib_);
 }
 
-bool DmaBufVideoSource::Start(const QString& key, int proj_id) {
-    if (running_) return false;
-    ctrl_shm_path_ = key;
-    proj_id_ = proj_id;
+void DmaBufVideoSource::start() {
+    if (running_) return;
     stop_requested_ = false;
     tryInit();
-    return true;
-}
-
-void DmaBufVideoSource::Stop() {
-    stop_requested_ = true;
-    if (!running_) return;
-    running_ = false;
-    if (reader_) reader_->RequestStop();
-    if (thread_) thread_->wait(5000);
 }
 
 void DmaBufVideoSource::tryInit() {
@@ -61,12 +53,21 @@ void DmaBufVideoSource::tryInit() {
     QTimer::singleShot(500, this, &DmaBufVideoSource::tryInit);
 }
 
+void DmaBufVideoSource::stop() {
+    stop_requested_ = true;
+    if (!running_) return;
+    running_ = false;
+    if (reader_) reader_->RequestStop();
+    if (thread_) thread_->wait(5000);
+}
+
 void DmaBufVideoSource::readLoop() {
     while (running_) {
         VideoFrameHead head;
         const uint8_t* i420_ptr = nullptr;
 
         if (!reader_->ReadFrame(head, i420_ptr)) {
+            // Timeout or wake-up: retry unless stop was requested
             continue;
         }
 
@@ -81,21 +82,29 @@ void DmaBufVideoSource::readLoop() {
             memset(&src, 0, sizeof(src));
             src.virAddr = const_cast<uint8_t*>(i420_ptr);
             src.format = RK_FORMAT_YCbCr_420_P;
-            src.rect.xoffset = 0; src.rect.yoffset = 0;
-            src.rect.width = w; src.rect.height = h;
-            src.rect.wstride = w; src.rect.hstride = h;
+            src.rect.xoffset = 0;
+            src.rect.yoffset = 0;
+            src.rect.width = w;
+            src.rect.height = h;
+            src.rect.wstride = w;
+            src.rect.hstride = h;
             src.rect.format = RK_FORMAT_YCbCr_420_P;
-            src.mmuFlag = 1; src.sync_mode = 0;
+            src.mmuFlag = 1;
+            src.sync_mode = 0;
 
             rga_info_t dst;
             memset(&dst, 0, sizeof(dst));
             dst.virAddr = bgra_buf_.data();
             dst.format = RK_FORMAT_BGRA_8888;
-            dst.rect.xoffset = 0; dst.rect.yoffset = 0;
-            dst.rect.width = w; dst.rect.height = h;
-            dst.rect.wstride = w; dst.rect.hstride = h;
+            dst.rect.xoffset = 0;
+            dst.rect.yoffset = 0;
+            dst.rect.width = w;
+            dst.rect.height = h;
+            dst.rect.wstride = w;
+            dst.rect.hstride = h;
             dst.rect.format = RK_FORMAT_BGRA_8888;
-            dst.mmuFlag = 1; dst.sync_mode = 0;
+            dst.mmuFlag = 1;
+            dst.sync_mode = 0;
 
             if (rga_blit_(&src, &dst, nullptr) != 0)
                 rga_loaded_ = false;
@@ -112,8 +121,7 @@ void DmaBufVideoSource::readLoop() {
         }
 
         QImage img(bgra_buf_.data(), w, h, QImage::Format_ARGB32);
-        emit frameReady(img.copy());              // IShmVideoSource signal
-        emit frameReady(img.copy(), w, h);        // ARM64 extended signal
+        emit frameReady(img.copy(), w, h);
     }
     running_ = false;
 }

@@ -178,16 +178,7 @@ bool WebRTCEngine::Init() {
 
 void WebRTCEngine::Shutdown() {
   signaling_->SignOut();
-  DeletePeerConnection();
-
-  // Clean up pending messages.
-  while (!pending_messages_.empty()) {
-    delete pending_messages_.front();
-    pending_messages_.pop_front();
-  }
-
-  if (pipeline_)
-    pipeline_->Shutdown();
+  DeletePeerConnection();  // cleans up pipeline, dc_manager, peer_connection
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -471,26 +462,17 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     int saved_port = server_port_;
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
-    auto adm = pipeline_->adm();
     pipeline_->Shutdown();
     dc_manager_->Shutdown();
     peer_id_ = -1;
     loopback_ = false;
     signaling_->Close();
-    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
-                                  adm = std::move(adm)]() mutable {
+    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
         pending_messages_.pop_front();
       }
-      // Stop ADM asynchronously — the worker thread handles it.
-      if (adm && worker_thread_) {
-        worker_thread_->PostTask([adm]() mutable {
-          if (adm->Playing()) adm->StopPlayout();
-          if (adm->Recording()) adm->StopRecording();
-          adm = nullptr;
-        });
-      }
+      // ADM already stopped by pipeline_->Shutdown() above.
       pc->Close();
       pc = nullptr;
       f = nullptr;
@@ -733,9 +715,12 @@ void WebRTCEngine::DeletePeerConnection() {
     delete pending_messages_.front();
     pending_messages_.pop_front();
   }
-  pipeline_->Shutdown();
-  dc_manager_->Shutdown();
-  peer_connection_->Close();
+  if (pipeline_)
+    pipeline_->Shutdown();
+  if (dc_manager_)
+    dc_manager_->Shutdown();
+  if (peer_connection_)
+    peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
   peer_id_ = -1;
