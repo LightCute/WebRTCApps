@@ -286,9 +286,9 @@ void MainWindow::initConnections() {
     });
     connect(channel_, &ControlChannel::dataReceived, this,
             [this](const QString& text) {
-        if (handleRemoteKey(text))
-            return;  // motion command — handled, skip chat/AI
         ui.chat_display_->appendPlainText("Peer: " + text);
+        if (handleRemoteKey(text))
+            return;  // motion command — handled, skip rest
         if (text == "AI:ON:yolov5") {
             stopAi();
             if (startAi(AiType::YoloV5)) {
