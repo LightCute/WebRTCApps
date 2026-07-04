@@ -59,7 +59,7 @@ private:
     void doCall(int peer_id);
     void doSendMessage();
     void onUpdateStats();
-    void handleRemoteKey(const QString& key);
+    bool handleRemoteKey(const QString& text);
     void sendSerialJson(const QString& json);
     void startKeyRepeat();
     void stopKeyRepeat();

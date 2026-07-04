@@ -1,4 +1,9 @@
-# RK3588 ↔ MCU 串口通信协议
+# RK3588 ↔ MCU 串口通信协议 v2
+
+> **v2 变更** (2026-07-04): PC 端事件驱动 + 结构化指令。
+> v=0.5 不再硬编码——PC 端调速滑块决定速度系数；MCU 端仅做看门狗安全保护。
+> 新增 `move_ptz` 合并指令支持组合键，新增 `ptz_home` 云台归位，新增 `stop` 显式停止。
+> 看门狗从 100ms 延长到 300ms。
 
 ## 物理层
 
@@ -23,57 +28,76 @@
 
 **校验**：`XOR = LEN ^ payload[0] ^ payload[1] ^ ... ^ payload[LEN-1]`
 
-## RK3588 → MCU 命令
+## RK3588 → MCU 命令 (v2)
 
-### 底盘控制 (WASD)
+### 命令类型
 
-| 按键 | 动作 | JSON |
-|------|------|------|
-| W | 前进 | `{"cmd":"move","v":0.5,"w":0}` |
-| S | 后退 | `{"cmd":"move","v":-0.3,"w":0}` |
-| A | 左转 | `{"cmd":"move","v":0,"w":0.8}` |
-| D | 右转 | `{"cmd":"move","v":0,"w":-0.8}` |
+| cmd | 触发条件 | 示例 |
+|-----|---------|------|
+| `move` | 仅底盘键按下 | `{"cmd":"move","v":0.5,"w":0}` |
+| `ptz` | 仅云台键按下 | `{"cmd":"ptz","pan":0,"tilt":0.5}` |
+| `move_ptz` | 底盘+云台同时按 | `{"cmd":"move_ptz","v":0.5,"w":0.2,"pan":0,"tilt":0.5}` |
+| `ptz_home` | 按 H 键 | `{"cmd":"ptz_home"}` |
+| `stop` | 所有键松开 | `{"cmd":"stop"}` |
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| cmd | string | 固定 "move" |
-| v | float | 线速度 -1~1 (正=前进) |
-| w | float | 角速度 -1~1 (正=左转) |
+### 字段说明
 
-### 云台控制 (↑↓←→)
+| 字段 | 类型 | cmd | 说明 |
+|------|------|-----|------|
+| cmd | string | 全部 | 命令类型标识 |
+| v | float | move, move_ptz | 线速度 -1..1 (正=前进) |
+| w | float | move, move_ptz | 角速度 -1..1 (正=左转) |
+| pan | float | ptz, move_ptz | 水平转角 -1..1 (正=右) |
+| tilt | float | ptz, move_ptz | 垂直转角 -1..1 (正=上) |
 
-| 按键 | 动作 | JSON |
-|------|------|------|
-| ↑ | 上仰 | `{"cmd":"ptz","pan":0,"tilt":0.5}` |
-| ↓ | 下俯 | `{"cmd":"ptz","pan":0,"tilt":-0.5}` |
-| ← | 左转 | `{"cmd":"ptz","pan":-0.5,"tilt":0}` |
-| → | 右转 | `{"cmd":"ptz","pan":0.5,"tilt":0}` |
+### 按键映射
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| cmd | string | 固定 "ptz" |
-| pan | float | 水平转角 -1~1 (正=右) |
-| tilt | float | 垂直转角 -1~1 (正=上) |
+| 按键 | 功能 |
+|------|------|
+| W / ↑ | 底盘前进 |
+| S / ↓ | 底盘后退 |
+| A / ← | 底盘左转 |
+| D / → | 底盘右转 |
+| I | 云台上仰 |
+| K | 云台下俯 |
+| J | 云台左转 |
+| L | 云台右转 |
+| H | 云台归位 |
 
-## MCU 控制逻辑
+- PC 端调速滑块控制速度系数 (0.1~1.0)，MCU 无需关心
+- 组合键 (W+J) → `move_ptz`，同时控制底盘和云台
+- 按下立刻发第一条指令，按住期间每 80ms 重发保活
+- 松开最后一个键立刻发 `stop`
 
-RK3588 按住按键时每 **100ms** 重复发送一帧。MCU 收到帧后：
+## MCU 控制逻辑 (v2)
 
-1. 解析 JSON，判断 cmd 类型
-2. `move` → `set_motors(v, w)`，驱动底盘
-3. `ptz` → `set_ptz(pan, tilt)`，驱动云台舵机
-4. 启动 **100ms 硬件定时器**
-5. 定时器到期 → 停止底盘+云台
+MCU 收到帧后：
 
-**关键**: MCU 每次收到新帧，重置定时器。按键松开后 RK3588 不再发送帧，MCU 定时器到期自动停。
+1. 解析 JSON，获取 cmd 字段
+2. `move` → `set_motors(v, w)`
+3. `ptz` → `set_ptz(pan, tilt)`
+4. `move_ptz` → `set_motors(v, w)` + `set_ptz(pan, tilt)`
+5. `ptz_home` → `servo_home()` (pan/tilt 回中位)
+6. `stop` → `set_motors(0, 0)` + `set_ptz(0, 0)`
+7. 启动 **300ms 硬件看门狗**
+8. 看门狗到期 → 停止底盘+云台
+
+**变更**: 看门狗从 100ms 延长到 **300ms**（PC 端 80ms 保活间隔 × 3 余量，网络抖动容忍度更高）。
 
 ```
 MCU 伪代码:
   on_frame_received(json):
-      cmd = parse(json)
-      if cmd == "move":  set_motors(v, w)
-      if cmd == "ptz":   set_ptz(pan, tilt)
-      restart_timer(100ms)
+      cmd = json["cmd"]
+      if cmd == "move" or cmd == "move_ptz":
+          set_motors(json["v"], json["w"])
+      if cmd == "ptz" or cmd == "move_ptz":
+          set_ptz(json["pan"], json["tilt"])
+      if cmd == "stop":
+          set_motors(0, 0)
+          set_ptz(0, 0)
+      if cmd == "ptz_home":
+          servo_home()
+      restart_timer(300ms)
 
   on_timer_expired():
       set_motors(0, 0)
@@ -85,14 +109,15 @@ MCU 伪代码:
 成功：`{"ack":"ok"}`  
 错误：`{"ack":"err","msg":"checksum"}` / `{"ack":"err","msg":"json"}` / `{"ack":"err","msg":"len"}`
 
-## 接收参考实现 (C)
+## 接收参考实现 (C) — v2
 
 ```c
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
-// ── 状态机 ──
+// ── 状态机 (不变) ──
 enum { WAIT_H1, WAIT_H2, WAIT_LEN, WAIT_DATA, WAIT_XOR, WAIT_CR, WAIT_LF };
 static int  rx_state = WAIT_H1;
 static uint8_t rx_buf[256];
@@ -134,22 +159,51 @@ void uart_rx_byte(uint8_t byte) {
     }
 }
 
-// ── 帧处理 ──
+// ── 帧处理 (v2: cmd 类型驱动) ──
 static int motion_timer_running = 0;
 
+// 简单的 JSON 字段提取 (避免引入完整 JSON 库)
+static float json_get_float(const char* json, const char* key) {
+    char search[32];
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    const char* p = strstr(json, search);
+    return p ? atof(p + strlen(search)) : 0.0f;
+}
+
 void handle_frame(char* json) {
-    float v = 0, w = 0, pan = 0, tilt = 0;
-    char* p;
-    p = strstr(json, "\"v\":");    if (p) v    = atof(p + 4);
-    p = strstr(json, "\"w\":");    if (p) w    = atof(p + 4);
-    p = strstr(json, "\"pan\":");  if (p) pan  = atof(p + 6);
-    p = strstr(json, "\"tilt\":"); if (p) tilt = atof(p + 7);
+    // 先判断 cmd (简单字符串匹配，无需完整 JSON 解析)
+    int is_move = (strstr(json, "\"move\"") != NULL);
+    int is_ptz  = (strstr(json, "\"ptz\"") != NULL);
+    int is_stop = (strstr(json, "\"stop\"") != NULL);
+    int is_home = (strstr(json, "\"ptz_home\"") != NULL);
 
-    if (strstr(json, "\"move\"")) set_motors(v, w);
-    if (strstr(json, "\"ptz\""))  set_ptz(pan, tilt);
+    if (is_stop) {
+        set_motors(0, 0);
+        set_ptz(0, 0);
+        if (motion_timer_running) { timer_stop(); motion_timer_running = 0; }
+        return;
+    }
 
-    if (motion_timer_running) timer_reset();
-    else { timer_start(100); motion_timer_running = 1; }
+    if (is_home) {
+        servo_home();  // pan=1500us, tilt=1500us
+        return;
+    }
+
+    if (is_move) {
+        float v = json_get_float(json, "v");
+        float w = json_get_float(json, "w");
+        set_motors(v, w);
+    }
+    if (is_ptz) {
+        float pan  = json_get_float(json, "pan");
+        float tilt = json_get_float(json, "tilt");
+        set_ptz(pan, tilt);
+    }
+
+    if (is_move || is_ptz) {
+        if (motion_timer_running) timer_reset();
+        else { timer_start(300); motion_timer_running = 1; }
+    }
 }
 
 void on_motion_timer_expired() {
@@ -158,7 +212,27 @@ void on_motion_timer_expired() {
     motion_timer_running = 0;
 }
 
-// ── 应答 ──
+// ── 云台归位 ──
+void servo_home(void) {
+    servo_set(SERVO_PAN,  1500);   // 中位
+    servo_set(SERVO_TILT, 1500);
+}
+
+// ── 驱动参考 (不变) ──
+void set_motors(float v, float w) {
+    float left  = v * 100.0f - w * 50.0f;
+    float right = v * 100.0f + w * 50.0f;
+    #define CLAMP(x) ((x) > 100 ? 100 : ((x) < -100 ? -100 : (x)))
+    motor_set(MOTOR_LEFT,  CLAMP(left));
+    motor_set(MOTOR_RIGHT, CLAMP(right));
+}
+
+void set_ptz(float pan, float tilt) {
+    servo_set(SERVO_PAN,  1500 + (int)(pan  * 500));
+    servo_set(SERVO_TILT, 1500 + (int)(tilt * 500));
+}
+
+// ── 应答 (不变) ──
 static void send_frame(const char* payload) {
     int len = strlen(payload);
     uint8_t x = (uint8_t)len;
@@ -175,24 +249,5 @@ void reply_err(const char* why) {
 }
 ```
 
-## 驱动参考
 
-### 底盘 (差速)
-```c
-void set_motors(float v, float w) {
-    float left  = v * 100.0f - w * 50.0f;
-    float right = v * 100.0f + w * 50.0f;
-    #define CLAMP(x) ((x) > 100 ? 100 : ((x) < -100 ? -100 : (x)))
-    motor_set(MOTOR_LEFT,  CLAMP(left));
-    motor_set(MOTOR_RIGHT, CLAMP(right));
-}
-```
 
-### 云台 (舵机)
-```c
-void set_ptz(float pan, float tilt) {
-    // 1500us = 中位, ±500us = 满偏
-    servo_set(SERVO_PAN,  1500 + (int)(pan  * 500));
-    servo_set(SERVO_TILT, 1500 + (int)(tilt * 500));
-}
-```

@@ -80,21 +80,16 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::toggleVoiceChat);
 
     key_timer_ = new QTimer(this);
-    key_timer_->setInterval(100);
+    key_timer_->setInterval(80);
     connect(key_timer_, &QTimer::timeout, this, [this]() {
-        const char* data = nullptr;
-        if (held_key_ == Qt::Key_W)      data = "w";
-        else if (held_key_ == Qt::Key_A) data = "a";
-        else if (held_key_ == Qt::Key_S) data = "s";
-        else if (held_key_ == Qt::Key_D) data = "d";
-        else if (held_key_ == Qt::Key_Up)    data = "i";
-        else if (held_key_ == Qt::Key_Left)  data = "j";
-        else if (held_key_ == Qt::Key_Down)  data = "k";
-        else if (held_key_ == Qt::Key_Right) data = "l";
-        if (data) {
-            channel_->cmdSendData(QString(data));
-            handleRemoteKey(QString(data));
-        }
+        if (held_key_ == Qt::Key_W)      sendSerialJson("{\"cmd\":\"move\",\"v\":0.5,\"w\":0}");
+        else if (held_key_ == Qt::Key_A) sendSerialJson("{\"cmd\":\"move\",\"v\":0,\"w\":0.8}");
+        else if (held_key_ == Qt::Key_S) sendSerialJson("{\"cmd\":\"move\",\"v\":-0.3,\"w\":0}");
+        else if (held_key_ == Qt::Key_D) sendSerialJson("{\"cmd\":\"move\",\"v\":0,\"w\":-0.8}");
+        else if (held_key_ == Qt::Key_Up)    sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0,\"tilt\":0.5}");
+        else if (held_key_ == Qt::Key_Down)  sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0,\"tilt\":-0.5}");
+        else if (held_key_ == Qt::Key_Left)  sendSerialJson("{\"cmd\":\"ptz\",\"pan\":-0.5,\"tilt\":0}");
+        else if (held_key_ == Qt::Key_Right) sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0.5,\"tilt\":0}");
     });
 
     log("Starting WebRTC daemon...");
@@ -291,8 +286,9 @@ void MainWindow::initConnections() {
     });
     connect(channel_, &ControlChannel::dataReceived, this,
             [this](const QString& text) {
+        if (handleRemoteKey(text))
+            return;  // motion command — handled, skip chat/AI
         ui.chat_display_->appendPlainText("Peer: " + text);
-        handleRemoteKey(text);
         if (text == "AI:ON:yolov5") {
             stopAi();
             if (startAi(AiType::YoloV5)) {
@@ -870,15 +866,20 @@ void MainWindow::keyReleaseEvent(QKeyEvent* event) {
 void MainWindow::startKeyRepeat() { key_timer_->start(); }
 void MainWindow::stopKeyRepeat() { held_key_ = 0; key_timer_->stop(); }
 
-void MainWindow::handleRemoteKey(const QString& key) {
-    if (key == "w")      sendSerialJson("{\"cmd\":\"move\",\"v\":0.5,\"w\":0}");
-    else if (key == "a") sendSerialJson("{\"cmd\":\"move\",\"v\":0,\"w\":0.8}");
-    else if (key == "s") sendSerialJson("{\"cmd\":\"move\",\"v\":-0.3,\"w\":0}");
-    else if (key == "d") sendSerialJson("{\"cmd\":\"move\",\"v\":0,\"w\":-0.8}");
-    else if (key == "i") sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0,\"tilt\":0.5}");
-    else if (key == "j") sendSerialJson("{\"cmd\":\"ptz\",\"pan\":-0.5,\"tilt\":0}");
-    else if (key == "k") sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0,\"tilt\":-0.5}");
-    else if (key == "l") sendSerialJson("{\"cmd\":\"ptz\",\"pan\":0.5,\"tilt\":0}");
+bool MainWindow::handleRemoteKey(const QString& text) {
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return false;  // not JSON — treat as chat/AI message
+
+    QJsonObject obj = doc.object();
+    QString cmd = obj["cmd"].toString();
+    if (cmd == "move" || cmd == "ptz" || cmd == "move_ptz" ||
+        cmd == "ptz_home" || cmd == "stop") {
+        sendSerialJson(text);  // forward to MCU as-is
+        return true;
+    }
+    return false;  // JSON but not a motion command — treat as chat/AI
 }
 
 void MainWindow::sendSerialJson(const QString& json) {
