@@ -1062,13 +1062,13 @@ void MainWindow::onTrackingTimer() {
     float cx = (float)track_cx_ / track_fw_;  // 0..1, 0.5 = centered
     float deadband = 0.08f;  // ±8% dead zone
     float w = 0.0f;
-    if (cx < 0.5f - deadband)       w =  0.15f;  // person left → turn left
-    else if (cx > 0.5f + deadband)  w = -0.15f;  // person right → turn right
+    if (cx < 0.5f - deadband)       w =  0.8f;   // person left → turn left
+    else if (cx > 0.5f + deadband)  w = -0.8f;   // person right → turn right
 
     // ── Distance tracking: move forward/back ──
     float v = 0.0f;
-    if (h_ratio < 0.12f)      v =  0.10f;  // too far → approach
-    else if (h_ratio > 0.35f) v = -0.08f;  // too close → back off
+    if (h_ratio < 0.12f)      v =  0.3f;   // too far → approach
+    else if (h_ratio > 0.35f) v = -0.2f;   // too close → back off
 
     if (w == 0.0f && v == 0.0f) return;  // nothing to do
 
