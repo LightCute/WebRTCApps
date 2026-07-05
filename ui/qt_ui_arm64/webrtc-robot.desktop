@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=陪护机器人
+Comment=WebRTC 远程控制终端 / 陪护机器人控制面板
+Exec=/home/elf/webrtc_monitor/start_ui.sh
+Terminal=false
+Categories=Application;
