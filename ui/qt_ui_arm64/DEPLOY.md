@@ -36,6 +36,10 @@ ssh elf@<robot_ip> "chmod +x /home/elf/webrtc_monitor/ui_rk /home/elf/webrtc_mon
 
 # 5. 安装桌面图标
 scp webrtc-robot.desktop elf@<robot_ip>:/home/elf/Desktop/
+# chmod +x 让桌面环境识别为可信任的启动器
+ssh elf@<robot_ip> "chmod +x /home/elf/Desktop/webrtc-robot.desktop"
+# 如果 chmod +x 后仍不显示图标，用 gio 标记信任（需要在桌面会话中运行）:
+# ssh elf@<robot_ip> "dbus-launch gio set /home/elf/Desktop/webrtc-robot.desktop metadata::trusted true"
 
 # 6. 串口权限
 ssh elf@<robot_ip> "sudo usermod -a -G dialout elf"
