@@ -1067,8 +1067,8 @@ void MainWindow::onTrackingTimer() {
 
     // ── Distance tracking: move forward/back ──
     float v = 0.0f;
-    if (h_ratio < 0.12f)      v =  0.3f;   // too far → approach
-    else if (h_ratio > 0.35f) v = -0.2f;   // too close → back off
+    if (h_ratio < 0.12f)      v =  0.8f;   // too far → approach
+    else if (h_ratio > 0.35f) v = -0.8f;   // too close → back off
 
     if (w == 0.0f && v == 0.0f) return;  // nothing to do
 
