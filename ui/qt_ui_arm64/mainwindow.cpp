@@ -1065,10 +1065,10 @@ void MainWindow::onTrackingTimer() {
     if (cx < 0.5f - deadband)       w =  0.8f;   // person left → turn left
     else if (cx > 0.5f + deadband)  w = -0.8f;   // person right → turn right
 
-    // ── Distance tracking: move forward/back ──
+    // ── Distance tracking: target ~25% frame, deadband 15%~40% ──
     float v = 0.0f;
-    if (h_ratio < 0.12f)      v =  0.8f;   // too far → approach
-    else if (h_ratio > 0.35f) v = -0.8f;   // too close → back off
+    if (h_ratio < 0.15f)      v =  0.8f;   // too far → approach
+    else if (h_ratio > 0.40f) v = -0.8f;   // too close → back off
 
     if (w == 0.0f && v == 0.0f) return;  // nothing to do
 
