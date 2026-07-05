@@ -9,6 +9,14 @@ fi
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 cd /home/elf/webrtc_monitor || { echo "ERROR: /home/elf/webrtc_monitor not found"; exit 1; }
+
+# 加载 .env 环境变量 (Python 脚本依赖)
+if [ -f .env ]; then
+    set -a
+    . ./.env
+    set +a
+fi
+
 export WEBRTC_RUNTIME_DIR=/tmp/webrtc_runtime
 mkdir -p "$WEBRTC_RUNTIME_DIR"
 exec ./ui_rk "$@"
