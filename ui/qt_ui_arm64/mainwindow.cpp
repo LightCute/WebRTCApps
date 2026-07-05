@@ -1041,11 +1041,7 @@ bool MainWindow::findTrackTarget(const QVector<Detection>& dets) {
             track_target_valid_ = true;
         }
     }
-    // Store frame dims from first detection
-    if (!dets.isEmpty()) {
-        track_fw_ = qMax(dets[0].right, track_fw_);
-        track_fh_ = qMax(dets[0].bottom, track_fh_);
-    }
+    // Camera is fixed 640×480 — detection boxes are already scaled to this
     return track_target_valid_;
 }
 
