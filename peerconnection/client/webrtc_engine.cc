@@ -96,7 +96,26 @@ WebRTCEngine::WebRTCEngine(const webrtc::Environment& env)
       safety_(webrtc::PendingTaskSafetyFlag::Create()),
       peer_id_(-1),
       loopback_(false) {
-  signaling_ = std::make_unique<PeerConnectionClient>();
+  // Default: create PeerConnectionClient if not injected via SetSignaling
+  if (!signaling_) {
+    signaling_ = std::make_unique<PeerConnectionClient>();
+  }
+  signaling_->RegisterObserver(this);
+}
+
+// ---- Dependency injection ----
+
+void WebRTCEngine::SetMediaPipeline(std::unique_ptr<IMediaPipeline> pipeline) {
+  pipeline_ = std::move(pipeline);
+}
+void WebRTCEngine::SetPcFactory(std::unique_ptr<IPcFactory> factory) {
+  pc_factory_injected_ = std::move(factory);
+}
+void WebRTCEngine::SetIpcServer(std::unique_ptr<IIpcServer> server) {
+  ipc_server_ = std::move(server);
+}
+void WebRTCEngine::SetSignaling(std::unique_ptr<SignalingInterface> signaling) {
+  signaling_ = std::move(signaling);
   signaling_->RegisterObserver(this);
 }
 
@@ -672,9 +691,16 @@ bool WebRTCEngine::InitializePeerConnection() {
     }
   }
 
-  auto pc = PcFactory::Create(network_thread_.get(), worker_thread_.get(),
-                               signaling_thread_.get(), env_,
-                               pipeline_->adm(), this);
+  PcComponents pc;
+  if (pc_factory_injected_) {
+    pc = pc_factory_injected_->Create(network_thread_.get(), worker_thread_.get(),
+                                      signaling_thread_.get(), env_,
+                                      pipeline_->adm(), this);
+  } else {
+    pc = PcFactory::Create(network_thread_.get(), worker_thread_.get(),
+                           signaling_thread_.get(), env_,
+                           pipeline_->adm(), this);
+  }
   if (!pc.factory || !pc.connection) {
     RTC_LOG(LS_ERROR) << "Failed to create PeerConnection";
     DeletePeerConnection();

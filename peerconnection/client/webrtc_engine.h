@@ -24,8 +24,10 @@
 #include "api/video/video_sink_interface.h"
 #include "apps/peerconnection/client/data_channel_manager.h"
 #include "apps/peerconnection/client/engine_controller.h"
-#include "apps/peerconnection/client/media_pipeline.h"
 #include "apps/peerconnection/client/signaling_interface.h"
+#include "apps/peerconnection/engine/ipc_server_interface.h"
+#include "apps/peerconnection/engine/media_pipeline_interface.h"
+#include "apps/peerconnection/engine/pc_factory_interface.h"
 #include "rtc_base/thread.h"
 
 class WebRTCEngine : public EngineController,
@@ -50,6 +52,14 @@ class WebRTCEngine : public EngineController,
   // Lifecycle (called by main.cc, not part of EngineController)
   bool Init();
   void Shutdown();
+
+  // ---- Dependency injection (call before Init) ----
+  void SetMediaPipeline(std::unique_ptr<IMediaPipeline> pipeline);
+  void SetPcFactory(std::unique_ptr<IPcFactory> factory);
+  void SetIpcServer(std::unique_ptr<IIpcServer> server);
+  void SetSignaling(std::unique_ptr<SignalingInterface> signaling);
+  webrtc::Thread* worker_thread() const { return worker_thread_.get(); }
+  webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
 
   // RefCountInterface (required by CreateSessionDescriptionObserver)
   void AddRef() const override {}
@@ -111,8 +121,10 @@ class WebRTCEngine : public EngineController,
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> signaling_thread_;
 
-  // Media pipeline (Step 1: owns ADM; later: renderers, sources, device state)
-  std::unique_ptr<MediaPipeline> pipeline_;
+  // Media pipeline (injected or self-created)
+  std::unique_ptr<IMediaPipeline> pipeline_;
+  std::unique_ptr<IPcFactory> pc_factory_injected_;
+  std::unique_ptr<IIpcServer> ipc_server_;
 
   // WebRTC objects
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;

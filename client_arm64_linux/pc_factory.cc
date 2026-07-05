@@ -23,7 +23,7 @@
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_libvpx_vp9_adapter.h"
 #include "api/video_codecs/video_encoder_factory_template_open_h264_adapter.h"
-#include "apps/webrtc_engine/defaults.h"
+#include "apps/client_arm64_linux/defaults.h"
 #include "apps/client_arm64_linux/rk_mpp_codec.h"
 #include "rtc_base/logging.h"
 

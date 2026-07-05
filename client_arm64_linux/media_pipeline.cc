@@ -4,7 +4,6 @@
 #pragma GCC diagnostic ignored "-Wunsafe-buffer-usage"
 #pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
-#include <cerrno>
 #include <fcntl.h>
 #include <memory>
 #include <sys/ipc.h>
@@ -101,47 +100,35 @@ class CapturerTrackSource : public webrtc::VideoTrackSource {
   std::unique_ptr<TestVideoCapturer> capturer_;
 };
 
-// Helper: get or recreate a SysV SHM segment, handling stale segments from
-// crashed daemon runs (where pthread_mutex_init on an already-initialized
-// mutex in process-shared memory would fail with EBUSY).
-template<typename T>
-static T* InitShmHelper(const std::string& key_path, int proj_id, size_t size,
-                        int (*init_fn)(T*)) {
+static ShmCtrlBlock* InitCtrlShmHelper(const std::string& key_path, int proj_id) {
   int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
   if (fd >= 0) close(fd);
   key_t key = ftok(key_path.c_str(), proj_id);
   if (key == -1) { perror("ftok"); return nullptr; }
-
-  int shmid = shmget(key, size, IPC_CREAT | IPC_EXCL | 0666);
-  if (shmid == -1 && errno == EEXIST) {
-    shmid = shmget(key, size, 0);
-    if (shmid != -1) {
-      shmctl(shmid, IPC_RMID, nullptr);
-      shmid = shmget(key, size, IPC_CREAT | IPC_EXCL | 0666);
-    }
-  }
+  int shmid = shmget(key, SHM_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
   if (shmid == -1) { perror("shmget"); return nullptr; }
-
-  auto* ptr = static_cast<T*>(shmat(shmid, nullptr, 0));
+  auto* ptr = static_cast<ShmCtrlBlock*>(shmat(shmid, nullptr, 0));
   if (ptr == (void*)-1) { perror("shmat"); return nullptr; }
-  if (init_fn(ptr) != 0) {
-    perror("shm_init");
-    shmdt(ptr);
-    return nullptr;
-  }
+  if (init_shm_sync(ptr) != 0) { perror("init_shm_sync"); return nullptr; }
   return ptr;
-}
-
-static ShmCtrlBlock* InitCtrlShmHelper(const std::string& key_path, int proj_id) {
-  return InitShmHelper<ShmCtrlBlock>(key_path, proj_id, SHM_CTRL_BLOCK_SIZE,
-                                     init_shm_sync);
 }
 
 static ShmMultiCtrlBlock* InitMultiCtrlShmHelper(
     const std::string& key_path, int proj_id) {
-  return InitShmHelper<ShmMultiCtrlBlock>(key_path, proj_id,
-                                          SHM_MULTI_CTRL_BLOCK_SIZE,
-                                          video_frame_shm_init);
+  int fd = open(key_path.c_str(), O_CREAT | O_WRONLY, 0666);
+  if (fd >= 0) close(fd);
+  key_t key = ftok(key_path.c_str(), proj_id);
+  if (key == -1) { perror("ftok"); return nullptr; }
+  int shmid = shmget(key, SHM_MULTI_CTRL_BLOCK_SIZE, IPC_CREAT | 0666);
+  if (shmid == -1) { perror("shmget"); return nullptr; }
+  auto* ptr = static_cast<ShmMultiCtrlBlock*>(shmat(shmid, nullptr, 0));
+  if (ptr == (void*)-1) { perror("shmat"); return nullptr; }
+  if (video_frame_shm_init(ptr) != 0) {
+    perror("video_frame_shm_init");
+    shmdt(ptr);
+    return nullptr;
+  }
+  return ptr;
 }
 
 }  // namespace

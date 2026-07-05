@@ -65,14 +65,8 @@
 #include "pc/video_track_source.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
-#include "rtc_base/time_utils.h"
 #include "rtc_base/strings/json.h"
 #include "rtc_base/thread.h"
-#include <map>
-#include "api/stats/rtc_stats.h"
-#include "api/stats/rtc_stats_collector_callback.h"
-#include "api/stats/rtc_stats_report.h"
-#include "api/stats/rtcstats_objects.h"
 #include "system_wrappers/include/clock.h"
 #include "test/frame_generator_capturer.h"
 #include "test/platform_video_capturer.h"
@@ -178,7 +172,16 @@ bool WebRTCEngine::Init() {
 
 void WebRTCEngine::Shutdown() {
   signaling_->SignOut();
-  DeletePeerConnection();  // cleans up pipeline, dc_manager, peer_connection
+  DeletePeerConnection();
+
+  // Clean up pending messages.
+  while (!pending_messages_.empty()) {
+    delete pending_messages_.front();
+    pending_messages_.pop_front();
+  }
+
+  if (pipeline_)
+    pipeline_->Shutdown();
 
   // Stop all threads.
   if (signaling_thread_) {
@@ -462,17 +465,26 @@ void WebRTCEngine::OnPeerDisconnected(int id) {
     int saved_port = server_port_;
     auto pc = std::move(peer_connection_);
     auto f = std::move(factory_);
+    auto adm = pipeline_->adm();
     pipeline_->Shutdown();
     dc_manager_->Shutdown();
     peer_id_ = -1;
     loopback_ = false;
     signaling_->Close();
-    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f)]() mutable {
+    signaling_thread_->PostTask([this, pc = std::move(pc), f = std::move(f),
+                                  adm = std::move(adm)]() mutable {
       while (!pending_messages_.empty()) {
         delete pending_messages_.front();
         pending_messages_.pop_front();
       }
-      // ADM already stopped by pipeline_->Shutdown() above.
+      // Stop ADM asynchronously — the worker thread handles it.
+      if (adm && worker_thread_) {
+        worker_thread_->PostTask([adm]() mutable {
+          if (adm->Playing()) adm->StopPlayout();
+          if (adm->Recording()) adm->StopRecording();
+          adm = nullptr;
+        });
+      }
       pc->Close();
       pc = nullptr;
       f = nullptr;
@@ -715,12 +727,9 @@ void WebRTCEngine::DeletePeerConnection() {
     delete pending_messages_.front();
     pending_messages_.pop_front();
   }
-  if (pipeline_)
-    pipeline_->Shutdown();
-  if (dc_manager_)
-    dc_manager_->Shutdown();
-  if (peer_connection_)
-    peer_connection_->Close();
+  pipeline_->Shutdown();
+  dc_manager_->Shutdown();
+  peer_connection_->Close();
   peer_connection_ = nullptr;
   factory_ = nullptr;
   peer_id_ = -1;
@@ -781,255 +790,5 @@ void WebRTCEngine::SendMessage(const std::string& json_object) {
     delete msg;
   }
 }
-
-// ==================== Stats Reporting ====================
-
-namespace {
-class StatsCallback : public webrtc::RTCStatsCollectorCallback {
- public:
-  explicit StatsCallback(EngineObserver* obs) : observer_(obs) {}
-  void OnStatsDelivered(
-      const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report) override {
-    if (!observer_) return;
-    Json::Value json;
-    json["event"] = "stats";
-
-    // --- First pass: build candidate ID → info lookup ---
-    std::map<std::string, std::string> cand_type;       // id → type (host/srflx/relay)
-    std::map<std::string, std::string> cand_addr;       // id → "ip:port"
-    std::map<std::string, std::string> cand_proto;      // id → udp/tcp
-    for (const auto& stat : *report) {
-      auto type = std::string(stat.type());
-      if (type == "local-candidate") {
-        auto& s = stat.cast_to<webrtc::RTCLocalIceCandidateStats>();
-        if (s.candidate_type.has_value())
-          cand_type[stat.id()] = *s.candidate_type;
-        std::string ip = s.ip.value_or("");
-        if (ip.empty() && s.address.has_value()) ip = *s.address;
-        if (ip.empty() && s.related_address.has_value()) ip = *s.related_address;
-        if (!ip.empty()) {
-          std::string addr = ip;
-          if (s.port.has_value())
-            addr += ":" + std::to_string(*s.port);
-          cand_addr[stat.id()] = addr;
-        }
-        if (s.protocol.has_value())
-          cand_proto[stat.id()] = *s.protocol;
-      } else if (type == "remote-candidate") {
-        auto& s = stat.cast_to<webrtc::RTCRemoteIceCandidateStats>();
-        if (s.candidate_type.has_value())
-          cand_type[stat.id()] = *s.candidate_type;
-        std::string ip = s.ip.value_or("");
-        if (ip.empty() && s.address.has_value()) ip = *s.address;
-        if (!ip.empty() && s.port.has_value())
-          cand_addr[stat.id()] = ip + ":" + std::to_string(*s.port);
-        if (s.protocol.has_value())
-          cand_proto[stat.id()] = *s.protocol;
-      }
-    }
-
-    // --- Second pass: collect stream + transport + codec stats ---
-    for (const auto& stat : *report) {
-      auto type = std::string(stat.type());
-
-      // === Video: outbound-rtp (what you're sending) ===
-      if (type == "outbound-rtp") {
-        auto& s = stat.cast_to<webrtc::RTCOutboundRtpStreamStats>();
-        if (!s.kind.has_value() || *s.kind != "video") continue;
-        json["encode_fps"]    = static_cast<int>(s.frames_per_second.value_or(0));
-        json["encode_w"]      = static_cast<int>(s.frame_width.value_or(0));
-        json["encode_h"]      = static_cast<int>(s.frame_height.value_or(0));
-        json["frames_enc"]    = static_cast<int>(s.frames_encoded.value_or(0));
-        json["key_frames_enc"] = static_cast<int>(s.key_frames_encoded.value_or(0));
-        json["nack_sent"]     = static_cast<int>(s.nack_count.value_or(0));
-        json["pli_sent"]      = static_cast<int>(s.pli_count.value_or(0));
-        json["fir_sent"]      = static_cast<int>(s.fir_count.value_or(0));
-        json["target_kbps"]   = static_cast<int>(s.target_bitrate.value_or(0) / 1000);
-        json["bytes_sent"]    = static_cast<int64_t>(s.bytes_sent.value_or(0));
-        json["pkt_sent"]      = static_cast<int64_t>(s.packets_sent.value_or(0));
-        json["retx_pkt_sent"] = static_cast<int>(s.retransmitted_packets_sent.value_or(0));
-        if (s.content_type.has_value())
-          json["content_type"] = std::string(*s.content_type);
-        if (s.quality_limitation_reason.has_value())
-          json["quality_limit"] = std::string(*s.quality_limitation_reason);
-        if (s.quality_limitation_durations.has_value()) {
-          auto& d = *s.quality_limitation_durations;
-          json["limit_none_s"] = d.contains("none") ? d.at("none") : 0;
-          json["limit_cpu_s"]  = d.contains("cpu") ? d.at("cpu") : 0;
-          json["limit_bw_s"]   = d.contains("bandwidth") ? d.at("bandwidth") : 0;
-        }
-        if (s.total_encode_time.has_value() && s.frames_encoded.value_or(1) > 0)
-          json["avg_encode_ms"] = static_cast<int>(
-              *s.total_encode_time / *s.frames_encoded * 1000);
-        if (s.encoder_implementation.has_value())
-          json["encoder"] = std::string(*s.encoder_implementation);
-      }
-
-      // === Video: inbound-rtp (what you're receiving) ===
-      if (type == "inbound-rtp") {
-        auto& s = stat.cast_to<webrtc::RTCInboundRtpStreamStats>();
-        if (!s.kind.has_value() || *s.kind != "video") continue;
-        json["decode_fps"]    = static_cast<int>(s.frames_per_second.value_or(0));
-        json["decode_w"]      = static_cast<int>(s.frame_width.value_or(0));
-        json["decode_h"]      = static_cast<int>(s.frame_height.value_or(0));
-        json["frames_dec"]    = static_cast<int>(s.frames_decoded.value_or(0));
-        json["key_frames_dec"] = static_cast<int>(s.key_frames_decoded.value_or(0));
-        json["pkt_lost"]      = static_cast<int>(s.packets_lost.value_or(0));
-        json["pkt_recv"]      = static_cast<int>(s.packets_received.value_or(0));
-        int64_t total_pkts = static_cast<int64_t>(s.packets_lost.value_or(0))
-                           + static_cast<int64_t>(s.packets_received.value_or(0));
-        if (total_pkts > 0)
-          json["loss_rate_pct"] = static_cast<int>(
-              s.packets_lost.value_or(0) * 10000 / total_pkts) / 100.0;
-        else
-          json["loss_rate_pct"] = 0.0;
-        json["bytes_recv"]    = static_cast<int64_t>(s.bytes_received.value_or(0));
-        json["jitter_s"]      = s.jitter.value_or(0);
-        json["nack_recv"]     = static_cast<int>(s.nack_count.value_or(0));
-        json["pli_recv"]      = static_cast<int>(s.pli_count.value_or(0));
-        json["fir_recv"]      = static_cast<int>(s.fir_count.value_or(0));
-        if (s.total_decode_time.has_value() && s.frames_decoded.value_or(1) > 0)
-          json["avg_decode_ms"] = static_cast<int>(
-              *s.total_decode_time / *s.frames_decoded * 1000);
-        if (s.decoder_implementation.has_value())
-          json["decoder"] = std::string(*s.decoder_implementation);
-        // Freeze detection
-        if (s.freeze_count.has_value())
-          json["freeze_cnt"] = static_cast<int>(*s.freeze_count);
-        // JitterBuffer discards
-        if (s.packets_discarded.has_value())
-          json["pkt_discarded"] = static_cast<int>(*s.packets_discarded);
-      }
-
-      // === Audio: outbound-rtp (mic → network) ===
-      if (type == "outbound-rtp") {
-        auto& s = stat.cast_to<webrtc::RTCOutboundRtpStreamStats>();
-        if (!s.kind.has_value() || *s.kind != "audio") continue;
-        json["audio_sent_kbps"] = static_cast<int>(s.target_bitrate.value_or(0) / 1000);
-        json["audio_enc_pkt"]   = static_cast<int>(s.packets_sent.value_or(0));
-      }
-
-      // === Audio: inbound-rtp (network → speaker) ===
-      if (type == "inbound-rtp") {
-        auto& s = stat.cast_to<webrtc::RTCInboundRtpStreamStats>();
-        if (!s.kind.has_value() || *s.kind != "audio") continue;
-        json["audio_recv_kbps"] = static_cast<int>(
-            s.bytes_received.value_or(0) * 8 / 1000);
-        json["audio_pkt_lost"]  = static_cast<int>(s.packets_lost.value_or(0));
-        json["audio_jitter_s"]  = s.jitter.value_or(0);
-      }
-
-      // === ICE candidate pair (the active connection) ===
-      if (type == "candidate-pair") {
-        auto& s = stat.cast_to<webrtc::RTCIceCandidatePairStats>();
-        if (std::string(*s.state) != "succeeded") continue;
-        json["rtt_s"]          = s.current_round_trip_time.value_or(0);
-        json["avail_kbps"]     = static_cast<int>(s.available_outgoing_bitrate.value_or(0) / 1000);
-        json["ice_nominated"]  = s.nominated.value_or(false);
-        json["ice_writable"]   = s.writable.value_or(false);
-        json["pair_pkt_sent"]  = static_cast<int64_t>(s.packets_sent.value_or(0));
-        json["pair_pkt_recv"]  = static_cast<int>(s.packets_received.value_or(0));
-        // Resolve candidate names
-        if (s.local_candidate_id.has_value()) {
-          auto local_id = *s.local_candidate_id;
-          json["local_cand_type"] = cand_type.count(local_id) ? cand_type[local_id] : "?";
-          json["local_cand_addr"] = cand_addr.count(local_id) ? cand_addr[local_id] : "?";
-        }
-        if (s.remote_candidate_id.has_value()) {
-          auto remote_id = *s.remote_candidate_id;
-          json["remote_cand_type"] = cand_type.count(remote_id) ? cand_type[remote_id] : "?";
-          json["remote_cand_addr"] = cand_addr.count(remote_id) ? cand_addr[remote_id] : "?";
-          // prflx candidates may have address only in the transport-level info,
-          // not in the RTCStats. Log the raw candidate ID for debugging.
-          if (cand_type.count(remote_id) && cand_addr.count(remote_id)) {
-            json["remote_cand_addr"] = cand_addr[remote_id];
-          } else {
-            // prflx case: the WebRTC stats API doesn't expose IP for peer-reflexive
-            // candidates. The address can be found in ICE transport-level logs.
-            json["remote_cand_addr"] = "(prflx, see ICE logs)";
-          }
-        }
-        // STUN connectivity check counters
-        if (s.requests_sent.has_value())
-          json["stun_req_sent"] = static_cast<int>(*s.requests_sent);
-        if (s.responses_received.has_value())
-          json["stun_resp_recv"] = static_cast<int>(*s.responses_received);
-        if (s.consent_requests_sent.has_value())
-          json["consent_sent"] = static_cast<int>(*s.consent_requests_sent);
-      }
-
-      // === Transport (DTLS) ===
-      if (type == "transport") {
-        auto& s = stat.cast_to<webrtc::RTCTransportStats>();
-        if (s.dtls_state.has_value())
-          json["dtls_state"] = std::string(*s.dtls_state);
-        json["transport_pkt_sent"] = static_cast<int64_t>(s.packets_sent.value_or(0));
-        json["transport_pkt_recv"] = static_cast<int64_t>(s.packets_received.value_or(0));
-      }
-    }
-    // --- Real-time kbps from cumulative bytes (2s polling interval) ---
-    static int64_t last_bytes_sent = 0, last_bytes_recv = 0;
-    static int64_t last_ts_us = 0;
-    int64_t now_bytes_sent = json.get("bytes_sent", Json::Value(0)).asInt64();
-    int64_t now_bytes_recv = json.get("bytes_recv", Json::Value(0)).asInt64();
-    int64_t now_ts_us = webrtc::TimeMicros();
-    if (last_ts_us > 0 && now_ts_us > last_ts_us) {
-      double dt = (now_ts_us - last_ts_us) / 1e6;
-      json["send_kbps"] = static_cast<int>(
-          (now_bytes_sent - last_bytes_sent) * 8 / dt / 1000);
-      json["recv_kbps"] = static_cast<int>(
-          (now_bytes_recv - last_bytes_recv) * 8 / dt / 1000);
-    }
-    last_bytes_sent = now_bytes_sent;
-    last_bytes_recv = now_bytes_recv;
-    last_ts_us = now_ts_us;
-
-    Json::StreamWriterBuilder factory;
-    factory["indentation"] = "";
-    observer_->OnEngineEvent(Json::writeString(factory, json));
-  }
-
-  void AddRef() const override {}
-  webrtc::RefCountReleaseStatus Release() const override {
-    return webrtc::RefCountReleaseStatus::kOtherRefsRemained;
-  }
-
-  EngineObserver* observer_;
-};
-}  // namespace
-
-void WebRTCEngine::DumpStats() {
-  if (!peer_connection_) return;
-  webrtc::scoped_refptr<StatsCallback> cb(new StatsCallback(observer_));
-  peer_connection_->GetStats(cb.get());
-}
-
-void WebRTCEngine::StartStatsPolling() {
-  if (stats_polling_) return;
-  signaling_thread_->PostTask([this] {
-    if (stats_polling_) return;
-    stats_polling_ = webrtc::RepeatingTaskHandle::Start(
-        signaling_thread_.get(),
-        [this] {
-          DumpStats();
-          return webrtc::TimeDelta::Seconds(2);
-        });
-    RTC_LOG(LS_INFO) << "Stats polling started (2s interval)";
-  });
-}
-
-void WebRTCEngine::StopStatsPolling() {
-  if (!stats_polling_) return;
-  // Stop must happen on the same task queue that runs the timer (signaling thread).
-  signaling_thread_->PostTask([this] {
-    if (stats_polling_) {
-      stats_polling_->Stop();
-      stats_polling_.reset();
-    }
-  });
-  RTC_LOG(LS_INFO) << "Stats polling stopped";
-}
-
-
 
 #pragma GCC diagnostic pop

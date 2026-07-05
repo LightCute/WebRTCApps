@@ -1,113 +1,78 @@
-// client_x64_linux/main.cc — x64 Linux platform entry point (daemon mode)
-#include <cstdio>
-#include <dirent.h>
+// client_x64_linux/main.cc — x64 Linux platform entry point
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
-#include "api/field_trials.h"
 #include "apps/client_x64_linux/media_pipeline.h"
 #include "apps/client_x64_linux/pc_factory_x64.h"
-#include "apps/client_x64_linux/pipe_transport_unix.h"
-#include "apps/webrtc_engine/control_protocol.h"
+#include "apps/client_x64_linux/unix_socket_server.h"
 #include "apps/webrtc_engine/defaults.h"
-#include "apps/webrtc_engine/engine_controller.h"
 #include "apps/webrtc_engine/flag_defs.h"
 #include "apps/webrtc_engine/peer_connection_client.h"
-#include "apps/webrtc_engine/pipe_transport_interface.h"
 #include "apps/webrtc_engine/webrtc_engine.h"
 #include "rtc_base/log_sinks.h"
+#include "rtc_base/logging.h"
 #include "rtc_base/physical_socket_server.h"
 #include "rtc_base/ssl_adapter.h"
 #include "rtc_base/thread.h"
 
+static std::atomic<bool> g_running{true};
+static void sigint_handler(int) { g_running = false; }
+
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
 
-  webrtc::Environment env = webrtc::CreateEnvironment(
-      std::make_unique<webrtc::FieldTrials>(
-          absl::GetFlag(FLAGS_force_fieldtrials)));
-
-  webrtc::PhysicalSocketServer pss;
-  auto main_thread = std::make_unique<webrtc::Thread>(&pss);
+  // 1. WebRTC runtime
+  auto pss = std::make_unique<webrtc::PhysicalSocketServer>();
+  auto main_thread = std::make_unique<webrtc::Thread>(pss.get());
   webrtc::ThreadManager::Instance()->SetCurrentThread(main_thread.get());
   webrtc::InitializeSSL();
 
-  const char* rt_dir_env = getenv("WEBRTC_RUNTIME_DIR");
-  std::string runtime_dir = rt_dir_env ? rt_dir_env : "/tmp/webrtc_runtime";
+  webrtc::Environment env = webrtc::CreateEnvironment();
+
+  std::string runtime_dir = "/tmp/webrtc_runtime";
   mkdir(runtime_dir.c_str(), 0755);
+  webrtc::FileRotatingLogSink* log_sink = new webrtc::FileRotatingLogSink(
+      runtime_dir, "webrtc_x64", 10 * 1024 * 1024, 2);
+  webrtc::LogMessage::AddLogToStream(log_sink, webrtc::LS_INFO);
 
-  int log_index = 0;
-  {
-    DIR* dir = opendir(runtime_dir.c_str());
-    if (dir) {
-      struct dirent* ent;
-      while ((ent = readdir(dir))) {
-        int n = 0;
-        if (sscanf(ent->d_name, "daemon_%d.", &n) == 1 && n >= log_index)
-          log_index = n + 1;
-      }
-      closedir(dir);
-    }
-  }
-  std::string log_prefix = "daemon_" + std::to_string(log_index);
-  webrtc::FileRotatingLogSink log_sink(runtime_dir, log_prefix,
-                                       10 * 1024 * 1024, 5);
-  log_sink.Init();
-  log_sink.DisableBuffering();
-  webrtc::LogMessage::AddLogToStream(&log_sink, webrtc::LS_INFO);
-  RTC_LOG(LS_INFO) << "Logging to: " << runtime_dir << "/"
-                   << log_prefix << ".0.log";
-
-  // 1. Create engine + inject platform dependencies
+  // 2. Create engine + inject platform dependencies
   auto engine = std::make_unique<WebRTCEngine>(env);
-  if (!engine->Init()) {
-    std::cerr << "Failed to initialize WebRTC engine" << std::endl;
-    webrtc::CleanupSSL();
-    return 1;
-  }
+  engine->Init();
   engine->SetMediaPipeline(
       std::make_unique<MediaPipeline>(env, engine->worker_thread()));
   engine->SetPcFactory(std::make_unique<PcFactoryX64>());
   engine->SetSignaling(std::make_unique<PeerConnectionClient>());
 
-  // 2. Create pipe transport (platform-specific)
-  std::string sock_path = runtime_dir + "/webrtc_ctrl.sock";
-  auto transport = std::make_unique<UnixSocketTransport>(sock_path);
+  // 3. Connect to signaling server
+  engine->ConnectToServer(absl::GetFlag(FLAGS_server),
+                          absl::GetFlag(FLAGS_port));
 
-  // 3. Create control protocol (platform-independent JSON-RPC parser)
-  auto protocol = std::make_unique<ControlProtocol>(transport.get(), engine.get());
+  // 4. Start IPC server for external client
+  UnixSocketServer ipc(runtime_dir + "/dc_call.sock", engine.get());
+  ipc.Start();
 
-  // 4. Wire transport → protocol → engine → transport
-  //    protocol must be on heap — callbacks hold raw pointer to it.
-  auto* proto_ptr = protocol.get();
-  transport->on_message = [proto_ptr](const std::string& line) {
-    proto_ptr->OnLineReceived(line);
-  };
-  transport->on_disconnected = [] {
-    RTC_LOG(LS_INFO) << "Control client disconnected";
-  };
-  protocol->on_shutdown = [&transport] { transport->Stop(); };
+  std::cout << "WebRTC x64 Engine started. Ctrl+C to stop." << std::endl;
 
-  // Engine observer — events go back to client via ControlProtocol::OnEngineEvent
-  engine->RegisterObserver(protocol.get());
+  // 5. Wait for shutdown
+  std::signal(SIGINT, sigint_handler);
+  std::signal(SIGTERM, sigint_handler);
+  while (g_running) sleep(1);
 
-  // 5. Start listening
-  transport->Start(sock_path);
-
-  std::cout << "WebRTC x64 daemon started. Listening on " << sock_path
-            << std::endl;
-
-  transport->Run();  // block until shutdown
-
+  // 6. Cleanup
+  std::cout << "Shutting down..." << std::endl;
+  ipc.Stop();
   engine->Shutdown();
-  webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);
   webrtc::CleanupSSL();
-  webrtc::LogMessage::RemoveLogToStream(&log_sink);
+  webrtc::ThreadManager::Instance()->SetCurrentThread(nullptr);
   return 0;
 }

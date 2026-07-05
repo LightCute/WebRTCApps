@@ -24,7 +24,9 @@
 #include "api/video/video_sink_interface.h"
 #include "apps/peerconnection/client_arm64/data_channel_manager.h"
 #include "apps/peerconnection/client_arm64/engine_controller.h"
-#include "apps/peerconnection/client_arm64/media_pipeline.h"
+#include "apps/peerconnection/engine/media_pipeline_interface.h"
+#include "apps/peerconnection/engine/ipc_server_interface.h"
+#include "apps/peerconnection/engine/pc_factory_interface.h"
 #include "apps/peerconnection/client_arm64/signaling_interface.h"
 #include "rtc_base/thread.h"
 
@@ -112,7 +114,9 @@ class WebRTCEngine : public EngineController,
   std::unique_ptr<webrtc::Thread> signaling_thread_;
 
   // Media pipeline (Step 1: owns ADM; later: renderers, sources, device state)
-  std::unique_ptr<MediaPipeline> pipeline_;
+  std::unique_ptr<IMediaPipeline> pipeline_;
+  std::unique_ptr<IPcFactory> pc_factory_injected_;
+  std::unique_ptr<IIpcServer> ipc_server_;
 
   // WebRTC objects
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;

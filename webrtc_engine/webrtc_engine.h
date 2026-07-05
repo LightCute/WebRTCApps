@@ -21,7 +21,6 @@
 #include "api/scoped_refptr.h"
 #include "api/task_queue/pending_task_safety_flag.h"
 #include "api/video/video_frame.h"
-#include "rtc_base/task_utils/repeating_task.h"
 #include "api/video/video_sink_interface.h"
 #include "apps/webrtc_engine/data_channel_manager.h"
 #include "apps/webrtc_engine/engine_controller.h"
@@ -49,11 +48,6 @@ class WebRTCEngine : public EngineController,
   void SendData(const std::string& text) override;
   void GetLocalSdp() override;
   bool connection_active() const override;
-
-  // Reports connection stats (fps/bitrate/loss/rtt) via observer as JSON.
-  void DumpStats() override;
-  void StartStatsPolling() override;
-  void StopStatsPolling() override;
 
   // Lifecycle (called by main.cc, not part of EngineController)
   bool Init();
@@ -140,9 +134,6 @@ class WebRTCEngine : public EngineController,
 
   // Signaling client (abstract interface, concrete impl = PeerConnectionClient)
   std::unique_ptr<SignalingInterface> signaling_;
-
-  // Periodic stats polling
-  std::optional<webrtc::RepeatingTaskHandle> stats_polling_;
 
   // State
   int peer_id_ = -1;

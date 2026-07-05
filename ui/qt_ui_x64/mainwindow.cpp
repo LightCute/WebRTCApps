@@ -40,19 +40,23 @@ MainWindow::MainWindow(QWidget* parent)
 
     initConnections();
 
-    // Keepalive timer: re-send command every 80ms while keys held to prevent
-    // MCU watchdog timeout (MCU watchdog = 300ms, 80ms gives 3+ retries margin)
-    move_keepalive_timer_ = new QTimer(this);
-    move_keepalive_timer_->setInterval(80);
-    connect(move_keepalive_timer_, &QTimer::timeout, this,
-            &MainWindow::updateMoveCommand);
-
-    // Speed slider → speed factor mapping: slider 10..100 → 0.1..1.0
-    connect(ui.chassisSpeedSlider, &QSlider::valueChanged, this, [this](int val) {
-        chassis_speed_factor_ = val / 100.0;
-    });
-    connect(ui.ptzSpeedSlider, &QSlider::valueChanged, this, [this](int val) {
-        ptz_speed_factor_ = val / 100.0;
+    key_timer_ = new QTimer(this);
+    key_timer_->setInterval(100);
+    connect(key_timer_, &QTimer::timeout, this, [this]() {
+        const char* data = nullptr;
+        if (held_key_ == Qt::Key_W)      data = "w";
+        else if (held_key_ == Qt::Key_A) data = "a";
+        else if (held_key_ == Qt::Key_S) data = "s";
+        else if (held_key_ == Qt::Key_D) data = "d";
+        else if (held_key_ == Qt::Key_Up)    data = "i";
+        else if (held_key_ == Qt::Key_Left)  data = "j";
+        else if (held_key_ == Qt::Key_Down)  data = "k";
+        else if (held_key_ == Qt::Key_Right) data = "l";
+        else if (held_key_ == Qt::Key_I) data = "i";
+        else if (held_key_ == Qt::Key_J) data = "j";
+        else if (held_key_ == Qt::Key_K) data = "k";
+        else if (held_key_ == Qt::Key_L) data = "l";
+        if (data) channel_->cmdSendData(QString(data));
     });
 
     // Voice chat manager
@@ -145,114 +149,23 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
     if (event->isAutoRepeat()) return;
-
-    bool handled = true;
-    switch (event->key()) {
-        // Chassis movement — forward/backward
-        case Qt::Key_W:  key_w_ = true; break;
-        case Qt::Key_S:  key_s_ = true; break;
-        case Qt::Key_Up:    key_up_ = true; break;
-        case Qt::Key_Down:  key_down_ = true; break;
-        // Chassis movement — left/right turn
-        case Qt::Key_A:  key_a_ = true; break;
-        case Qt::Key_D:  key_d_ = true; break;
-        case Qt::Key_Left:  key_left_ = true; break;
-        case Qt::Key_Right: key_right_ = true; break;
-        // PTZ / gimbal
-        case Qt::Key_I: key_i_ = true; break;
-        case Qt::Key_K: key_k_ = true; break;
-        case Qt::Key_J: key_j_ = true; break;
-        case Qt::Key_L: key_l_ = true; break;
-        // PTZ home (instant, no keepalive needed)
-        case Qt::Key_H: sendPtzHome(); handled = true; QMainWindow::keyPressEvent(event); return;
-        default: handled = false; break;
-    }
-
-    if (handled) {
-        updateMoveCommand();
-        if (!move_keepalive_timer_->isActive())
-            move_keepalive_timer_->start();
+    int k = event->key();
+    if (k == Qt::Key_W || k == Qt::Key_A || k == Qt::Key_S || k == Qt::Key_D ||
+        k == Qt::Key_Up || k == Qt::Key_Left || k == Qt::Key_Down || k == Qt::Key_Right ||
+        k == Qt::Key_I || k == Qt::Key_J || k == Qt::Key_K || k == Qt::Key_L) {
+        held_key_ = k;
+        key_timer_->start();
     }
     QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::keyReleaseEvent(QKeyEvent* event) {
     if (event->isAutoRepeat()) return;
-
-    bool handled = true;
-    switch (event->key()) {
-        case Qt::Key_W:  key_w_ = false; break;
-        case Qt::Key_S:  key_s_ = false; break;
-        case Qt::Key_A:  key_a_ = false; break;
-        case Qt::Key_D:  key_d_ = false; break;
-        case Qt::Key_Up:    key_up_ = false; break;
-        case Qt::Key_Down:  key_down_ = false; break;
-        case Qt::Key_Left:  key_left_ = false; break;
-        case Qt::Key_Right: key_right_ = false; break;
-        case Qt::Key_I: key_i_ = false; break;
-        case Qt::Key_K: key_k_ = false; break;
-        case Qt::Key_J: key_j_ = false; break;
-        case Qt::Key_L: key_l_ = false; break;
-        default: handled = false; break;
-    }
-
-    if (handled) {
-        if (!motionKeysActive()) {
-            sendStopCommand();
-            move_keepalive_timer_->stop();
-        } else {
-            updateMoveCommand();  // other keys still held, recalculate
-        }
+    if (event->key() == held_key_) {
+        held_key_ = 0;
+        key_timer_->stop();
     }
     QMainWindow::keyReleaseEvent(event);
-}
-
-bool MainWindow::motionKeysActive() const {
-    return key_w_ || key_s_ || key_a_ || key_d_ ||
-           key_up_ || key_down_ || key_left_ || key_right_ ||
-           key_i_ || key_j_ || key_k_ || key_l_;
-}
-
-void MainWindow::updateMoveCommand() {
-    // ── Chassis velocity ──
-    double forward  = (key_w_ || key_up_)   ? 1.0 : 0.0;
-    double backward = (key_s_ || key_down_) ? 1.0 : 0.0;
-    double turnLeft = (key_a_ || key_left_) ? 1.0 : 0.0;
-    double turnRight= (key_d_ || key_right_)? 1.0 : 0.0;
-
-    // Angular has a higher gain (×1.25) matching the original MCU protocol (w=0.8 vs v=0.5)
-    double v = (forward - backward) * chassis_speed_factor_;
-    double w = (turnLeft - turnRight) * chassis_speed_factor_ * 1.25;
-    if (v < 0) v *= 0.6;  // reverse safety: slower in reverse
-
-    // ── PTZ / gimbal velocity ──
-    double pan  = ((key_l_ ? 1.0 : 0.0) - (key_j_ ? 1.0 : 0.0)) * ptz_speed_factor_;
-    double tilt = ((key_i_ ? 1.0 : 0.0) - (key_k_ ? 1.0 : 0.0)) * ptz_speed_factor_;
-
-    // ── Select cmd type based on which keys are active ──
-    bool moving  = (forward != backward) || (turnLeft != turnRight);
-    bool gimbal  = (pan != 0.0) || (tilt != 0.0);
-
-    QJsonObject j;
-    if (moving && gimbal) {
-        j["cmd"] = "move_ptz"; j["v"] = v; j["w"] = w; j["pan"] = pan; j["tilt"] = tilt;
-    } else if (moving) {
-        j["cmd"] = "move"; j["v"] = v; j["w"] = w;
-    } else if (gimbal) {
-        j["cmd"] = "ptz"; j["pan"] = pan; j["tilt"] = tilt;
-    } else {
-        return;  // no keys pressed (should not reach here)
-    }
-
-    channel_->cmdSendData(QJsonDocument(j).toJson(QJsonDocument::Compact));
-}
-
-void MainWindow::sendStopCommand() {
-    channel_->cmdSendData("{\"cmd\":\"stop\"}");
-}
-
-void MainWindow::sendPtzHome() {
-    channel_->cmdSendData("{\"cmd\":\"ptz_home\"}");
 }
 
 void MainWindow::initUi() {
@@ -421,8 +334,8 @@ void MainWindow::initConnections() {
         
         stats_monitoring_ = false;
         ai_active_type_.clear();
-        move_keepalive_timer_->stop();
-        sendStopCommand();
+        held_key_ = 0;
+        key_timer_->stop();
         action_hangup_->setEnabled(false);
         action_ai_->setEnabled(false);
         action_fall_->setEnabled(false);

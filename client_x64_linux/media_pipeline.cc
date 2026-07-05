@@ -108,16 +108,11 @@ MediaPipeline::~MediaPipeline() = default;
 
 bool MediaPipeline::CreateAudioDeviceModule() {
   adm_ = worker_thread_->BlockingCall([this] {
-    auto adm = webrtc::CreateAudioDeviceModule(
+    return webrtc::CreateAudioDeviceModule(
         env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
-    if (!adm || adm->Init() != 0) {
-      RTC_LOG(LS_ERROR) << "ADM creation or Init() failed";
-      return webrtc::scoped_refptr<webrtc::AudioDeviceModule>(nullptr);
-    }
-    return adm;
   });
   if (!adm_) {
-    RTC_LOG(LS_ERROR) << "Failed to create or init AudioDeviceModule";
+    RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
     return false;
   }
   return true;

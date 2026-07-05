@@ -129,16 +129,6 @@ void UnixSocketServer::HandleCommand(const std::string& raw_json, int client_fd)
   } else if (cmd == "get_local_sdp") {
     engine_->GetLocalSdp();
     // Response comes later via OnEngineEvent("local_sdp") or ("local_sdp_error")
-  } else if (cmd == "dump_stats") {
-    engine_->DumpStats();
-    // Stats come later via OnEngineEvent("stats") JSON
-  } else if (cmd == "start_stats") {
-    engine_->StartStatsPolling();
-    SendResponse(id, true);
-    // Stats will be pushed every 2s via OnEngineEvent("stats")
-  } else if (cmd == "stop_stats") {
-    engine_->StopStatsPolling();
-    SendResponse(id, true);
   } else {
     SendResponse(id, false, "Unknown command: " + cmd);
   }

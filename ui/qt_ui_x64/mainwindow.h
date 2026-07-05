@@ -104,23 +104,8 @@ private:
     QVector<PeerInfo> peers_;
     bool is_call_active_ = false;
     bool first_connect_ = true;
-    // Speed factors (0.1 ~ 1.0, mapped from slider value / 100)
-    double chassis_speed_factor_ = 0.64;  // default: slider 64 → v≈0.5, w≈0.8
-    double ptz_speed_factor_ = 0.25;      // default: slider 25 → pan/tilt≈0.25
-
-    // Key state tracking — chassis + gimbal
-    bool key_w_=false, key_s_=false, key_a_=false, key_d_=false;
-    bool key_up_=false, key_down_=false, key_left_=false, key_right_=false;
-    bool key_i_=false, key_j_=false, key_k_=false, key_l_=false;
-
-    // Keepalive timer (80ms); started when first motion key pressed, stopped when all released
-    QTimer* move_keepalive_timer_ = nullptr;
-
-    // Motion command helpers
-    void updateMoveCommand();
-    void sendStopCommand();
-    void sendPtzHome();
-    bool motionKeysActive() const;
+    QTimer* key_timer_ = nullptr;
+    int held_key_ = 0;
 
     // Danger warning overlay
     QWidget* danger_overlay_ = nullptr;

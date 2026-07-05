@@ -15,11 +15,7 @@ group("apps") {
     deps += [
       "//apps/peerconnection/media_pipeline:media_pipeline",
       "//apps/webrtc_engine:webrtc_engine",
+      "//apps/client_x64_linux:client_x64",
     ]
-    if (target_cpu == "arm64") {
-      deps += [ "//apps/client_arm64_linux:client_arm64" ]
-    } else {
-      deps += [ "//apps/client_x64_linux:client_x64" ]
-    }
   }
 }

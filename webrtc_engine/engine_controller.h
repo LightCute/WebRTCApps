@@ -26,9 +26,6 @@ class EngineController {
   virtual void HangUp() = 0;
   virtual void SendData(const std::string& text) = 0;
   virtual void GetLocalSdp() = 0;
-  virtual void DumpStats() = 0;
-  virtual void StartStatsPolling() = 0;
-  virtual void StopStatsPolling() = 0;
 
   virtual bool connection_active() const = 0;
 };

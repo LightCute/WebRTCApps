@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QFile>
+#include <QScreen>
 #include <QDebug>
 
 int main(int argc, char *argv[])
@@ -20,9 +21,9 @@ int main(int argc, char *argv[])
     // Load Material Dark QSS stylesheet
     QString app_dir = a.applicationDirPath();
     QStringList qss_paths = {
-        app_dir + "/../../material-dark.qss",       // build dir (ui_rk/build-arm64 -> webrtc_monitor/)
-        app_dir + "/../material-dark.qss",          // alt build layout
-        app_dir + "/material-dark.qss",             // deployed alongside binary
+        app_dir + "/../../material-dark.qss",
+        app_dir + "/../material-dark.qss",
+        app_dir + "/material-dark.qss",
     };
     bool qss_loaded = false;
     for (const auto& path : qss_paths) {
@@ -42,6 +43,19 @@ int main(int argc, char *argv[])
     }
 
     MainWindow w;
-    w.showFullScreen();
+
+    // Hard-fill the screen: frameless + explicit geometry from primary screen.
+    // showMaximized() / showFullScreen() are unreliable on embedded WMs.
+    w.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    QScreen* screen = QApplication::primaryScreen();
+    if (screen) {
+        QRect geo = screen->geometry();
+        qDebug() << "Screen:" << geo.width() << "x" << geo.height();
+        w.setGeometry(geo);
+    } else {
+        w.setGeometry(0, 0, 1024, 600);  // fallback for headless / no QScreen
+    }
+    w.show();
+
     return a.exec();
 }
