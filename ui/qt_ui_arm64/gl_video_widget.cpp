@@ -46,7 +46,30 @@ void GlVideoWidget::setDetections(QVector<Detection> detections) {
     detections.erase(std::remove_if(detections.begin(), detections.end(),
         [](const Detection& d) { return d.conf < 0.45f; }),
         detections.end());
-    fprintf(stderr, "GlVideoWidget: got %d detections, %d above threshold (tex=%dx%d)\n",
+
+    // ── Post-NMS: suppress duplicate overlapping boxes of same class ──
+    for (int i = 0; i < detections.size(); i++) {
+        for (int j = detections.size() - 1; j > i; j--) {
+            if (detections[i].cls_id != detections[j].cls_id) continue;
+            int l = qMax(detections[i].left, detections[j].left);
+            int t = qMax(detections[i].top, detections[j].top);
+            int r = qMin(detections[i].right, detections[j].right);
+            int b = qMin(detections[i].bottom, detections[j].bottom);
+            if (l >= r || t >= b) continue;
+            float inter = (r - l) * (b - t);
+            float areaI = (detections[i].right - detections[i].left)
+                        * (detections[i].bottom - detections[i].top);
+            float areaJ = (detections[j].right - detections[j].left)
+                        * (detections[j].bottom - detections[j].top);
+            if (inter / (areaI + areaJ - inter) > 0.5f) {
+                if (detections[i].conf < detections[j].conf)
+                    detections[i] = detections[j];
+                detections.removeAt(j);
+            }
+        }
+    }
+
+    fprintf(stderr, "GlVideoWidget: got %d detections, %d after NMS (tex=%dx%d)\n",
             total, (int)detections.size(), tex_w_, tex_h_);
     detections_ = std::move(detections);
     update();  // trigger repaint when new detections arrive
