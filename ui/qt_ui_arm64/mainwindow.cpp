@@ -614,7 +614,7 @@ void MainWindow::doCall(int peer_id) {
 
 void MainWindow::switchToListMode() {
     ui.stack_->setCurrentIndex(0);
-    centralWidget()->layout()->setContentsMargins(4, 4, 4, 4);
+    centralWidget()->layout()->setContentsMargins(0, 0, 0, 0);
     ui.log_area_->setVisible(true);
     if (local_video_)
         local_video_->hide();

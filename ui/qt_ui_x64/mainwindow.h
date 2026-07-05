@@ -106,7 +106,7 @@ private:
     bool first_connect_ = true;
     // Speed factors (0.1 ~ 1.0, mapped from slider value / 100)
     double chassis_speed_factor_ = 0.64;  // default: slider 64 → v≈0.5, w≈0.8
-    double ptz_speed_factor_ = 0.50;      // default: slider 50 → pan/tilt≈0.5
+    double ptz_speed_factor_ = 0.25;      // default: slider 25 → pan/tilt≈0.25
 
     // Key state tracking — chassis + gimbal
     bool key_w_=false, key_s_=false, key_a_=false, key_d_=false;
