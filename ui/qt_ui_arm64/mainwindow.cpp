@@ -56,6 +56,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ai_receiver_, &AiReceiver::detectionsReady, this, &MainWindow::onAiDetections);
     ai_receiver_->start();
 
+    // Person tracking timer (150ms interval, triggered when YOLOv5 is active)
+    track_timer_ = new QTimer(this);
+    track_timer_->setInterval(150);
+    connect(track_timer_, &QTimer::timeout, this, &MainWindow::onTrackingTimer);
+    last_manual_key_.start();
+
     // Voice chat
     voice_mgr_ = new VoiceChatManager(this);
     connect(voice_mgr_, &VoiceChatManager::daemonLog, this, &MainWindow::log);
@@ -854,6 +860,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
     if (k == Qt::Key_W || k == Qt::Key_A || k == Qt::Key_S || k == Qt::Key_D ||
         k == Qt::Key_Up || k == Qt::Key_Left || k == Qt::Key_Down || k == Qt::Key_Right) {
         held_key_ = k;
+        last_manual_key_.restart();  // pause person tracking
         startKeyRepeat();
     }
     QMainWindow::keyPressEvent(event);
@@ -983,12 +990,23 @@ void MainWindow::stopAi() {
         log("AI stopped, boxes cleared");
     }
     ai_type_ = AiType::None;
+    track_timer_->stop();
+    track_target_valid_ = false;
     local_video_->setDetections({});
     resetAllAiButtons();
 }
 
 void MainWindow::onAiDetections(QVector<Detection> detections) {
     local_video_->setDetections(detections);
+
+    // ── Person tracking: YOLOv5 → find largest person → chassis follow ──
+    if (ai_type_ == AiType::YoloV5) {
+        if (findTrackTarget(detections)) {
+            if (!track_timer_->isActive())
+                track_timer_->start();
+        }
+    }
+
     // Forward to x64 via DataChannel
     QJsonObject root;
     root["ts"] = (qint64)0;
@@ -1006,6 +1024,59 @@ void MainWindow::onAiDetections(QVector<Detection> detections) {
     root["dets"] = arr;
     QJsonDocument doc(root);
     channel_->cmdSendData("AI:DET:" + QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+}
+
+bool MainWindow::findTrackTarget(const QVector<Detection>& dets) {
+    track_target_valid_ = false;
+    int best_area = 0;
+    for (const auto& d : dets) {
+        if (d.label.toLower() != "person") continue;
+        int area = (d.right - d.left) * (d.bottom - d.top);
+        if (area > best_area) {
+            best_area = area;
+            track_cx_ = (d.left + d.right) / 2;
+            track_cy_ = (d.top + d.bottom) / 2;
+            track_w_ = d.right - d.left;
+            track_h_ = d.bottom - d.top;
+            track_target_valid_ = true;
+        }
+    }
+    // Store frame dims from first detection
+    if (!dets.isEmpty()) {
+        track_fw_ = qMax(dets[0].right, track_fw_);
+        track_fh_ = qMax(dets[0].bottom, track_fh_);
+    }
+    return track_target_valid_;
+}
+
+void MainWindow::onTrackingTimer() {
+    if (!track_target_valid_) return;
+
+    // Manual key override: pause tracking for 1s after last manual key
+    if (last_manual_key_.elapsed() < 1000) return;
+
+    // Compute expected person height ratio vs frame height
+    float h_ratio = (float)track_h_ / track_fh_;
+
+    // ── Horizontal tracking: turn toward the person ──
+    float cx = (float)track_cx_ / track_fw_;  // 0..1, 0.5 = centered
+    float deadband = 0.08f;  // ±8% dead zone
+    float w = 0.0f;
+    if (cx < 0.5f - deadband)       w =  0.15f;  // person left → turn left
+    else if (cx > 0.5f + deadband)  w = -0.15f;  // person right → turn right
+
+    // ── Distance tracking: move forward/back ──
+    float v = 0.0f;
+    if (h_ratio < 0.12f)      v =  0.10f;  // too far → approach
+    else if (h_ratio > 0.35f) v = -0.08f;  // too close → back off
+
+    if (w == 0.0f && v == 0.0f) return;  // nothing to do
+
+    QJsonObject cmd;
+    cmd["cmd"] = "move";
+    cmd["v"] = v;
+    cmd["w"] = w;
+    sendSerialJson(QJsonDocument(cmd).toJson(QJsonDocument::Compact));
 }
 
 void MainWindow::toggleVoiceChat()

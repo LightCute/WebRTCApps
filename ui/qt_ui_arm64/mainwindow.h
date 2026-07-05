@@ -12,6 +12,7 @@
 #include <QStatusBar>
 #include <QFile>
 #include <QTextStream>
+#include <QElapsedTimer>
 #include "webrtc_process_manager.h"
 #include "control_channel.h"
 #include "dma_buf_video_source.h"
@@ -101,6 +102,16 @@ private:
     AiReceiver* ai_receiver_ = nullptr;
     QProcess* ai_proc_ = nullptr;
     AiType ai_type_ = AiType::None;
+
+    // Person tracking (YOLOv5 → chassis follow)
+    QTimer* track_timer_ = nullptr;
+    bool track_target_valid_ = false;
+    int track_cx_ = 0, track_cy_ = 0;     // target center (frame coords)
+    int track_w_ = 0, track_h_ = 0;       // target box size
+    int track_fw_ = 640, track_fh_ = 480; // frame dimensions
+    QElapsedTimer last_manual_key_;        // manual key override timer
+    void onTrackingTimer();                // periodic tracking step
+    bool findTrackTarget(const QVector<Detection>& dets); // select largest person
 
     // Log
     QFile* log_file_ = nullptr;
