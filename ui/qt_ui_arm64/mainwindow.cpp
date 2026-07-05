@@ -151,6 +151,7 @@ void MainWindow::initUi() {
     // Unified font sizes (Qt5 uic doesn't support <pointsize> in .ui)
     ui.stats_group_->setStyleSheet("QLabel { font-size: 12px; }");
     ui.chat_title_->setStyleSheet("font-size: 16px; font-weight: bold;");
+    ui.chat_list_->setStyleSheet("font-size: 14px;");
 
     // ---- Toolbar ----
     toolbar_ = addToolBar("Main");
@@ -835,6 +836,7 @@ void MainWindow::onStatsReceived(const QJsonObject& s) {
 
 void MainWindow::log(const QString& msg) {
     ui.log_area_->appendPlainText(msg);
+    ui.chat_list_->appendPlainText(msg);  // also fill listPage display
     if (log_file_ && log_file_->isOpen()) {
         QTextStream ts(log_file_);
         ts << QDateTime::currentDateTime().toString("HH:mm:ss.zzz") << " " << msg << "\n";
