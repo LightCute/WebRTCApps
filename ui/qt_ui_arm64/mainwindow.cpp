@@ -999,7 +999,7 @@ void MainWindow::stopAi() {
 void MainWindow::onAiDetections(QVector<Detection> detections) {
     local_video_->setDetections(detections);
 
-    // ── Person tracking: YOLOv5 → find largest person → chassis follow ──
+    // ── Person tracking: YOLOv5 → find smallest person → chassis follow ──
     if (ai_type_ == AiType::YoloV5) {
         if (findTrackTarget(detections)) {
             if (!track_timer_->isActive())
@@ -1011,15 +1011,28 @@ void MainWindow::onAiDetections(QVector<Detection> detections) {
     QJsonObject root;
     root["ts"] = (qint64)0;
     QJsonArray arr;
-    for (const auto& d : detections) {
+    // When YOLOv5 tracking is active, only send the tracking target box
+    if (ai_type_ == AiType::YoloV5 && track_target_valid_) {
         QJsonObject o;
-        o["cls"] = d.cls_id;
-        o["label"] = d.label;
-        o["conf"] = d.conf;
+        o["cls"] = 0;
+        o["label"] = "person";
+        o["conf"] = 1.0;
         QJsonArray box;
-        box.append(d.left); box.append(d.top); box.append(d.right); box.append(d.bottom);
+        box.append(track_cx_ - track_w_/2); box.append(track_cy_ - track_h_/2);
+        box.append(track_cx_ + track_w_/2); box.append(track_cy_ + track_h_/2);
         o["box"] = box;
         arr.append(o);
+    } else {
+        for (const auto& d : detections) {
+            QJsonObject o;
+            o["cls"] = d.cls_id;
+            o["label"] = d.label;
+            o["conf"] = d.conf;
+            QJsonArray box;
+            box.append(d.left); box.append(d.top); box.append(d.right); box.append(d.bottom);
+            o["box"] = box;
+            arr.append(o);
+        }
     }
     root["dets"] = arr;
     QJsonDocument doc(root);
@@ -1028,11 +1041,11 @@ void MainWindow::onAiDetections(QVector<Detection> detections) {
 
 bool MainWindow::findTrackTarget(const QVector<Detection>& dets) {
     track_target_valid_ = false;
-    int best_area = 0;
+    int best_area = 999999;
     for (const auto& d : dets) {
         if (d.label.toLower() != "person") continue;
         int area = (d.right - d.left) * (d.bottom - d.top);
-        if (area > best_area) {
+        if (area < best_area) {  // smallest person = tracking target
             best_area = area;
             track_cx_ = (d.left + d.right) / 2;
             track_cy_ = (d.top + d.bottom) / 2;
