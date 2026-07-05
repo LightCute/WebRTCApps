@@ -26,7 +26,7 @@ void VoiceChatManager::start(const QString& socket_path)
     if (proc_.state() != QProcess::NotRunning) return;
     QString script_dir = QCoreApplication::applicationDirPath();
     proc_.setWorkingDirectory(script_dir);
-    proc_.start("python3", {"voice_chat.py", "--socket", socket_path});
+    proc_.start("/usr/bin/python3", {"voice_chat.py", "--socket", socket_path});
 }
 
 void VoiceChatManager::stop()
