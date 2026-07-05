@@ -44,13 +44,13 @@ int main(int argc, char *argv[])
 
     MainWindow w;
 
-    // Hard-fill the screen: frameless + explicit geometry from primary screen.
-    // showMaximized() / showFullScreen() are unreliable on embedded WMs.
-    w.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    // showMaximized() is unreliable on embedded WMs — manually compute
+    // the maximized geometry from screen resolution and fill the screen.
     QScreen* screen = QApplication::primaryScreen();
     if (screen) {
-        QRect geo = screen->geometry();
-        qDebug() << "Screen:" << geo.width() << "x" << geo.height();
+        QRect geo = screen->availableGeometry();  // excludes system panel if any
+        qDebug() << "Screen available:" << geo.width() << "x" << geo.height()
+                 << "at" << geo.x() << "," << geo.y();
         w.setGeometry(geo);
     } else {
         w.setGeometry(0, 0, 1024, 600);  // fallback for headless / no QScreen
