@@ -61,7 +61,7 @@ void GlVideoWidget::setDetections(QVector<Detection> detections) {
                         * (detections[i].bottom - detections[i].top);
             float areaJ = (detections[j].right - detections[j].left)
                         * (detections[j].bottom - detections[j].top);
-            if (inter / (areaI + areaJ - inter) > 0.5f) {
+            if (inter / (areaI + areaJ - inter) > 0.3f) {
                 if (detections[i].conf < detections[j].conf)
                     detections[i] = detections[j];
                 detections.removeAt(j);
