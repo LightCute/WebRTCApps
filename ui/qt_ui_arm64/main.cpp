@@ -43,19 +43,21 @@ int main(int argc, char *argv[])
     }
 
     MainWindow w;
+    w.show();
 
-    // showMaximized() is unreliable on embedded WMs — manually compute
-    // the maximized geometry from screen resolution and fill the screen.
-    QScreen* screen = QApplication::primaryScreen();
+    // show() must come first so the window is assigned to a screen.
+    // Then read the screen's availableGeometry (excludes system panel)
+    // and resize to fill every available pixel.
+    QScreen* screen = w.screen();
     if (screen) {
-        QRect geo = screen->availableGeometry();  // excludes system panel if any
+        QRect geo = screen->availableGeometry();
         qDebug() << "Screen available:" << geo.width() << "x" << geo.height()
                  << "at" << geo.x() << "," << geo.y();
         w.setGeometry(geo);
     } else {
-        w.setGeometry(0, 0, 1024, 600);  // fallback for headless / no QScreen
+        // Hard fallback: 1024x600 minus ~32px top status bar
+        w.setGeometry(0, 32, 1024, 568);
     }
-    w.show();
 
     return a.exec();
 }
