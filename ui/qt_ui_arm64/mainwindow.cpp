@@ -167,6 +167,10 @@ void MainWindow::initUi() {
     peer_input_->setEnabled(false);
     toolbar_->insertWidget(toolbar_->actions().at(3), peer_input_);
 
+    action_voice_chat_ = toolbar_->addAction("语音对话");
+    action_voice_chat_->setEnabled(false);
+    action_voice_chat_->setToolTip("切换语音对话");
+
     action_call_ = toolbar_->addAction("呼叫");
     action_call_->setEnabled(false);
     action_hangup_ = toolbar_->addAction("挂断");
@@ -184,12 +188,6 @@ void MainWindow::initUi() {
     action_fire_ = toolbar_->addAction("火灾检测");
     action_fire_->setEnabled(false);
     action_fire_->setToolTip("切换火灾/烟雾检测");
-    toolbar_->addSeparator();
-
-    action_voice_chat_ = toolbar_->addAction("语音对话");
-    action_voice_chat_->setEnabled(false);
-    action_voice_chat_->setToolTip("切换语音对话");
-
     statusBar()->showMessage("Starting...");
 }
 
