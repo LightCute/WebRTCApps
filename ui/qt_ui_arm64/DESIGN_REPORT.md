@@ -153,51 +153,158 @@
 
 ### 2.3.1 软件整体介绍
 
-机器人端软件架构为**多进程 + 多 IPC** 模式：
+系统软件由三部分组成：**公网信令服务器**、**机器人端**（RK3588 + MCU）、**PC 监护端**（x64 Linux）。三者的数据流关系如下：
 
 ```
-┌─────────────────────────────────────────────┐
-│           Qt 主进程 (ui_rk)                  │
-│  ┌───────────────────────────────────────┐  │
-│  │ UI 渲染 (Qt5 + OpenGL ES)             │  │
-│  │ 子进程管理 (QProcess)                  │  │
-│  │ ├─ client_arm64 (WebRTC daemon)       │  │
-│  │ ├─ reason/fall_detect/fire_detect     │  │
-│  │ └─ voice_chat.py (Python)             │  │
-│  │ 外部通信: ControlChannel / AiReceiver  │  │
-│  │          SerialWorker / VoiceChat     │  │
-│  └───────────────────────────────────────┘  │
-│        │ Unix Socket │ QProcess              │
-│  ┌─────┴──────┐ ┌───┴──────────┐           │
-│  │WebRTC引擎   │ │AI推理进程×3   │           │
-│  │RGA→MPP→RTP │ │DMA-BUF→NPU   │           │
-│  └────────────┘ └──────────────┘           │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       公网服务器                                  │
+│  ┌─────────────────────┐    ┌──────────────────┐                 │
+│  │ peerconnection_server│    │  coturn (开源)    │                 │
+│  │ (信令中继, port 8888)│    │  (STUN/TURN中继) │                 │
+│  └─────────┬───────────┘    └────────┬─────────┘                 │
+│            │ SDP/ICE 交换            │ UDP 媒体流                 │
+│            │ HTTP 长轮询             │ (P2P 失败时)               │
+└────────────┼────────────────────────┼───────────────────────────┘
+             │                        │
+    ┌────────┴────────┐      ┌────────┴────────┐
+    │   PC 监护端      │      │  机器人端         │
+    │  (x64 Linux)    │      │  (ARM64 + MCU)  │
+    │                 │      │                  │
+    │  qt_ui_x64      │◄────►│  qt_ui_arm64    │
+    │  (Qt5 UI)       │WebRTC│  (Qt5 UI)       │
+    │       │         │P2P   │       │          │
+    │  client_x64     │      │  client_arm64   │
+    │  (WebRTC daemon)│      │  (WebRTC引擎)   │
+    │                 │      │       │          │
+    │  纯软件编解码    │      │  RGA/MPP 硬件   │
+    │  OpenH264/VP8   │      │  DMA-BUF 零拷贝 │
+    │                 │      │       │          │
+    │                 │      │  STM32 MCU      │
+    │                 │      │  (底盘/云台)    │
+    └─────────────────┘      └────────────────┘
 ```
 
-PC 端软件架构类似，但视频编解码使用纯软件方案（OpenH264/VP8/VP9），无硬件加速依赖。视频帧通过 System V 共享内存（SysV SHM）在 daemon 与 Qt UI 间传递。
+**PC 端与机器人端**通过公网信令服务器建立 WebRTC P2P 连接。信令服务器（`peerconnection_server`，源码在 [apps/peerconnection/server/](apps/peerconnection/server/main.cc)）负责交换 SDP 和 ICE 候选地址；coturn 开源服务器提供 STUN/TURN 中继服务，在 P2P 直连失败时兜底。连接建立后，音视频 RTP 流和 DataChannel 控制数据直接在两端间传输，不经过服务器。
 
-### 2.3.2 软件各模块介绍
+**机器人端 RK3588**（源码在 [apps/client_arm64_linux/](apps/client_arm64_linux/main.cc)）运行 Qt5 主进程和 WebRTC daemon，通过 QProcess 管理 AI 推理进程和语音对话 Python 进程，通过 UART 与 MCU 通信。**MCU**（STM32H750，源码在 MCU_SOFTWARE_DESIGN.md）负责底盘差速控制、电机 PWM 驱动、舵机云台控制和串口协议解析。
 
-**（1）视频采集与编码管线**
+### 2.3.2 信令服务器（peerconnection_server）
 
-摄像头通过 V4L2 框架采集 YUYV 格式原始帧。`RgaVideoTrackSource` 继承自 WebRTC 的 `VideoTrackSource` 和 `RawVideoSinkInterface`，直接接收 V4L2 的裸数据回调，绕过 WebRTC 默认的 libyuv CPU 转换。RGA 硬件模块执行 YUYV→NV12 格式转换，结果写入 DMA-BUF 内存。自定义 `Nv12DmaBufBuffer` 类携带 DMA-BUF 文件描述符（fd）随 WebRTC 的 `VideoFrame` 穿透整个管线。MPP 硬件编码器通过 `mpp_buffer_import_with_tag()` 导入该 fd，实现零拷贝编码。编码完成后，WebRTC 标准 RTP 管线完成 FU-A 分片和网络发送。
+信令服务器是客户端之间建立 P2P 连接的桥梁。它本身不传输音视频数据，仅负责交换 SDP 会话描述和 ICE 候选地址。
 
-**（2）WebRTC 信令与连接管理**
+**主循环**（[main.cc:133-233](apps/peerconnection/server/main.cc#L133-L233)）：使用 `select()` 多路复用监听 TCP Socket（默认端口 8888，可通过 `--port` 参数修改 [main.cc:42](apps/peerconnection/server/main.cc#L42)）。最大支持 `FD_SETSIZE - 2` 个并发连接 [main.cc:48](apps/peerconnection/server/main.cc#L48)。每个客户端连接映射为一个 `ChannelMember` 对象。
 
-两个客户端通过 HTTP 长轮询信令协议（`PeerConnectionClient`）连接公网信令服务器。交换 SDP Offer/Answer 和 ICE Candidates，建立 P2P 连接。当双方处于对称 NAT 后无法直连时，TURN 服务器中继媒体流。DataChannel 使用协商式 SCTP 通道，传输控制指令和 AI 告警数据。
+**HTTP 信令协议**：客户端通过原始 TCP Socket 发送 HTTP 请求与服务器交互。`DataSocket` 类（[data_socket.h:54-139](apps/peerconnection/server/data_socket.h#L54-L139)）实现了简化的 HTTP 解析器——`ParseHeaders()` 解析请求行和头部字段，`ParseMethodAndPath()` 提取 HTTP 方法和路径，`ParseContentLengthAndType()` 处理 POST 请求的 body 长度和 MIME 类型。
 
-**（3）AI 推理管线**
+服务器处理以下 HTTP 端点：
 
-AI 推理进程从 DMA-BUF 共享内存读取 I420 视频帧。RGA 硬件将 I420 转换为 BGR 并 resize 到模型输入尺寸（640×640）。RKNN API 加载 INT8 量化后的 `.rknn` 模型文件，在 NPU 上执行推理（约 250ms/帧）。后处理包括 Anchor-Free 解码（ltrb 距离→边界框坐标）、NMS 去重、坐标缩放（模型空间→帧空间）。结果通过 Unix Socket 以 JSON 格式发送给 Qt UI。
+| 端点 | 方法 | 功能 | 代码位置 |
+|------|------|------|---------|
+| `/sign_in?<name>` | GET | 客户端注册上线，返回在线 peer 列表（CSV 格式 `name,id,connected`） | [main.cc:158-159](apps/peerconnection/server/main.cc#L158-L159) |
+| `/wait?peer_id=<id>` | GET | 长轮询：挂起直到有新消息（SDP/ICE）到达，用于服务器推送通知 | [main.cc:165-167](apps/peerconnection/server/main.cc#L165-L167) |
+| `/message?peer_id=<from>&to=<to>` | POST | 转发 SDP Offer/Answer 和 ICE Candidates，body 为 JSON | [main.cc:169-171](apps/peerconnection/server/main.cc#L169-L171) |
+| `/hangup?peer_id=<id>` | GET | 挂断通知：服务器转发给通话双方，标记 call state | [main.cc:172-173](apps/peerconnection/server/main.cc#L172-L173) |
+| `/hangup_confirm?peer_id=<id>` | GET | 挂断确认：双方都确认后清除 call state | [main.cc:175-179](apps/peerconnection/server/main.cc#L175-L179) |
+| `/sign_out?peer_id=<id>` | GET | 客户端下线：移除 member 并广播更新后的 peer 列表 | [main.cc:180-187](apps/peerconnection/server/main.cc#L180-L187) |
 
-**（4）MCU 串口通信**
+**ChannelMember**（[peer_channel.h:23-73](apps/peerconnection/server/peer_channel.h#L23-L73)）：每个在线客户端对应一个 ChannelMember。核心字段：`id_`（自增分配 [peer_channel.cc:37](apps/peerconnection/server/peer_channel.cc#L37)）、`name_`（从 `/sign_in` 提取）、`connected_`、`call_partner_id_`（0=空闲, >0=通话中 [peer_channel.h:35](apps/peerconnection/server/peer_channel.h#L35)）。支持消息队列 `queue_`：当目标 peer 不在等待状态时，消息先入队，下次 `/wait` 时自动发送。
 
-`SerialWorker` 线程通过 `/dev/ttyS9` 以 115200 baud 与 MCU 通信。发送时使用 0xAA 0x55 帧封装 JSON 载荷，附加 XOR 校验和 `\r\n` 尾帧。接收时通过 7 状态机（WAIT_H1→H2→LEN→DATA→XOR→CR→LF）解析帧。MCU 端 300ms 看门狗定时器：收到指令即重置，超时自动停止电机和舵机，确保通信中断时机器人安全停机。
+**PeerChannel**（[peer_channel.h:76-145](apps/peerconnection/server/peer_channel.h#L76-L145)）：管理所有 `ChannelMember` 的集合，提供 `AddMember()`、`Lookup()`、`IsTargetedRequest()`、`HandleHangUp()`、`CheckForTimeout()` 等方法。`BuildPeerList()` 生成标准格式的在线 peer 列表。
 
-**（5）PC 端控制逻辑**
+### 2.3.3 coturn 服务器（STUN/TURN）
 
-PC 端 Qt UI 采用事件驱动按键处理：按下按键即发送对应 JSON 控制指令，松开即发送停止指令。12 个键位覆盖底盘全向移动和云台二维旋转。右侧面板提供底盘速度和云台速度两个滑块（0.1~1.0 连续可调）。AI 按钮触发 DataChannel 文本指令（`AI:ON:yolov5`），机器人端收到后启动对应推理进程。
+coturn 是一款开源的 STUN/TURN 服务器，在本系统中部署在公网服务器上，与信令服务器协同工作。当 WebRTC 的 ICE 框架无法通过 Host 候选（局域网直连）或 SRFLX 候选（STUN 穿透）建立连接时，coturn 作为 TURN Relay 候选提供中继转发服务，确保多媒体数据在任意网络环境下可达。coturn 在本系统中的作用是纯中继——不解析音视频内容，不参与信令，仅转发 UDP 数据包。
+
+### 2.3.4 机器人端 RK3588 软件
+
+机器人端 RK3588 运行 Linux 系统，软件采用**多进程协作 + 多种 IPC 通信**架构。Qt 主进程（`ui_rk`）作为中央调度器，管理 WebRTC daemon、AI 推理进程和语音对话进程的生命周期。
+
+**（a）WebRTC Daemon（client_arm64）**
+
+入口文件 [apps/client_arm64_linux/main.cc:23-86](apps/client_arm64_linux/main.cc#L23-L86)。初始化流程：
+
+1. 创建 WebRTC 线程（signaling/worker/network），启动 SSL [main.cc:32-35](apps/client_arm64_linux/main.cc#L32-L35)
+2. 创建 `WebRTCEngine` 实例并 `Init()` [main.cc:65-67](apps/client_arm64_linux/main.cc#L65-L67)
+3. 创建 `UnixSocketServer` 监听控制 socket（`/tmp/webrtc_runtime/webrtc_ctrl.sock`），注册为 `EngineObserver` [main.cc:73-77](apps/client_arm64_linux/main.cc#L73-L77)
+4. 进入等待循环 [main.cc:78](apps/client_arm64_linux/main.cc#L78)
+
+WebRTCEngine（[webrtc_engine.h:33-147](apps/webrtc_engine/webrtc_engine.h#L33-L147)）是核心引擎，实现了 4 个关键接口：
+- `EngineController`：线程安全的控制接口——`ConnectToServer()`、`ConnectToPeer()`、`HangUp()`、`SendData()` [engine_controller.h:16-31](apps/webrtc_engine/engine_controller.h#L16-L31)
+- `PeerConnectionObserver`：P2P 连接生命周期回调——`OnAddTrack()` 添加远端音视频轨道 [webrtc_engine.cc:73](apps/webrtc_engine/webrtc_engine.cc#L73)、`OnIceConnectionChange()` 监控 ICE 状态 [webrtc_engine.cc:78](apps/webrtc_engine/webrtc_engine.cc#L78)、`OnIceCandidate()` 收集本地候选地址 [webrtc_engine.cc:80](apps/webrtc_engine/webrtc_engine.cc#L80)
+- `CreateSessionDescriptionObserver`：SDP 协商回调——`OnSuccess()` 设置 local description 后发送 SDP [webrtc_engine.cc:85](apps/webrtc_engine/webrtc_engine.cc#L85)
+- `PeerConnectionClientObserver`：信令服务器事件——`OnSignedIn()`、`OnPeerConnected()`、`OnMessageFromPeer()` 接收远端 SDP/ICE [webrtc_engine.cc:88-96](apps/webrtc_engine/webrtc_engine.cc#L88-L96)
+
+`InitializePeerConnection()`（[webrtc_engine.cc:651-721](apps/webrtc_engine/webrtc_engine.cc#L651-L721)）：创建 PeerConnection 的完整流程——确保 3 个线程就绪 → 创建 AudioDeviceModule → 调用平台 PcFactory 的 `Create()` 构建工厂和连接 → 添加 Audio/Video Track → 创建协商式 DataChannel（id=0, ordered=true）。
+
+**（b）视频采集与编码管线**
+
+入口类 `RgaVideoTrackSource`（[rga_video_track_source.h:33-83](apps/client_arm64_linux/rga_video_track_source.h#L33-L83)），双继承 `VideoTrackSource` + `RawVideoSinkInterface`：
+
+- **输入**：`OnRawFrame(uint8_t* videoFrame, size_t videoFrameLength, VideoCaptureCapability frameInfo, VideoRotation rotation, int64_t captureTime)` [rga_video_track_source.cc:157](apps/client_arm64_linux/rga_video_track_source.cc#L157) — 来自 V4L2 的裸 YUYV 数据
+- **DMA-BUF 路径**：RGA blit YUYV→NV12 到 `capture_pool_->GetFd()` [rga_video_track_source.cc:188-208](apps/client_arm64_linux/rga_video_track_source.cc#L188-L208) → 创建 `Nv12DmaBufBuffer(w, h, cap_fd)` [rga_video_track_source.cc:204](apps/client_arm64_linux/rga_video_track_source.cc#L204)
+- **CPU 回退路径**：RGA blit 到 CPU buffer → memcpy 到标准 NV12Buffer [rga_video_track_source.cc:218-242](apps/client_arm64_linux/rga_video_track_source.cc#L218-L242)
+- **输出**：`sink_->OnFrame(frame)` [rga_video_track_source.cc:252](apps/client_arm64_linux/rga_video_track_source.cc#L252) — 交付 VideoFrame 给编码器
+
+MPP 编码器 `MppH264Encoder::EncodeOne()`（[rk_mpp_encoder.cc:217-373](apps/client_arm64_linux/rk_mpp_encoder.cc#L217-L373)）：
+- **输入**：`const VideoFrame& frame`
+- 检测 DMA-BUF fd：`GetNv12DmaBufFd(frame)` ≥0 → `mpp_buffer_import_with_tag(MPP_BUFFER_TYPE_DRM, fd)` [rk_mpp_encoder.cc:251-260](apps/client_arm64_linux/rk_mpp_encoder.cc#L251-L260)
+- 无 fd → CPU memcpy 回退
+- `mpi->encode_put_frame(ctx, frm)` [rk_mpp_encoder.cc:307](apps/client_arm64_linux/rk_mpp_encoder.cc#L307) 提交硬件编码
+- 轮询 `mpi->encode_get_packet()` 获取 H.264 码流 [rk_mpp_encoder.cc:312-330](apps/client_arm64_linux/rk_mpp_encoder.cc#L312-L330)
+- **输出**：`callback->OnEncodedImage(img, &codec_specific)` 进入 RTP 打包管线
+
+**（c）AI 推理管线**
+
+Qt UI 通过 `startAi()`（[mainwindow.cpp:904-969](apps/ui/qt_ui_arm64/mainwindow.cpp#L904-L969)）启动 AI 推理进程。根据 `AiType` 选择不同的模型和推理二进制（YOLOv5→`reason`，跌倒→`fall_detect`，火灾→`fire_detect`），传入参数包括 SHM 路径、模型路径、推理间隔（`--infer-interval-ms=250`）、置信度阈值（`--conf-threshold=0.45`）、结果输出 socket（`--result-socket=/tmp/webrtc_runtime/ai_detections.sock`）。
+
+推理进程（参考实现 [main.cc:91-356](main.cc#L91-L356)）执行完整管线：DMA-BUF 读取 I420 帧 → RGA 转换 I420→BGR（resize 到 640×640 [main.cc:48-67](main.cc#L48-L67)）→ `rknn_run(ctx, nullptr)` [main.cc:229-230](main.cc#L229-L230) NPU 推理 → Anchor-Free 解码（ltrb 距离→边界框 [main.cc:248-279](main.cc#L248-L279)）→ NMS 去重（IoU 0.45 [main.cc:282-304](main.cc#L282-L304)）→ 坐标缩放（模型坐标→原始帧坐标 [main.cc:315-318](main.cc#L315-L318)）→ JSON 输出到 Unix Socket。
+
+Qt UI 的 `AiReceiver`（[ai_receiver.cpp:31-53](apps/ui/qt_ui_arm64/ai_receiver.cpp#L31-L53)）监听该 socket，解析 `{"dets":[{"cls":int,"label":str,"box":[l,t,r,b],"conf":float}]}` 格式，发射 `detectionsReady(QVector<Detection>)` 信号。
+
+**（d）MCU 串口通信**
+
+`SerialWorker`（[serial_worker.cpp:90-161](apps/ui/qt_ui_arm64/serial_worker.cpp#L90-L161)）工作流程：
+- **发送**：`enqueue(QString)` [serial_worker.cpp:38-41](apps/ui/qt_ui_arm64/serial_worker.cpp#L38-L41) 将 JSON 入队 → 主循环中取出 → 封装 0xAA 0x55 帧头 + 单字节 LEN + JSON 载荷 + XOR 校验 + `\r\n` 帧尾 [serial_worker.cpp:126-139](apps/ui/qt_ui_arm64/serial_worker.cpp#L126-L139) → `write(fd_, buf, pos)` 写入串口
+- **接收**：7 状态帧解析机 [serial_worker.cpp:50-88](apps/ui/qt_ui_arm64/serial_worker.cpp#L50-L88)：WAIT_H1→H2→LEN→DATA→XOR→CR→LF → `emit received(QString)`
+
+### 2.3.5 机器人端 MCU 软件
+
+MCU 采用 **STM32H750VBT6**（ARM Cortex-M7, 480MHz），软件设计详见 [MCU_SOFTWARE_DESIGN.md](apps/ui/qt_ui_arm64/MCU_SOFTWARE_DESIGN.md)。核心模块：
+
+**软件架构**（4 层）：
+
+```
+main.c (应用层) → 系统初始化 / 主循环 / 电机裸机测试
+protocol.c (协议层) → 帧状态机 / JSON cmd 派发 / 300ms 看门狗
+tb6612.c + servo.c (驱动层) → TB6612 真值表电机控制 / 50Hz PWM 舵机
+HAL 外设层 (CubeMX 生成) → TIM1(电机PWM) / TIM2(舵机PWM) / TIM3-5(编码器) / UART4/8
+```
+
+**定时器资源**：TIM1 输出 4 路 1kHz PWM 控制电机转速；TIM2 输出 2 路 50Hz PWM 控制舵机角度（脉宽 500-2500μs 对应 ±90°）；TIM3/TIM5 编码器模式采集左/右轮速度反馈。
+
+**通信协议 v2**：`protocol.c` 实现与 RK3588 端 `SerialWorker` 一致的 0xAA 0x55 帧协议。接收端通过 7 状态机解析帧头、长度、载荷、XOR 校验、帧尾。解析完成后，根据 JSON 中 `cmd` 字段派发：`move` → 差速运动控制（`left = v×100 - w×50`, `right = v×100 + w×50`），`ptz` → 舵机角度映射（`servo = 1500 + value×500μs`），`stop` → 电机和舵机归零，`ptz_home` → 舵机回中位。300ms 硬件看门狗：收到任何有效帧即重置 TIM6 计数器，超时若未收到新帧则自动停止所有电机和舵机，确保通信中断时机器人安全停机。
+
+**输入变量**：UART4 串口字节流 → 状态机解析 → JSON 对象 `{"cmd":"move","v":float,"w":float}` 或 `{"cmd":"ptz","pan":float,"tilt":float}` → v (线速度, -1.0..1.0), w (角速度, -1.0..1.0), pan (水平角度, -1.0..1.0), tilt (垂直角度, -1.0..1.0)
+
+**输出变量**：PWM 占空比（TIM1 CCRx, 0-999）→ 电机转速和方向；PWM 脉宽（TIM2 CCRx, 1000-2000μs）→ 舵机角度
+
+### 2.3.6 PC 端软件
+
+PC 端（[apps/client_x64_linux/main.cc:31-78](apps/client_x64_linux/main.cc#L31-L78)）架构与机器人端对称，核心差异在于编解码方案和 IPC 路径。
+
+**WebRTC Daemon（client_x64）**：与 arm64 共享 `WebRTCEngine` 核心代码（[webrtc_engine.h](apps/webrtc_engine/webrtc_engine.h)），通过依赖注入使用不同的平台实现。`PcFactoryX64`（[pc_factory_x64.h:9-20](apps/client_x64_linux/pc_factory_x64.h#L9-L20)）注册软件编解码器——OpenH264（H.264）、libvpx（VP8/VP9）、libaom（AV1）——替代 arm64 的 MPP 硬件方案。`MediaPipeline` 使用软件 V4L2 采集（`CapturerTrackSource`）+ libyuv I420 转换，替代 arm64 的 RGA+DMA-BUF 硬件管线。
+
+**控制逻辑**：Qt UI（[apps/ui/qt_ui_x64/](apps/ui/qt_ui_x64/mainwindow.cpp)）实现事件驱动键盘控制。`keyPressEvent()`（[mainwindow.cpp:150-158](apps/ui/qt_ui_x64/mainwindow.cpp#L150-L158)）设置按键状态标志 → `updateMoveCommand()` 计算速度 → `channel_->cmdSendData()` 通过 Unix Socket（`/tmp/webrtc_runtime/dc_call.sock`）发送 JSON 指令到 daemon → daemon 通过 DataChannel 转发至机器人端。12 个键位覆盖底盘全向移动和云台二维旋转，支持组合键（W+J = 前进+云台左转）。`keyReleaseEvent()`（[mainwindow.cpp:162-169](apps/ui/qt_ui_x64/mainwindow.cpp#L162-L169)）清除状态标志 → 无其他键按下时发送 `stop` 指令。右侧面板提供底盘速度和云台速度两个 QSlider（范围 10-100，映射 0.1-1.0）。
+
+**IPC 路径对比**：
+
+| 功能 | arm64 | x64 |
+|------|-------|-----|
+| 视频采集 | V4L2→RGA→DMA-BUF | V4L2→libyuv→CPU Buffer |
+| 视频编码 | MPP 硬件 H.264 | OpenH264 软件 H.264 |
+| UI 帧源 | DmaBufVideoSource（RGA+mmap） | ShmVideoSource（SysV SHM+libyuv） |
+| UI-daemon 通信 | Unix Socket `webrtc_ctrl.sock` | Unix Socket `dc_call.sock` |
+| 本地渲染 | GLESv2 + QPainter | OpenGL + QPainter |
 
 ---
 
