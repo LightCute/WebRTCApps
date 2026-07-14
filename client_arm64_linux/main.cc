@@ -11,9 +11,9 @@
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials.h"
-#include "apps/client_arm64_linux/flag_defs.h"
+#include "apps/webrtc_engine/flag_defs.h"
 #include "apps/client_arm64_linux/unix_socket_server.h"
-#include "apps/client_arm64_linux/webrtc_engine.h"
+#include "apps/webrtc_engine/webrtc_engine.h"
 #include "rtc_base/log_sinks.h"
 #include "rtc_base/physical_socket_server.h"
 #include "rtc_base/ssl_adapter.h"
@@ -33,12 +33,6 @@ int main(int argc, char* argv[]) {
   auto main_thread = std::make_unique<webrtc::Thread>(&pss);
   webrtc::ThreadManager::Instance()->SetCurrentThread(main_thread.get());
   webrtc::InitializeSSL();
-
-  // Force PulseAudio to use NAU8822 as default source.
-  // Without this, the ALSA 'default' device routes through PulseAudio
-  // which may select HDMI/DP audio instead of the physical microphone.
-  setenv("PULSE_SOURCE", "alsa_input.platform-nau8822-sound.stereo-fallback",
-         1 /*overwrite*/);
 
   // All runtime files (socket, SHM, logs) live under WEBRTC_RUNTIME_DIR.
   const char* rt_dir_env = getenv("WEBRTC_RUNTIME_DIR");

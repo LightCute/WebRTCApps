@@ -20,8 +20,6 @@ if (is_linux || is_chromeos) {
       "rga_video_track_source.h",
       "rk_mpp_codec.cc",
       "rk_mpp_codec.h",
-      "rk_mpp_encoder.cc",
-      "rk_mpp_encoder.h",
       "rk_mpp_stubs.cc",
       "shm_common.cc",
       "shm_common.h",
@@ -33,11 +31,12 @@ if (is_linux || is_chromeos) {
       "unix_socket_server.h",
       "video_frame_shm_ctrl.cc",
       "video_frame_shm_ctrl.h",
-      "shm_ipc_server.cc",
-      "shm_ipc_server.h",
     ]
 
-    include_dirs = [ "rga_headers" ]
+    include_dirs = [
+      "rga_headers",
+      "/home/light/sysroot_elf/rk3588-elf2-mpp-headers/rockchip",
+    ]
 
     deps = [
       "..//webrtc_engine:webrtc_engine",
@@ -62,6 +61,7 @@ if (is_linux || is_chromeos) {
       "../../api/audio_codecs:builtin_audio_encoder_factory",
       "../../api/environment",
       "../../api/environment:environment_factory",
+      "../../api:field_trials",
       "../../api/task_queue",
       "../../api/task_queue:pending_task_safety_flag",
       "../../api/units:time_delta",
@@ -79,6 +79,7 @@ if (is_linux || is_chromeos) {
       "../../modules/video_capture:video_capture_module",
       "../../pc:video_track_source",
       "../../rtc_base:logging",
+      "../../rtc_base:log_sinks",
       "../../rtc_base:ssl_adapter",
       "../../rtc_base:threading",
       "../../system_wrappers:system_wrappers",
