@@ -45,7 +45,7 @@ int main(int argc, char* argv[]) {
       runtime_dir, "webrtc_x64", 10 * 1024 * 1024, 2);
   webrtc::LogMessage::AddLogToStream(log_sink, webrtc::LS_INFO);
 
-  // 2. Create engine + inject platform dependencies
+  // 2. Create engine — Init must come first (creates threads needed by SetXxx)
   auto engine = std::make_unique<WebRTCEngine>(env);
   engine->Init();
   engine->SetMediaPipeline(

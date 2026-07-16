@@ -115,6 +115,15 @@ bool MediaPipeline::CreateAudioDeviceModule() {
     RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
     return false;
   }
+  // ADM must be initialized before WebRTC can use it
+  worker_thread_->BlockingCall([this] {
+    if (adm_->Init() != 0) {
+      RTC_LOG(LS_ERROR) << "ADM Init failed";
+    }
+    // Use default audio device (PulseAudio on Linux)
+    adm_->SetRecordingDevice(0);
+    adm_->SetPlayoutDevice(0);
+  });
   return true;
 }
 
