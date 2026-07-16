@@ -41,9 +41,11 @@ int main(int argc, char* argv[]) {
 
   std::string runtime_dir = "/tmp/webrtc_runtime";
   mkdir(runtime_dir.c_str(), 0755);
-  webrtc::FileRotatingLogSink* log_sink = new webrtc::FileRotatingLogSink(
-      runtime_dir, "webrtc_x64", 10 * 1024 * 1024, 2);
-  webrtc::LogMessage::AddLogToStream(log_sink, webrtc::LS_INFO);
+  webrtc::FileRotatingLogSink log_sink(runtime_dir, "webrtc_x64",
+                                        10 * 1024 * 1024, 2);
+  log_sink.Init();
+  log_sink.DisableBuffering();
+  webrtc::LogMessage::AddLogToStream(&log_sink, webrtc::LS_INFO);
 
   // 2. Create engine — Init must come first (creates threads needed by SetXxx)
   auto engine = std::make_unique<WebRTCEngine>(env);
