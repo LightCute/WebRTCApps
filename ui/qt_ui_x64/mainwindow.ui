@@ -269,6 +269,43 @@
              </widget>
             </item>
             <item>
+             <widget class="QWidget" name="speedRow" native="true">
+              <layout class="QGridLayout" name="speedLayout">
+               <property name="spacing"><number>2</number></property>
+               <property name="leftMargin"><number>0</number></property>
+               <property name="topMargin"><number>0</number></property>
+               <property name="rightMargin"><number>0</number></property>
+               <property name="bottomMargin"><number>0</number></property>
+               <item row="0" column="0">
+                <widget class="QLabel" name="chassisSpeedLabel">
+                 <property name="text"><string>底盘速度</string></property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QSlider" name="chassisSpeedSlider">
+                 <property name="minimum"><number>10</number></property>
+                 <property name="maximum"><number>100</number></property>
+                 <property name="value"><number>64</number></property>
+                 <property name="orientation"><enum>Qt::Horizontal</enum></property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="ptzSpeedLabel">
+                 <property name="text"><string>云台速度</string></property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QSlider" name="ptzSpeedSlider">
+                 <property name="minimum"><number>10</number></property>
+                 <property name="maximum"><number>100</number></property>
+                 <property name="value"><number>50</number></property>
+                 <property name="orientation"><enum>Qt::Horizontal</enum></property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
              <widget class="QPlainTextEdit" name="chat_display_">
               <property name="readOnly">
                <bool>true</bool>

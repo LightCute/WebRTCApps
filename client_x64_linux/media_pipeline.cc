@@ -108,22 +108,18 @@ MediaPipeline::~MediaPipeline() = default;
 
 bool MediaPipeline::CreateAudioDeviceModule() {
   adm_ = worker_thread_->BlockingCall([this] {
-    return webrtc::CreateAudioDeviceModule(
+    auto adm = webrtc::CreateAudioDeviceModule(
         env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+    if (!adm || adm->Init() != 0) {
+      RTC_LOG(LS_ERROR) << "ADM creation or Init() failed";
+      return webrtc::scoped_refptr<webrtc::AudioDeviceModule>(nullptr);
+    }
+    return adm;
   });
   if (!adm_) {
-    RTC_LOG(LS_ERROR) << "Failed to create AudioDeviceModule";
+    RTC_LOG(LS_ERROR) << "Failed to create or init AudioDeviceModule";
     return false;
   }
-  // ADM must be initialized before WebRTC can use it
-  worker_thread_->BlockingCall([this] {
-    if (adm_->Init() != 0) {
-      RTC_LOG(LS_ERROR) << "ADM Init failed";
-    }
-    // Use default audio device (PulseAudio on Linux)
-    adm_->SetRecordingDevice(0);
-    adm_->SetPlayoutDevice(0);
-  });
   return true;
 }
 

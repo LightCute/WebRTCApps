@@ -1,3 +1,9 @@
 mpp
 
 build
+
+out/
+client_arm64_linux/out
+client_x64_linux/out
+ui/qt_ui_arm64/build-arm64
+ui/qt_ui_x64/build-x64

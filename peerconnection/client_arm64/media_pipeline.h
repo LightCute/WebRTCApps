@@ -10,7 +10,6 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
-#include "apps/peerconnection/engine/media_pipeline_interface.h"
 
 #include "apps/peerconnection/client_arm64/shm_video_renderer.h"
 #include "apps/peerconnection/client_arm64/video_frame_shm_ctrl.h"
@@ -22,7 +21,7 @@
 #include "rtc_base/thread.h"
 
 // Step 1: ADM. Step 2: renderers. Later: sources, device state.
-class MediaPipeline : public IMediaPipeline {
+class MediaPipeline {
  public:
   MediaPipeline(const webrtc::Environment& env,
                 webrtc::Thread* worker_thread);
@@ -31,31 +30,31 @@ class MediaPipeline : public IMediaPipeline {
   void SetDecoder(webrtc::MppH264Decoder* decoder) { decoder_ = decoder; }
 
   // ---- ADM ----
-  bool CreateAudioDeviceModule() override;
-  webrtc::AudioDeviceModule* adm() const override { return adm_.get(); }
+  bool CreateAudioDeviceModule();
+  webrtc::AudioDeviceModule* adm() const { return adm_.get(); }
   void FixupAudioDeviceSelection();
 
   // ---- Sources ----
-  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource() override;
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> CreateVideoSource();
   webrtc::AudioSourceInterface* CreateAudioSource(
-      webrtc::PeerConnectionFactoryInterface* factory) override;
+      webrtc::PeerConnectionFactoryInterface* factory);
 
   // ---- Events ----
   using EventCallback = std::function<void(const std::string& json)>;
-  void SetEventCallback(EventCallback cb) override { event_cb_ = std::move(cb); }
+  void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
   // ---- Device management ----
 
-  void set_video_device_idx(int idx) override { video_device_idx_ = idx; }
+  void set_video_device_idx(int idx) { video_device_idx_ = idx; }
   void set_audio_input_device_idx(int idx) { audio_input_device_idx_ = idx; }
 
   // ---- Renderers ----
-  void StartLocalRenderer(webrtc::VideoTrackInterface* track) override;
-  void StopLocalRenderer() override;
-  void StartRemoteRenderer(webrtc::VideoTrackInterface* track) override;
-  void StopRemoteRenderer() override;
+  void StartLocalRenderer(webrtc::VideoTrackInterface* track);
+  void StopLocalRenderer();
+  void StartRemoteRenderer(webrtc::VideoTrackInterface* track);
+  void StopRemoteRenderer();
   // ---- Lifecycle ----
-  void Shutdown() override;
+  void Shutdown();
 
  private:
   const webrtc::Environment& env_;

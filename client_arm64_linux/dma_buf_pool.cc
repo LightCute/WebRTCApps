@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "rtc_base/logging.h"
+
 // RGA types needed for bo_t (avoid RgaApi.h — its <linux/stddef.h> breaks libc)
 extern "C" {
 #include "rga.h"
@@ -102,8 +104,9 @@ int DmaBufPool::Allocate(size_t frame_size) {
       }
 
       if (ok) {
-        fprintf(stderr, "DmaBufPool: allocated %d buffers via librga (%zu bytes each)\n",
-                kNumSlots, slots_[0].size);
+        RTC_LOG(LS_INFO) << "DmaBufPool: allocated " << kNumSlots
+                         << " buffers via librga (" << slots_[0].size
+                         << " bytes each)";
         return 0;
       }
 
@@ -127,7 +130,7 @@ int DmaBufPool::Allocate(size_t frame_size) {
 
 fallback_dma_heap:
   // Try /dev/dma_heap/linux,cma as fallback
-  fprintf(stderr, "DmaBufPool: librga alloc failed, trying dma_heap...\n");
+  RTC_LOG(LS_WARNING) << "DmaBufPool: librga alloc failed, trying dma_heap...";
 
   int heap_fd = open("/dev/dma_heap/linux,cma", O_RDONLY | O_CLOEXEC);
   if (heap_fd < 0) {
