@@ -96,14 +96,13 @@ public:
     void OnClientConnected(int client_id) override {
         // 回调在 io 线程，转投到 WebRTC 线程推进状态机
         g_thread->PostTask([client_id] {
-            if (g_in_call) {
+            if (g_client_id != -1) {
                 RTC_LOG(LS_WARNING) << "Second client ignored (1:1 demo)";
                 return;
             }
             g_client_id = client_id;
             g_phase = SignalPhase::kAwaitSdp;
-            g_in_call = true;
-            StartCall();   // 每轮新建 PC，offerer 顺带发 offer
+            StartCall();   // 新建 PC；offerer 顺带发 offer
         });
     }
     void OnLineReceived(int client_id, const std::string& line) override {
@@ -113,7 +112,8 @@ public:
         g_thread->PostTask([client_id] {
             if (client_id == g_client_id) {
                 RTC_LOG(LS_INFO) << "Client disconnected";
-                CleanupCall();
+                g_client_id = -1;
+                CleanupCall();   // 清理本轮；g_client_id=-1 不会 auto 重开
             }
         });
     }
@@ -131,7 +131,10 @@ public:
         } else if (state_enum == DataChannelInterface::kClosed ||
                    state_enum == DataChannelInterface::kClosing) {
             g_ipc_server->SendToClient(g_client_id, "Peer disconnected.");
-            CleanupCall();
+            if (g_in_call) {
+                // 自发关闭才清理；我们主动 Close 时 g_in_call 已 false，跳过
+                g_thread->PostTask([] { CleanupCall(); });
+            }
         }
     }
     void OnMessage(const DataBuffer& buffer) override {
@@ -139,7 +142,9 @@ public:
         RTC_LOG(LS_INFO) << "DataChannel onMessage: " << msg;
         if (msg == "/bye") {
             g_ipc_server->SendToClient(g_client_id, "Peer hung up.");
-            CleanupCall();
+            // 不能在 DataChannel 回调里同步 Close（重入导致 use-after-free），
+            // 转投到 g_thread，等本回调返回后再清理
+            g_thread->PostTask([] { CleanupCall(); });
             return;
         }
         g_ipc_server->SendToClient(g_client_id, "Peer: " + msg);
@@ -268,10 +273,10 @@ void StartCall() {
     if (!err_or.ok()) {
         RTC_LOG(LS_ERROR) << "CreatePeerConnection failed: "
                           << err_or.error().message();
-        CleanupCall();
-        return;
+        return;   // 失败则本轮不开启
     }
     g_pc = std::move(err_or.value());
+    g_in_call = true;
     RTC_LOG(LS_INFO) << "CreatePeerConnection init success!";
 
     if (g_role == Role::kOfferer) {
@@ -410,8 +415,7 @@ void CleanupCall() {
     if (g_pc) { g_pc->Close(); g_pc = nullptr; }  // Close 会自动关所有 DataChannel
     g_dc = nullptr;                                // 释放引用即可
 
-    // 重置本轮会话状态
-    g_client_id = -1;
+    // 重置本轮会话状态（g_client_id 保留，客户端仍连着）
     g_phase = SignalPhase::kAwaitSdp;
     g_peer_sdp_lines.clear();
     g_candidates_sent = false;
@@ -420,6 +424,11 @@ void CleanupCall() {
     g_local_sdp.clear();
 
     RTC_LOG(LS_INFO) << "Call cleaned up, waiting for next client...";
+
+    // 客户端还在：立即开启下一轮（新建 PC；offerer 额外发 offer）
+    if (g_client_id != -1) {
+        StartCall();
+    }
 }
 
 // 退出整个程序（仅程序结束时调用）
