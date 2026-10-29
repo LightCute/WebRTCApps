@@ -52,13 +52,15 @@ class PeerConnectionObserverImpl;
 class DcDataObserver;
 
 // 状态机函数前向声明（IpcObserver 回调里调用，定义在后面）
+void StartCall();
 void StartOffer();
 void CreateAnswer();
 void AddRemoteCandidate(const std::string& line);
 void MaybeSendLocalCandidates();
 void HandleLine(const std::string& line);
 void Hangup();
-void Teardown();
+void CleanupCall();
+void Shutdown();
 
 scoped_refptr<PeerConnectionFactoryInterface> g_factory;
 scoped_refptr<PeerConnectionInterface> g_pc;
@@ -85,23 +87,23 @@ enum class SignalPhase { kAwaitSdp, kAwaitCandidates };
 SignalPhase g_phase = SignalPhase::kAwaitSdp;
 std::vector<std::string> g_peer_sdp_lines;  // 累积对端 SDP（offer 或 answer）
 bool g_candidates_sent = false;
+bool g_in_call = false;   // 当前是否有一轮通话进行中
 bool g_shutting_down = false;
+PeerConnectionInterface::RTCConfiguration g_config;  // 每轮建 PC 复用
 
 class IpcObserver : public UnixSocketObserver {
 public:
     void OnClientConnected(int client_id) override {
         // 回调在 io 线程，转投到 WebRTC 线程推进状态机
         g_thread->PostTask([client_id] {
-            if (g_client_id != -1) {
+            if (g_in_call) {
                 RTC_LOG(LS_WARNING) << "Second client ignored (1:1 demo)";
                 return;
             }
             g_client_id = client_id;
             g_phase = SignalPhase::kAwaitSdp;
-            if (g_role == Role::kOfferer) {
-                StartOffer();
-            }
-            // answerer 不主动做什么，等对端 offer 到达
+            g_in_call = true;
+            StartCall();   // 每轮新建 PC，offerer 顺带发 offer
         });
     }
     void OnLineReceived(int client_id, const std::string& line) override {
@@ -111,7 +113,7 @@ public:
         g_thread->PostTask([client_id] {
             if (client_id == g_client_id) {
                 RTC_LOG(LS_INFO) << "Client disconnected";
-                Teardown();
+                CleanupCall();
             }
         });
     }
@@ -129,7 +131,7 @@ public:
         } else if (state_enum == DataChannelInterface::kClosed ||
                    state_enum == DataChannelInterface::kClosing) {
             g_ipc_server->SendToClient(g_client_id, "Peer disconnected.");
-            Teardown();
+            CleanupCall();
         }
     }
     void OnMessage(const DataBuffer& buffer) override {
@@ -137,7 +139,7 @@ public:
         RTC_LOG(LS_INFO) << "DataChannel onMessage: " << msg;
         if (msg == "/bye") {
             g_ipc_server->SendToClient(g_client_id, "Peer hung up.");
-            Teardown();
+            CleanupCall();
             return;
         }
         g_ipc_server->SendToClient(g_client_id, "Peer: " + msg);
@@ -258,6 +260,26 @@ public:
 };
 
 // ===== 事件驱动状态机 =====
+// 每轮通话开始时调用：新建 PC，offerer 顺带发 offer
+void StartCall() {
+    PeerConnectionDependencies pc_deps(&g_pc_observer);
+    auto err_or =
+        g_factory->CreatePeerConnectionOrError(g_config, std::move(pc_deps));
+    if (!err_or.ok()) {
+        RTC_LOG(LS_ERROR) << "CreatePeerConnection failed: "
+                          << err_or.error().message();
+        CleanupCall();
+        return;
+    }
+    g_pc = std::move(err_or.value());
+    RTC_LOG(LS_INFO) << "CreatePeerConnection init success!";
+
+    if (g_role == Role::kOfferer) {
+        StartOffer();
+    }
+    // answerer 不主动做什么，等对端 offer 到达
+}
+
 void StartOffer() {
     DataChannelInit dc_init;
     dc_init.negotiated = false;
@@ -266,7 +288,7 @@ void StartOffer() {
     if (!dc_or_error.ok()) {
         RTC_LOG(LS_ERROR) << "Failed to create DataChannel: "
                           << dc_or_error.error().message();
-        Teardown();
+        CleanupCall();
         return;
     }
     g_dc = std::move(dc_or_error.value());
@@ -377,16 +399,36 @@ void Hangup() {
     if (g_dc && g_dc->state() == DataChannelInterface::kOpen) {
         g_dc->Send(DataBuffer("/bye"));
     }
-    Teardown();
+    CleanupCall();
 }
 
-void Teardown() {
+// 结束本轮通话：关 PC/DC、重置会话状态，回到等待下一轮，不退出程序
+void CleanupCall() {
+    if (!g_in_call) return;
+    g_in_call = false;   // 先置位，防止 Close 触发的 OnStateChange 重入
+
+    if (g_pc) { g_pc->Close(); g_pc = nullptr; }  // Close 会自动关所有 DataChannel
+    g_dc = nullptr;                                // 释放引用即可
+
+    // 重置本轮会话状态
+    g_client_id = -1;
+    g_phase = SignalPhase::kAwaitSdp;
+    g_peer_sdp_lines.clear();
+    g_candidates_sent = false;
+    g_local_candidates.clear();
+    g_candidate_count = 0;
+    g_local_sdp.clear();
+
+    RTC_LOG(LS_INFO) << "Call cleaned up, waiting for next client...";
+}
+
+// 退出整个程序（仅程序结束时调用）
+void Shutdown() {
     if (g_shutting_down) return;
     g_shutting_down = true;
-    // 先 Close 再 Quit，防止 BlockingCall 在 quitting 线程上执行
-    if (g_dc) { g_dc->Close(); g_dc = nullptr; }
     if (g_pc) { g_pc->Close(); g_pc = nullptr; }
-    g_factory = nullptr;
+    g_dc = nullptr;
+    g_factory = nullptr;   // 只有退出程序才销毁 factory
     g_thread->Quit();
 }
 
@@ -471,34 +513,20 @@ int RunSession(Role role, const std::string& socket_path)
         exit(1);
     }
 
-    PeerConnectionInterface::RTCConfiguration config;
-    config.sdp_semantics = SdpSemantics::kUnifiedPlan;
+    // RTC 配置（一次，每轮建 PC 复用）
+    g_config.sdp_semantics = SdpSemantics::kUnifiedPlan;
 
     // STUN 服务器 —— 不需要认证，纯做 NAT 穿透
     PeerConnectionInterface::IceServer stun;
     stun.uri = "stun:stun.l.google.com:19302";
-    config.servers.push_back(stun);
+    g_config.servers.push_back(stun);
 
     // TURN 服务器 —— 需要认证，用于中继数据
     PeerConnectionInterface::IceServer turn;
     turn.urls.push_back("turn:120.79.210.6:3478");   // UDP
-    // turn.urls.push_back("turn:your-turn-server.com:3478?transport=tcp");  // TCP
-    // turn.urls.push_back("turns:your-turn-server.com:5349");  // TLS (加密)
     turn.username = "test";
     turn.password = "123";
-    config.servers.push_back(turn);
-
-    PeerConnectionDependencies pc_deps(&g_pc_observer);
-    auto err_or =
-        g_factory->CreatePeerConnectionOrError(config, std::move(pc_deps));
-    if(!err_or.ok()){
-        RTC_LOG(LS_ERROR) << "CreatePeerConnection failed: "
-                            << err_or.error().message();
-    }
-    else{
-        RTC_LOG(LS_INFO) << "CreatePeerConnection init success!";
-    }
-    g_pc = std::move(err_or.value());
+    g_config.servers.push_back(turn);
 
     // 观察者生命周期兜底：CreateOffer/CreateAnswer 收裸指针，需自己持有引用
     g_sdp_observer = make_ref_counted<DcCreateSdpObserver>();
@@ -510,7 +538,7 @@ int RunSession(Role role, const std::string& socket_path)
     RTC_LOG(LS_INFO) << "Daemon listening on " << socket_path
                      << ", waiting for client...";
 
-    // 主线程跑 WebRTC 消息循环（阻塞），直到 Teardown() 里 Quit
+    // 主线程跑 WebRTC 消息循环（阻塞）。多轮通话：每轮由 OnClientConnected 触发
     g_thread->Run();
 
     // 收尾：停 io 线程（join，最多 ~100ms epoll 超时）
