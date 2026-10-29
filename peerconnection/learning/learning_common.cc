@@ -1,10 +1,13 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <dirent.h>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -37,7 +40,6 @@
 #include "apps/peerconnection/client/defaults.h"
 #include "apps/peerconnection/ipc_test26_10_26/unix_socket_server.h"
 #include "apps/peerconnection/learning/learning_common.h"
-#include "rtc_base/log_sinks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/physical_socket_server.h"
 #include "rtc_base/ssl_adapter.h"
@@ -390,9 +392,64 @@ void Teardown() {
 
 
 
+// ===== 文件日志（继承 webrtc::LogSink）=====
+class FileLogSink : public LogSink {
+ public:
+  explicit FileLogSink(const std::string& path) {
+    file_.open(path, std::ios::out | std::ios::app);
+  }
+
+  // 主入口：拿到完整 LogLineRef，按默认格式写文件
+  void OnLogMessage(const LogLineRef& line) override {
+    if (!file_.is_open()) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    file_ << line.DefaultLogLine();  // DefaultLogLine() 已含换行
+    file_.flush();
+  }
+
+  // 纯虚必须实现（正常流程由 LogLineRef 主入口处理）
+  void OnLogMessage(const std::string& message) override {
+    if (!file_.is_open()) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    file_ << message;  // WebRTC 消息管线已含换行
+    file_.flush();
+  }
+
+ private:
+  std::ofstream file_;
+  std::mutex mu_;
+};
+
+FileLogSink* SetupFileLogging(Role role, const std::string& log_dir) {
+  mkdir(log_dir.c_str(), 0755);
+
+  const char* base = (role == Role::kOfferer) ? "learning_offer"
+                                              : "learning_answer";
+  // 用「年月日_时分秒」命名，直观且避免每次运行覆盖
+  std::time_t now = std::time(nullptr);
+  std::tm* tm_now = std::localtime(&now);
+  char ts[32];
+  std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm_now);
+  std::string filename = std::string(base) + "_" + ts + ".log";
+
+  auto* sink = new FileLogSink(log_dir + "/" + filename);
+  LogMessage::AddLogToStream(sink, LS_INFO);
+  return sink;
+}
+
+
+
 int RunSession(Role role, const std::string& socket_path)
 {
     g_role = role;
+
+    // 日志目录 = socket 所在目录
+    std::string log_dir = socket_path.substr(0, socket_path.find_last_of('/'));
+    if (log_dir.empty()) log_dir = ".";
+
+    // 文件日志：AddLogToStream 后，RTC_LOG 同时打到 stderr + 文件
+    FileLogSink* file_sink = SetupFileLogging(role, log_dir);
+
     RTC_LOG(LS_INFO) << "WebRTC learning started as "
                      << (role == Role::kOfferer ? "OFFERER" : "ANSWERER");
 
@@ -469,6 +526,9 @@ int RunSession(Role role, const std::string& socket_path)
         g_pc = nullptr;
     }
     g_factory = nullptr;
+
+    LogMessage::RemoveLogToStream(file_sink);
+    delete file_sink;
 
     ThreadManager::Instance()->SetCurrentThread(nullptr);
     CleanupSSL();
