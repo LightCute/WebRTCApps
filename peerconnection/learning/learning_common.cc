@@ -1,4 +1,5 @@
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -55,6 +56,7 @@ class DcDataObserver;
 void StartCall();
 void StartOffer();
 void CreateAnswer();
+void RestartIce();
 void AddRemoteCandidate(const std::string& line);
 void MaybeSendLocalCandidates();
 void HandleLine(const std::string& line);
@@ -66,8 +68,8 @@ scoped_refptr<PeerConnectionFactoryInterface> g_factory;
 scoped_refptr<PeerConnectionInterface> g_pc;
 scoped_refptr<DataChannelInterface> g_dc;
 // 声明顺序决定析构顺序（逆序析构）：
-// g_pss 必须先于 g_thread 声明，确保 g_thread 析构时 g_pss 还活着
-std::unique_ptr<PhysicalSocketServer> g_pss;
+// g_physical_socket_server 必须先于 g_thread 声明，确保 g_thread 析构时 g_physical_socket_server 还活着
+std::unique_ptr<PhysicalSocketServer> g_physical_socket_server;
 std::unique_ptr<Thread> g_thread;
 std::string g_local_sdp;
 int g_candidate_count = 0;
@@ -89,7 +91,8 @@ std::vector<std::string> g_peer_sdp_lines;  // 累积对端 SDP（offer 或 answ
 bool g_candidates_sent = false;
 bool g_in_call = false;   // 当前是否有一轮通话进行中
 bool g_shutting_down = false;
-PeerConnectionInterface::RTCConfiguration g_config;  // 每轮建 PC 复用
+bool g_auto_rebuild_attempted = false;   // 本轮 failed 后是否已自动重建过
+PeerConnectionInterface::RTCConfiguration g_rtc_configuration;  // 每轮建 PC 复用
 
 class IpcObserver : public UnixSocketObserver {
 public:
@@ -127,10 +130,10 @@ public:
         auto state_str = DataChannelInterface::DataStateString(state_enum);
         RTC_LOG(LS_INFO) << "DataChannel state: " << state_str;
         if (state_enum == DataChannelInterface::kOpen) {
-            g_ipc_server->SendToClient(g_client_id, "DataChannel OPEN — ready to chat!");
+            g_ipc_server->SendToClient(g_client_id, "[datachannel] open — ready to chat");
         } else if (state_enum == DataChannelInterface::kClosed ||
                    state_enum == DataChannelInterface::kClosing) {
-            g_ipc_server->SendToClient(g_client_id, "Peer disconnected.");
+            g_ipc_server->SendToClient(g_client_id, "[datachannel] closed");
             if (g_in_call) {
                 // 自发关闭才清理；我们主动 Close 时 g_in_call 已 false，跳过
                 g_thread->PostTask([] { CleanupCall(); });
@@ -141,13 +144,13 @@ public:
         std::string msg(buffer.data.data<char>(), buffer.data.size());
         RTC_LOG(LS_INFO) << "DataChannel onMessage: " << msg;
         if (msg == "/bye") {
-            g_ipc_server->SendToClient(g_client_id, "Peer hung up.");
+            g_ipc_server->SendToClient(g_client_id, "[datachannel] peer hung up");
             // 不能在 DataChannel 回调里同步 Close（重入导致 use-after-free），
             // 转投到 g_thread，等本回调返回后再清理
             g_thread->PostTask([] { CleanupCall(); });
             return;
         }
-        g_ipc_server->SendToClient(g_client_id, "Peer: " + msg);
+        g_ipc_server->SendToClient(g_client_id, "[datachannelMsg] " + msg);
     }
     bool IsOkToCallOnTheNetworkThread() override { return true; }
 };
@@ -195,12 +198,21 @@ public:
                             << PeerConnectionInterface::AsString(state);
         if (state == PeerConnectionInterface::PeerConnectionState::kConnected) {
             RTC_LOG(LS_INFO) << ">>> CONNECTION ESTABLISHED <<<";
-            g_ipc_server->SendToClient(g_client_id, ">>> CONNECTION ESTABLISHED <<<");
+            g_ipc_server->SendToClient(g_client_id, "[peerconnection] connected");
+            g_auto_rebuild_attempted = false;   // 恢复成功，复位重建标记
         } else if (state == PeerConnectionInterface::PeerConnectionState::kFailed) {
             RTC_LOG(LS_ERROR) << "Connection FAILED";
+            g_ipc_server->SendToClient(g_client_id, "[peerconnection] failed");
+            // 彻底失败：关闭通话并重建（延迟到回调返回后，避免重入）
+            if (!g_auto_rebuild_attempted) {
+                g_auto_rebuild_attempted = true;
+                g_thread->PostTask([] { CleanupCall(); });
+            }
         } else if (state ==
                     PeerConnectionInterface::PeerConnectionState::kDisconnected) {
+            // 临时断开：不处理，交给 ICE keepalive 自动恢复
             RTC_LOG(LS_INFO) << "Disconnected";
+            g_ipc_server->SendToClient(g_client_id, "[peerconnection] disconnected");
         }
     }
 
@@ -269,7 +281,7 @@ public:
 void StartCall() {
     PeerConnectionDependencies pc_deps(&g_pc_observer);
     auto err_or =
-        g_factory->CreatePeerConnectionOrError(g_config, std::move(pc_deps));
+        g_factory->CreatePeerConnectionOrError(g_rtc_configuration, std::move(pc_deps));
     if (!err_or.ok()) {
         RTC_LOG(LS_ERROR) << "CreatePeerConnection failed: "
                           << err_or.error().message();
@@ -305,6 +317,21 @@ void StartOffer() {
 void CreateAnswer() {
     PeerConnectionInterface::RTCOfferAnswerOptions options;
     g_pc->CreateAnswer(g_sdp_observer.get(), options);
+}
+
+void RestartIce() {
+    RTC_LOG(LS_INFO) << "ICE restart triggered";
+    // ICE restart 会重新采集候选，旧的候选和信令状态作废
+    g_phase = SignalPhase::kAwaitSdp;
+    g_peer_sdp_lines.clear();
+    g_candidates_sent = false;
+    g_local_candidates.clear();
+    g_candidate_count = 0;
+    g_local_sdp.clear();
+
+    PeerConnectionInterface::RTCOfferAnswerOptions options;
+    options.ice_restart = true;
+    g_pc->CreateOffer(g_sdp_observer.get(), options);
 }
 
 void AddRemoteCandidate(const std::string& line) {
@@ -351,8 +378,19 @@ void MaybeSendLocalCandidates() {
 }
 
 void HandleLine(const std::string& line) {
-    // 聊天中：DC 已 open，直接当消息
-    if (g_dc && g_dc->state() == DataChannelInterface::kOpen) {
+    // ICE restart：任何阶段都可触发（即使 DC 已断）
+    if (line == "/restartConnection") {
+        RestartIce();
+        return;
+    }
+    // 收到 SDP 起始行（v=0）→ 切回信令阶段（ICE restart 时从聊天切回）
+    if (line.rfind("v=0", 0) == 0) {
+        g_phase = SignalPhase::kAwaitSdp;
+        g_peer_sdp_lines.clear();
+    }
+    // 聊天中：DC 已 open 且不在信令阶段，直接当消息
+    if (g_dc && g_dc->state() == DataChannelInterface::kOpen &&
+        g_phase != SignalPhase::kAwaitSdp) {
         if (line == "/quit") {
             Hangup();
             return;
@@ -370,6 +408,12 @@ void HandleLine(const std::string& line) {
                 SdpType type = (g_role == Role::kOfferer)
                                    ? SdpType::kAnswer
                                    : SdpType::kOffer;
+                if (g_role == Role::kAnswerer) {
+                    // 答方收到新 offer（可能是 ICE restart）：旧候选作废，重新采集
+                    g_candidates_sent = false;
+                    g_local_candidates.clear();
+                    g_candidate_count = 0;
+                }
                 std::unique_ptr<SessionDescriptionInterface> sdp =
                     CreateSessionDescription(type, remote_sdp);
                 if (sdp) {
@@ -444,6 +488,23 @@ void Shutdown() {
 
 
 // ===== 文件日志（继承 webrtc::LogSink）=====
+// 生成「年月日时分秒.毫秒」格式的时间戳前缀
+static std::string CurrentTimestamp() {
+  auto now = std::chrono::system_clock::now();
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+  std::time_t sec = static_cast<std::time_t>(ms / 1000);
+  int millis = static_cast<int>(ms % 1000);
+  std::tm tm_now{};
+  localtime_r(&sec, &tm_now);
+  char date_part[32];
+  std::strftime(date_part, sizeof(date_part), "%Y-%m-%d %H:%M:%S", &tm_now);
+  char ms_part[8];
+  std::snprintf(ms_part, sizeof(ms_part), ".%03d", millis);
+  return std::string("[") + date_part + ms_part + "] ";
+}
+
 class FileLogSink : public LogSink {
  public:
   explicit FileLogSink(const std::string& path) {
@@ -454,7 +515,7 @@ class FileLogSink : public LogSink {
   void OnLogMessage(const LogLineRef& line) override {
     if (!file_.is_open()) return;
     std::lock_guard<std::mutex> lock(mu_);
-    file_ << line.DefaultLogLine();  // DefaultLogLine() 已含换行
+    file_ << CurrentTimestamp() << line.DefaultLogLine();  // DefaultLogLine() 已含换行
     file_.flush();
   }
 
@@ -462,7 +523,7 @@ class FileLogSink : public LogSink {
   void OnLogMessage(const std::string& message) override {
     if (!file_.is_open()) return;
     std::lock_guard<std::mutex> lock(mu_);
-    file_ << message;  // WebRTC 消息管线已含换行
+    file_ << CurrentTimestamp() << message;  // WebRTC 消息管线已含换行
     file_.flush();
   }
 
@@ -471,7 +532,8 @@ class FileLogSink : public LogSink {
   std::mutex mu_;
 };
 
-FileLogSink* SetupFileLogging(Role role, const std::string& log_dir) {
+std::unique_ptr<FileLogSink> SetupFileLogging(Role role,
+                                              const std::string& log_dir) {
   mkdir(log_dir.c_str(), 0755);
 
   const char* base = (role == Role::kOfferer) ? "learning_offer"
@@ -483,8 +545,8 @@ FileLogSink* SetupFileLogging(Role role, const std::string& log_dir) {
   std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm_now);
   std::string filename = std::string(base) + "_" + ts + ".log";
 
-  auto* sink = new FileLogSink(log_dir + "/" + filename);
-  LogMessage::AddLogToStream(sink, LS_INFO);
+  auto sink = std::make_unique<FileLogSink>(log_dir + "/" + filename);
+  LogMessage::AddLogToStream(sink.get(), LS_INFO);
   return sink;
 }
 
@@ -499,16 +561,17 @@ int RunSession(Role role, const std::string& socket_path)
     if (log_dir.empty()) log_dir = ".";
 
     // 文件日志：AddLogToStream 后，RTC_LOG 同时打到 stderr + 文件
-    FileLogSink* file_sink = SetupFileLogging(role, log_dir);
+    auto file_sink = SetupFileLogging(role, log_dir);   // unique_ptr 管理生命周期
 
     RTC_LOG(LS_INFO) << "WebRTC learning started as "
                      << (role == Role::kOfferer ? "OFFERER" : "ANSWERER");
 
-    g_pss = std::make_unique<PhysicalSocketServer>();
-    g_thread = std::make_unique<Thread>(g_pss.get());
+    g_physical_socket_server = std::make_unique<PhysicalSocketServer>();
+    g_thread = std::make_unique<Thread>(g_physical_socket_server.get());
     ThreadManager::Instance()->SetCurrentThread(g_thread.get());
     InitializeSSL();
 
+    // peerconnection 的依赖需要有环境
     Environment env = CreateEnvironment(std::make_unique<FieldTrials>(""));
     PeerConnectionFactoryDependencies deps;
     deps.signaling_thread = g_thread.get();
@@ -523,19 +586,19 @@ int RunSession(Role role, const std::string& socket_path)
     }
 
     // RTC 配置（一次，每轮建 PC 复用）
-    g_config.sdp_semantics = SdpSemantics::kUnifiedPlan;
+    g_rtc_configuration.sdp_semantics = SdpSemantics::kUnifiedPlan;
 
     // STUN 服务器 —— 不需要认证，纯做 NAT 穿透
     PeerConnectionInterface::IceServer stun;
     stun.uri = "stun:stun.l.google.com:19302";
-    g_config.servers.push_back(stun);
+    g_rtc_configuration.servers.push_back(stun);
 
     // TURN 服务器 —— 需要认证，用于中继数据
     PeerConnectionInterface::IceServer turn;
     turn.urls.push_back("turn:120.79.210.6:3478");   // UDP
     turn.username = "test";
     turn.password = "123";
-    g_config.servers.push_back(turn);
+    g_rtc_configuration.servers.push_back(turn);
 
     // 观察者生命周期兜底：CreateOffer/CreateAnswer 收裸指针，需自己持有引用
     g_sdp_observer = make_ref_counted<DcCreateSdpObserver>();
@@ -564,8 +627,7 @@ int RunSession(Role role, const std::string& socket_path)
     }
     g_factory = nullptr;
 
-    LogMessage::RemoveLogToStream(file_sink);
-    delete file_sink;
+    LogMessage::RemoveLogToStream(file_sink.get());   // unique_ptr 析构时自动释放
 
     ThreadManager::Instance()->SetCurrentThread(nullptr);
     CleanupSSL();
