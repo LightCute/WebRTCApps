@@ -64,7 +64,7 @@ void Hangup();
 void CleanupCall();
 void Shutdown();
 
-scoped_refptr<PeerConnectionFactoryInterface> g_factory;
+scoped_refptr<PeerConnectionFactoryInterface> g_factory; 
 scoped_refptr<PeerConnectionInterface> g_pc;
 scoped_refptr<DataChannelInterface> g_dc;
 // 声明顺序决定析构顺序（逆序析构）：

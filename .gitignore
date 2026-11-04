@@ -9,3 +9,5 @@ ui/qt_ui_arm64/build-arm64
 ui/qt_ui_x64/build-x64
 .claude/
 .vscode/
+peerconnection/asio
+peerconnection/websocketpp
