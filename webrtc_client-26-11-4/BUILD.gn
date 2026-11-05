@@ -1,0 +1,146 @@
+import("../../webrtc.gni")
+
+assert(is_linux || is_chromeos,
+       "apps/webrtc_client-26-11-4 supports Linux/ChromeOS only.")
+
+# websocketpp + standalone Asio 的编译配置。
+# 这两个第三方库的头文件已 vendor 到本工程的 third_party/ 下（自包含，便于分发编译）。
+# standalone Asio 需要 RTTI（typeid），故开启官方 rtti 配置；同时关掉 -Wundef
+# （Asio 引用了未定义的 __cpp_coroutines）。模块已在 gn args 里整体关闭。
+config("signaling_deps_config") {
+  configs = [
+    "//build/config/compiler:rtti",
+    "//build/config/compiler:exceptions",
+  ]
+  include_dirs = [
+    "src",                        # 让 test/ 下的源码能 #include "webrtc_engine.h" 等
+    "third_party/websocketpp",    # <websocketpp/...>
+    "third_party/asio/include",   # <asio/...> / <asio.hpp>
+  ]
+  defines = [ "ASIO_STANDALONE" ]
+  cflags = [
+    "-Wno-undef",
+    "-Wno-error",  # websocketpp/asio 第三方老代码在 -Werror 下有大量告警
+  ]
+}
+
+# 信令层：WebSocket 信令客户端（从 peer_connection_client 拷入）。
+rtc_static_library("signaling_client") {
+  sources = [
+    "src/signaling/ws_signaling_client.cc",
+    "src/signaling/ws_signaling_client.h",
+  ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ "//third_party/jsoncpp" ]
+  libs = [ "pthread" ]
+}
+
+# 核心：WebRTC API 调度（三线程 + PC/DC + SDP + GetStats）。
+rtc_static_library("webrtc_engine") {
+  sources = [
+    "src/webrtc_engine.cc",
+    "src/webrtc_engine.h",
+  ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [
+    "../../api:create_modular_peer_connection_factory",
+    "../../api:data_channel_interface",
+    "../../api:field_trials",
+    "../../api:jsep",
+    "../../api:peer_connection_interface",
+    "../../api:rtc_error",
+    "../../api:rtc_stats_api",
+    "../../api:scoped_refptr",
+    "../../api/environment",
+    "../../api/environment:environment_factory",
+    "../../pc:libjingle_peerconnection",
+    "../../rtc_base:logging",
+    "../../rtc_base:ssl_adapter",
+    "../../rtc_base:threading",
+    "../../system_wrappers",
+    ":signaling_client",
+  ]
+}
+
+# 主程序：装配 engine + controller + unix socket server。
+rtc_executable("webrtc_engine_main") {
+  sources = [
+    "src/main.cc",
+    "src/engine_controller.cc",
+    "src/engine_controller.h",
+    "src/ipc/unix_socket_server.cc",
+    "src/ipc/unix_socket_server.h",
+  ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [
+    ":webrtc_engine",
+    ":rtc_log_sink_lib",
+    "../../rtc_base:logging",
+    "//third_party/jsoncpp",
+  ]
+  libs = [ "pthread" ]
+}
+
+# RtcLogSink：只依赖 rtc_base，不带 signaling_deps_config 的 rtti
+#（基类 LogSink 是 -fno-rtti 编的，派生类不能开 rtti，否则 typeinfo 未定义）。
+rtc_static_library("rtc_log_sink_lib") {
+  sources = [
+    "src/rtc_log_sink.cc",
+    "src/rtc_log_sink.h",
+  ]
+  deps = [ "../../rtc_base:logging" ]
+}
+
+# ===== C++ 测试可执行（源码在 test/） =====
+
+rtc_executable("webrtc_engine_smoke") {
+  testonly = true
+  sources = [ "test/smoke_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
+rtc_executable("webrtc_engine_signaling_test") {
+  testonly = true
+  sources = [ "test/signaling_integration_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
+rtc_executable("webrtc_engine_call_test") {
+  testonly = true
+  sources = [ "test/call_integration_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
+rtc_executable("webrtc_engine_teardown_test") {
+  testonly = true
+  sources = [ "test/teardown_integration_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
+rtc_executable("webrtc_engine_multicall_test") {
+  testonly = true
+  sources = [ "test/multicall_integration_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
+group("webrtc_client") {
+  testonly = true
+  deps = [
+    ":webrtc_engine_smoke",
+    ":webrtc_engine_signaling_test",
+    ":webrtc_engine_call_test",
+    ":webrtc_engine_teardown_test",
+    ":webrtc_engine_multicall_test",
+    ":webrtc_engine_main",
+  ]
+}

@@ -11,3 +11,4 @@ ui/qt_ui_x64/build-x64
 .vscode/
 peerconnection/asio
 peerconnection/websocketpp
+docs/superpowers/

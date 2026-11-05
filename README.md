@@ -1,160 +1,174 @@
-# 居家陪护机器人 — Home Care Robot
+# 编译指南（稳定复现）
 
-> 基于 RK3588 + STM32 异构双芯片架构的 WebRTC 远程陪护机器人系统
+本文档给出**从零开始、稳定编译本仓库（`apps/`）WebRTC 相关工程**的完整步骤。
 
+本仓库有两套构建体系：
 
----
-
-## 系统概览
-
-```
-┌──────────────┐     公网信令服务器       ┌──────────────────────┐
-│   PC 监护端   │◄───── WebRTC ──────►│    机器人端             │
-│              │    P2P 音视频+控制      │                       │
-│  qt_ui_x64   │                       │  qt_ui_arm64 (7寸屏)   │
-│  client_x64  │                       │  client_arm64 (RK3588) │
-│  键盘/鼠标控制│                       │  STM32 MCU (底盘/云台)  │
-│  纯软件编解码 │                       │  RGA+MPP 硬件加速       │
-│              │                       │  AI 推理 (NPU)         │
-└──────────────┘                       └───────────────────────┘
-```
-
-监护者通过 PC 端发起 WebRTC 音视频通话，远程控制机器人底盘移动和云台视角。RK3588 NPU 运行 3 种 AI 视觉模型，实现行人追踪、跌倒检测、火灾烟雾告警。无人连接时机器人可独立运行语音对话陪聊。
+| 工程 | 构建方式 | 依赖 |
+|------|----------|------|
+| `webrtc_client-26-11-4` | WebRTC **GN/ninja** 构建（`build_x64.sh`） | WebRTC 源码（精确 commit）+ 本仓库源码（third_party 已 vendor 进工程内） |
+| `peerconnection/signal_server_26_11_3` / `peer_connection_client_26_11_3` | 独立 **g++** 构建（各自 `build.sh`） | websocketpp / asio / jsoncpp（在本仓库 `peerconnection/` 下） |
 
 ---
 
-## 核心功能
+## 0. 环境要求
 
-| 功能 | 说明 |
-|------|------|
-| **公网音视频通话** | WebRTC P2P，Host/STUN/TURN 三重网络保障，RTT 35ms，丢包率 0.2% |
-| **远程底盘/云台控制** | WASD/IJKL 键盘 + 组合键 + 可调速，事件驱动，按下即发 |
-| **AI 行人追踪** | YOLOv5 NPU 推理，最小框锁定目标，底盘自动跟随，舒适距离保持 |
-| **跌倒/火灾监护** | YOLOv11 跌倒 + YOLOv8 火灾烟雾，在线热切换，自动告警推送 |
-| **语音陪聊** | Whisper 本地语音识别 + 云端 LLM + 本地 TTS，多轮对话记忆 |
+- Linux x86_64（Ubuntu 22.04 已验证；Debian/ChromeOS 亦可）
+- `git`、`python3`、`g++`（或 clang）、`curl`
+- 磁盘空间：WebRTC 源码 + 依赖 + 编译产物约 **40GB 以上**
 
 ---
 
-## 技术亮点
-
-- **RK3588 硬件加速视频管线** — RGA 色彩转换 + MPP H.264 编解码 (<1ms/帧) + DMA-BUF 零拷贝
-- **异构双芯片架构** — RK3588 负责音视频/AI/UI，自研 STM32 MCU 负责底盘实时控制
-- **自定义 MCU 串口协议** — 0xAA 0x55 帧封装 + XOR 校验 + 300ms 看门狗安全停机
-- **WebRTC 公网穿透** — HTTP 长轮询信令 + ICE 三重候选 + SCTP DataChannel
-
----
-
-## 硬件组成
-
-| 组件 | 型号/参数 |
-|------|----------|
-| 核心板 | ELF2 RK3588 (8nm, 4×A76+4×A55, NPU 6TOPS) |
-| MCU | 自研 STM32H750 控制板 |
-| 摄像头 | USB/V4L2, 640×480@30fps |
-| 屏幕 | 7" LCD, 1024×600 |
-| 底盘 | 四轮差速 + 二维舵机云台 |
-| 音频 | NAU8822 麦克风 + 外接音箱 |
-| 供电 | 2200mAh 锂电池 |
-
----
-
-## 软件架构
-
-```
-RK3588 (Linux)
-├── ui_rk (Qt5 主进程)
-│   ├── QProcess → client_arm64 (WebRTC daemon)
-│   ├── QProcess → AI 推理进程 ×3 (RKNN/NPU)
-│   ├── QProcess → voice_chat.py (Whisper+LLM+TTS)
-│   ├── SerialWorker → /dev/ttyS9 → STM32 MCU
-│   └── AiReceiver ← /tmp/ai_detections.sock
-│
-STM32 MCU (裸机)
-├── protocol.c  — 串口协议栈 + 看门狗
-├── tb6612.c    — 电机驱动 (TB6612 双H桥)
-└── servo.c     — 舵机云台 (50Hz PWM)
-```
-
----
-
-## 实测性能
-
-| 指标 | 数值 |
-|------|------|
-| 视频分辨率/帧率 | 640×480 @30fps |
-| RTT 往返延迟 | 35.0 ms |
-| 丢包率 | 0.2% |
-| MPP 编码耗时 | <1 ms/帧 |
-| MPP 解码耗时 | <1 ms/帧 |
-| AI 推理间隔 | 250 ms (NPU) |
-| ICE 连接类型 | prflx (STUN 穿透) |
-| 发送码率 | 1505 kbps |
-
----
-
-## 目录结构
-
-```
-apps/
-├── client_arm64_linux/     # 机器人端 WebRTC daemon (RGA+MPP硬件加速)
-├── client_x64_linux/       # PC端 WebRTC daemon (纯软件编解码)
-├── peerconnection/server/  # 公网信令服务器
-├── webrtc_engine/          # WebRTC 核心引擎（共享代码）
-├── ui/
-│   ├── qt_ui_arm64/        # 机器人端 Qt5 UI (7寸屏)
-│   └── qt_ui_x64/          # PC端 Qt5 UI (键盘控制)
-└── platform_windows/       # Windows 平台适配 (待完善)
-```
-
----
-
-## 文档索引
-
-| 文档 | 内容 |
-|------|------|
-| [DESIGN_REPORT.md](ui/qt_ui_arm64/DESIGN_REPORT.md) | 竞赛设计报告全文 |
-| [SYSTEM_ARCHITECTURE.md](ui/qt_ui_arm64/SYSTEM_ARCHITECTURE.md) | 系统架构文档 |
-| [WEBRTC_DEEP_DIVE.md](ui/qt_ui_arm64/WEBRTC_DEEP_DIVE.md) | WebRTC 深入技术剖析 |
-| [AI_VISION_MODELS.md](ui/qt_ui_arm64/AI_VISION_MODELS.md) | AI 视觉模型训练与部署 |
-| [MCU_SOFTWARE_DESIGN.md](ui/qt_ui_arm64/MCU_SOFTWARE_DESIGN.md) | MCU 软件系统设计 |
-| [MCU_SERIAL_PROTOCOL.md](ui/qt_ui_arm64/MCU_SERIAL_PROTOCOL.md) | MCU 串口通信协议 |
-| [DEMO_SCRIPT.md](ui/qt_ui_arm64/DEMO_SCRIPT.md) | 演示视频拍摄脚本 |
-| [EDITING_GUIDE.md](ui/qt_ui_arm64/EDITING_GUIDE.md) | 视频剪辑分镜指南 |
-| [DEPLOY.md](ui/qt_ui_arm64/DEPLOY.md) | 机器人端部署步骤 |
-
----
-
-## 构建
-
-### 机器人端 (ARM64)
+## 1. 安装 depot_tools（一次性）
 
 ```bash
-cd apps/ui/qt_ui_arm64
-bash build_arm64.sh
-# 输出: build-arm64/ui_rk (aarch64 ELF)
+git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+export PATH="$PWD/depot_tools:$PATH"      # 提供 fetch / gclient / gn / ninja
 ```
 
-### PC 端 (x64)
+> 建议把 `export PATH=...` 写进 `~/.bashrc`，后续每次都要用到 `gn`/`ninja`。
+
+---
+
+## 2. 拉取 WebRTC 源码（`--nohooks` 跳过初始全量同步，更快）
 
 ```bash
-cd apps/ui/qt_ui_x64
+fetch --nohooks webrtc
+cd src
+```
+
+---
+
+## 3. 检出精确版本（务必锁定，否则 API 对不上）
+
+```bash
+git checkout 1c7365eedcee97547940638c6b13b3d862214473
+```
+
+---
+
+## 4. 按该 commit 的 DEPS 同步所有依赖
+
+```bash
+gclient sync -D
+```
+
+> 这一步会按该 commit 的 `DEPS` 拉取全部第三方依赖（含 `chromium_revision 35639b034f`）。
+> `-D` 删除 DEPS 中不再需要的依赖，保证干净。
+
+完成后目录结构：
+
+```
+webrtc/
+├── depot_tools/
+└── src/                 # ← WebRTC 源码（HEAD = 1c7365...）
+    ├── api/  pc/  rtc_base/  ...
+    └── apps/            # ← 本仓库代码（见下一步）
+```
+
+---
+
+## 5. 获取本仓库代码（`apps/`）
+
+把本仓库克隆到 WebRTC 源码树的 `src/apps/` 位置（GN 的 `//` 根即 `src/`，本仓库 BUILD 目标路径为 `//apps/...`）：
+
+```bash
+cd src
+git clone <你的 apps 仓库地址> apps
+# 例如：git clone git@your-host:your-org/apps.git apps
+```
+
+> 只要保证 `src/apps/webrtc_client-26-11-4/` 存在即可。
+
+---
+
+## 6. 编译 webrtc_client（WebRTC 客户端 + 测试）
+
+```bash
+cd src/apps/webrtc_client-26-11-4
 bash build_x64.sh
-# 输出: build-x64/ui_x64 (x86-64 ELF)
 ```
 
-### 信令服务器
+该脚本做了两件事：
+
+1. `gn gen` 生成 x64 构建目录 `src/out/webrtc_client_x64`，GN 参数固定为：
+
+   ```
+   is_debug=true
+   rtc_build_examples=false
+   rtc_build_tools=false
+   rtc_include_tests=false
+   rtc_include_pulse_audio=false
+   use_clang_modules=false
+   use_sysroot=true
+   ```
+
+2. `ninja -C out/webrtc_client_x64 webrtc_client` 编译。
+
+产物（`src/out/webrtc_client_x64/`）：
+
+| 产物 | 说明 |
+|------|------|
+| `webrtc_engine_main` | WebRTC 客户端主程序（unix socket 接入） |
+| `webrtc_engine_smoke` | 冒烟测试 |
+| `webrtc_engine_signaling_test` / `_call_test` / `_teardown_test` / `_multicall_test` | 引擎集成测试 |
+
+> 说明：本工程的 `websocketpp` / `asio` 头文件已 vendor 到 `webrtc_client-26-11-4/third_party/`，**无需**外部再装这两个库；唯一外部依赖是 WebRTC 源码本身。
+
+---
+
+## 7. 编译信令服务器（跑集成测试需要）
+
+`webrtc_client` 的集成测试需要真信令服务器：
 
 ```bash
-cd apps/peerconnection/server
-make peerconnection_server
-# ./peerconnection_server --port=8888
+cd src/apps/peerconnection/signal_server_26_11_3
+bash build.sh
+# 产物：build/signaling_server、build/test_client 等
 ```
 
 ---
 
-## License
+## 8. 运行测试
 
-本项目基于 WebRTC BSD License 开源。AI 模型权重文件未包含在此仓库中。
+```bash
+cd src/apps/webrtc_client-26-11-4
+
+# C++ 引擎测试（5 个，自动拉起真信令服务器）
+bash test/integration_test.sh        # 信令
+bash test/call_integration_test.sh   # 通话
+bash test/teardown_integration_test.sh  # 挂断/掉线清理
+bash test/multicall_integration_test.sh # 20 轮通话
+
+# Python IPC 测试（4 个，走 unix socket 驱动真二进制）
+python3 test/ipc_integration_test.py
+python3 test/ipc_signaling_test.py
+python3 test/ipc_disconnect_test.py
+python3 test/ipc_multicall_test.py
+```
+
+全部通过即可确认编译产物可用。测试明细见 [webrtc_client-26-11-4/TEST.md](webrtc_client-26-11-4/TEST.md)。
 
 ---
 
+## 9. 版本锁定与关键信息
+
+| 项 | 值 |
+|----|----|
+| WebRTC 源码 commit | `1c7365eedcee97547940638c6b13b3d862214473` |
+| chromium_revision（DEPS 锁定） | `35639b034f` |
+| 构建系统 | depot_tools 的 gn + ninja |
+| 构建目录 | `src/out/webrtc_client_x64` |
+| 关键 GN 参数 | `is_debug=true`、`use_clang_modules=false`、`use_sysroot=true` |
+| 客户端依赖（已 vendor） | websocketpp、standalone Asio 头文件（`webrtc_client-26-11-4/third_party/`） |
+
+> **为什么必须锁 commit**：本仓库代码依赖该 WebRTC 版本的特定 API（`namespace webrtc`、`GetStats(RTCStatsCollectorCallback*)`、`make_ref_counted` 等）。换 commit 会导致 API 不匹配、编译失败。
+
+---
+
+## 10. 常见问题
+
+- **`gn`/`ninja` 找不到**：depot_tools 未加进 `PATH`，重新 `export PATH="$PWD/depot_tools:$PATH"`。
+- **`gclient sync` 报错**：确认 `git checkout 1c7365...` 已执行成功（`git rev-parse HEAD` 应等于该 hash）。
+- **编译报 `websocketpp` 找不到**：只影响 `signal_server` 等独立 g++ 工程；`webrtc_client` 用的是 vendor 在 `third_party/` 里的头文件，不受影响。
+- **磁盘不足**：WebRTC 全量源码 + 构建产物较大，建议预留 40GB+。
