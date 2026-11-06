@@ -123,13 +123,16 @@ struct EngineObserver {
   virtual ~EngineObserver() = default;
 
   // signal_client
-  virtual void OnSignedIn(int my_id) = 0;
-  virtual void OnSignalClientDisconnected() = 0;
-  virtual void OnRoster(const std::vector<PeerInfo>& peers) = 0;
-  virtual void OnIncomingCall(int from) = 0;
-  virtual void OnSignalClientMessage(int from, const std::string& text) = 0;
+  virtual void OnSignalSignedIn(int my_id) = 0;
+  virtual void OnSignalDisconnected() = 0;
+  virtual void OnSignalRoster(const std::vector<PeerInfo>& peers) = 0;
+  virtual void OnSignalCall(int from) = 0;
+  virtual void OnSignalMessage(int from, const std::string& text) = 0;
   virtual void OnCallEnded(int from) = 0;
-  virtual void OnError(const std::string& code, const std::string& msg) = 0;
+  // 信令层错误：信令服务器返回（offline/busy/name_taken）或连接失败，对应 signal_client.error。
+  virtual void OnSignalError(const std::string& code, const std::string& msg) = 0;
+  // 引擎内部异步失败：factory/PC/DC/SDP/SetLocal/SetRemote 操作失败，对应 engine.error。
+  virtual void OnEngineError(const std::string& code, const std::string& msg) = 0;
 
   // SDP / ICE（透明信令）
   virtual void OnLocalSdp(const std::string& type, const std::string& sdp) = 0;

@@ -83,17 +83,17 @@ class webrtc_engine : public SignalingClientObserver,
   int peer_id() const { return peer_id_; }
 
   // SignalingClientObserver
-  void OnSignedIn(int my_id) override;
-  void OnDisconnected() override;
-  void OnRoster(const std::vector<PeerInfo>& peers) override;
-  void OnCall(int from, const std::string& sdp) override;
-  void OnAnswer(int from, const std::string& sdp) override;
-  void OnCandidate(int from, const std::string& candidate,
+  void OnSignalSignedIn(int my_id) override;
+  void OnSignalDisconnected() override;
+  void OnSignalRoster(const std::vector<PeerInfo>& peers) override;
+  void OnSignalCall(int from, const std::string& sdp) override;
+  void OnSignalAnswer(int from, const std::string& sdp) override;
+  void OnSignalCandidate(int from, const std::string& candidate,
                    const std::string& sdp_mid, int sdp_mline_index) override;
-  void OnLeave(int from) override;
-  void OnPeerGone(int from) override;
-  void OnMessage(int from, const std::string& text) override;
-  void OnError(const std::string& code, const std::string& msg) override;
+  void OnSignalLeave(int from) override;
+  void OnSignalPeerGone(int from) override;
+  void OnSignalMessage(int from, const std::string& text) override;
+  void OnSignalError(const std::string& code, const std::string& msg) override;
 
   // PeerConnectionObserver
   void OnSignalingChange(
@@ -191,7 +191,7 @@ class webrtc_engine : public SignalingClientObserver,
   int my_id_ = -1;
   bool callback_on_signaling_thread_ = false;
   std::vector<PeerInfo> peers_;
-  EngineObserver* observer_ = nullptr;
+  EngineObserver* engine_observer_ = nullptr;
 
   int peer_id_ = -1;            // 当前通话对端 id
   bool is_offerer_ = false;     // 本轮是主叫(true)还是被叫(false)

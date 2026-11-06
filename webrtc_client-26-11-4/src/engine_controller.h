@@ -22,13 +22,14 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   void OnClientDisconnected(int client_id) override;
 
   // EngineObserver（signaling 线程回调）
-  void OnSignedIn(int my_id) override;
-  void OnSignalClientDisconnected() override;
-  void OnRoster(const std::vector<PeerInfo>& peers) override;
-  void OnIncomingCall(int from) override;
-  void OnSignalClientMessage(int from, const std::string& text) override;
+  void OnSignalSignedIn(int my_id) override;
+  void OnSignalDisconnected() override;
+  void OnSignalRoster(const std::vector<PeerInfo>& peers) override;
+  void OnSignalCall(int from) override;
+  void OnSignalMessage(int from, const std::string& text) override;
   void OnCallEnded(int from) override;
-  void OnError(const std::string& code, const std::string& msg) override;
+  void OnSignalError(const std::string& code, const std::string& msg) override;
+  void OnEngineError(const std::string& code, const std::string& msg) override;
   void OnLocalSdp(const std::string& type, const std::string& sdp) override;
   void OnRemoteSdp(const std::string& type, const std::string& sdp) override;
   void OnLocalCandidate(const std::string& candidate,

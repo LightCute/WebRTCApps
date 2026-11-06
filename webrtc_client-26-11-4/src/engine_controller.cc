@@ -75,17 +75,17 @@ void EngineController::OnClientDisconnected(int client_id) {
 
 // ===== EngineObserver（signaling 线程）=====
 
-void EngineController::OnSignedIn(int my_id) {
+void EngineController::OnSignalSignedIn(int my_id) {
   Json::Value v = Event("signal_client.signed_in");
   v["id"] = my_id;
   Send(SerializeJson(v));
 }
 
-void EngineController::OnSignalClientDisconnected() {
+void EngineController::OnSignalDisconnected() {
   Send(SerializeJson(Event("signal_client.disconnected")));
 }
 
-void EngineController::OnRoster(const std::vector<PeerInfo>& peers) {
+void EngineController::OnSignalRoster(const std::vector<PeerInfo>& peers) {
   peers_ = peers;
   Json::Value v = Event("signal_client.roster");
   Json::Value arr(Json::arrayValue);
@@ -100,13 +100,13 @@ void EngineController::OnRoster(const std::vector<PeerInfo>& peers) {
   Send(SerializeJson(v));
 }
 
-void EngineController::OnIncomingCall(int from) {
+void EngineController::OnSignalCall(int from) {
   Json::Value v = Event("signal_client.incoming_call");
   v["from"] = from;
   Send(SerializeJson(v));
 }
 
-void EngineController::OnSignalClientMessage(int from, const std::string& text) {
+void EngineController::OnSignalMessage(int from, const std::string& text) {
   Json::Value v = Event("signal_client.message");
   v["from"] = from;
   v["text"] = text;
@@ -119,8 +119,17 @@ void EngineController::OnCallEnded(int from) {
   Send(SerializeJson(v));
 }
 
-void EngineController::OnError(const std::string& code, const std::string& msg) {
+void EngineController::OnSignalError(const std::string& code,
+                                     const std::string& msg) {
   Json::Value v = Event("signal_client.error");
+  v["code"] = code;
+  v["msg"] = msg;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnEngineError(const std::string& code,
+                                     const std::string& msg) {
+  Json::Value v = Event("engine.error");
   v["code"] = code;
   v["msg"] = msg;
   Send(SerializeJson(v));
@@ -338,6 +347,14 @@ void EngineController::HandleCommand(const std::string& line) {
       SendError("usage", "usage: call <peer_id>");
       return;
     }
+    if (!engine_->is_signed_in()) {
+      SendError("not_signed_in", "not signed in");
+      return;
+    }
+    if (engine_->is_connected() || engine_->peer_id() > 0) {
+      SendError("already_in_call", "already in a call");
+      return;
+    }
     engine_->StartCall(peer);
   } else if (cmd == "data_channel_msg") {
     std::string text;
@@ -345,7 +362,9 @@ void EngineController::HandleCommand(const std::string& line) {
     if (!text.empty() && text[0] == ' ') {
       text = text.substr(1);
     }
-    engine_->SendDataChannelMessage(text);
+    if (!engine_->SendDataChannelMessage(text)) {
+      SendError("data_channel_not_open", "data channel not open");
+    }
   } else if (cmd == "signal_msg") {
     int peer = 0;
     ss >> peer;
@@ -358,10 +377,20 @@ void EngineController::HandleCommand(const std::string& line) {
       SendError("usage", "usage: signal_msg <peer_id> <text>");
       return;
     }
-    engine_->SendSignalMessage(peer, text);
+    if (!engine_->SendSignalMessage(peer, text)) {
+      SendError("signal_send_failed", "failed to send signal message");
+    }
   } else if (cmd == "leave") {
+    if (!engine_->is_signed_in()) {
+      SendError("not_signed_in", "not signed in");
+      return;
+    }
     engine_->Leave();
   } else if (cmd == "get_roster") {
+    if (!engine_->is_signed_in()) {
+      SendError("not_signed_in", "not signed in");
+      return;
+    }
     engine_->GetRoster();
   } else if (cmd == "get_stats") {
     engine_->RequestStats();

@@ -26,17 +26,17 @@ struct PeerInfo {
 // 信令事件回调：类型化，直接对应线上协议。
 struct SignalingClientObserver {
   virtual ~SignalingClientObserver() = default;
-  virtual void OnSignedIn(int my_id) = 0;
-  virtual void OnDisconnected() = 0;
-  virtual void OnRoster(const std::vector<PeerInfo>& peers) = 0;
-  virtual void OnCall(int from, const std::string& sdp) = 0;
-  virtual void OnAnswer(int from, const std::string& sdp) = 0;
-  virtual void OnCandidate(int from, const std::string& candidate,
+  virtual void OnSignalSignedIn(int my_id) = 0;
+  virtual void OnSignalDisconnected() = 0;
+  virtual void OnSignalRoster(const std::vector<PeerInfo>& peers) = 0;
+  virtual void OnSignalCall(int from, const std::string& sdp) = 0;
+  virtual void OnSignalAnswer(int from, const std::string& sdp) = 0;
+  virtual void OnSignalCandidate(int from, const std::string& candidate,
                            const std::string& sdp_mid, int sdp_mline_index) = 0;
-  virtual void OnLeave(int from) = 0;
-  virtual void OnPeerGone(int from) = 0;
-  virtual void OnError(const std::string& code, const std::string& msg) = 0;
-  virtual void OnMessage(int from, const std::string& text) = 0;
+  virtual void OnSignalLeave(int from) = 0;
+  virtual void OnSignalPeerGone(int from) = 0;
+  virtual void OnSignalError(const std::string& code, const std::string& msg) = 0;
+  virtual void OnSignalMessage(int from, const std::string& text) = 0;
 };
 
 // WebSocket 信令客户端：直接收发线上协议（register/call/answer/candidate/

@@ -134,17 +134,20 @@ bash build.sh
 ```bash
 cd src/apps/webrtc_client-26-11-4
 
-# C++ 引擎测试（5 个，自动拉起真信令服务器）
+# C++ 引擎测试（6 个）
+out/webrtc_client_x64/webrtc_engine_smoke            # 冒烟（创建/销毁 PC/DC）
+out/webrtc_client_x64/webrtc_engine_validation_test  # 受理校验 + engine.error（无需网络）
 bash test/integration_test.sh        # 信令
 bash test/call_integration_test.sh   # 通话
 bash test/teardown_integration_test.sh  # 挂断/掉线清理
 bash test/multicall_integration_test.sh # 20 轮通话
 
-# Python IPC 测试（4 个，走 unix socket 驱动真二进制）
+# Python IPC 测试（5 个，走 unix socket 驱动真二进制）
 python3 test/ipc_integration_test.py
 python3 test/ipc_signaling_test.py
 python3 test/ipc_disconnect_test.py
 python3 test/ipc_multicall_test.py
+python3 test/ipc_failure_test.py     # 命令失败返回（ipc.error）
 ```
 
 全部通过即可确认编译产物可用。测试明细见 [webrtc_client-26-11-4/TEST.md](webrtc_client-26-11-4/TEST.md)。

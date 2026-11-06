@@ -96,7 +96,7 @@ void WebSocketSignalingClient::Connect(const std::string& server, int port,
   }
   if (ec) {
     Fire([](SignalingClientObserver* o) {
-      o->OnError("connect", "无法连接服务器");
+      o->OnSignalError("connect", "无法连接服务器");
     });
     return;
   }
@@ -227,7 +227,7 @@ void WebSocketSignalingClient::OnClose(websocketpp::connection_hdl hdl) {
   }
   close_cv_.notify_all();
   if (was_current) {
-    Fire([](SignalingClientObserver* o) { o->OnDisconnected(); });
+    Fire([](SignalingClientObserver* o) { o->OnSignalDisconnected(); });
   }
 }
 
@@ -253,7 +253,7 @@ void WebSocketSignalingClient::DispatchMessage(const Json::Value& j) {
       std::lock_guard<std::mutex> lk(mutex_);
       my_id_ = id;
     }
-    Fire([id](SignalingClientObserver* o) { o->OnSignedIn(id); });
+    Fire([id](SignalingClientObserver* o) { o->OnSignalSignedIn(id); });
   } else if (type == "roster") {
     std::vector<PeerInfo> peers;
     if (j.isMember("peers") && j["peers"].isArray()) {
@@ -265,37 +265,37 @@ void WebSocketSignalingClient::DispatchMessage(const Json::Value& j) {
         peers.push_back(std::move(pi));
       }
     }
-    Fire([peers](SignalingClientObserver* o) { o->OnRoster(peers); });
+    Fire([peers](SignalingClientObserver* o) { o->OnSignalRoster(peers); });
   } else if (type == "call") {
     int from = GetIntField(j, "from", 0);
     std::string sdp = GetStringField(j, "sdp");
-    Fire([from, sdp](SignalingClientObserver* o) { o->OnCall(from, sdp); });
+    Fire([from, sdp](SignalingClientObserver* o) { o->OnSignalCall(from, sdp); });
   } else if (type == "answer") {
     int from = GetIntField(j, "from", 0);
     std::string sdp = GetStringField(j, "sdp");
-    Fire([from, sdp](SignalingClientObserver* o) { o->OnAnswer(from, sdp); });
+    Fire([from, sdp](SignalingClientObserver* o) { o->OnSignalAnswer(from, sdp); });
   } else if (type == "candidate") {
     int from = GetIntField(j, "from", 0);
     std::string cand = GetStringField(j, "candidate");
     std::string mid = GetStringField(j, "sdpMid");
     int idx = GetIntField(j, "sdpMLineIndex", 0);
     Fire([from, cand, mid, idx](SignalingClientObserver* o) {
-      o->OnCandidate(from, cand, mid, idx);
+      o->OnSignalCandidate(from, cand, mid, idx);
     });
   } else if (type == "leave") {
     int from = GetIntField(j, "from", 0);
-    Fire([from](SignalingClientObserver* o) { o->OnLeave(from); });
+    Fire([from](SignalingClientObserver* o) { o->OnSignalLeave(from); });
   } else if (type == "peer_gone") {
     int from = GetIntField(j, "from", 0);
-    Fire([from](SignalingClientObserver* o) { o->OnPeerGone(from); });
+    Fire([from](SignalingClientObserver* o) { o->OnSignalPeerGone(from); });
   } else if (type == "error") {
     std::string code = GetStringField(j, "code");
     std::string emsg = GetStringField(j, "msg");
-    Fire([code, emsg](SignalingClientObserver* o) { o->OnError(code, emsg); });
+    Fire([code, emsg](SignalingClientObserver* o) { o->OnSignalError(code, emsg); });
   } else if (type == "message") {
     int from = GetIntField(j, "from", 0);
     std::string text = GetStringField(j, "text");
-    Fire([from, text](SignalingClientObserver* o) { o->OnMessage(from, text); });
+    Fire([from, text](SignalingClientObserver* o) { o->OnSignalMessage(from, text); });
   }
   // 未知类型忽略
 }

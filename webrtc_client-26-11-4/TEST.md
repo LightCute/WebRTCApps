@@ -152,9 +152,41 @@ python3 test/ipc_disconnect_test.py
 
 输出：`ipc disconnect ok: signal_disconnect + server crash teardown`。
 
+## 10. 受理校验 + engine.error 单测 `webrtc_engine_validation_test`
+
+```bash
+out/webrtc_client_x64/webrtc_engine_validation_test
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 受理校验谓词：未注册时 `CanStartCall/CanGetRoster/CanLeave` 返回 `not_signed_in` | 通过 |
+| bool 语义：未建 DC `SendDataChannelMessage` 返回 false；未连服务器 `SendSignalMessage` 返回 false | 通过 |
+| engine.error：无 factory 建 PC → `peer_connection_failed`；无 PC 建 DC → `data_channel_failed`；非法远端 offer → `set_remote_desc_failed` | 通过 |
+
+输出：`validation ok: predicates + engine.error`。
+
+## 11. 命令失败返回 IPC 测试 `ipc_failure_test.py`
+
+```bash
+python3 test/ipc_failure_test.py
+```
+
+起真信令服务器(9890) + 两个 `webrtc_engine_main`，未注册/未通话状态下发命令，断言 `ipc.error` 错误码：
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 未通话 `data_channel_msg` → `data_channel_not_open` | 通过 |
+| 未注册 `signal_msg` → `signal_send_failed` | 通过 |
+| 未注册 `get_roster`/`leave`/`call` → `not_signed_in` | 通过 |
+| 通话中再 `call` → `already_in_call` | 通过 |
+
+输出：`ipc failure ok: data_channel_not_open/signal_send_failed/not_signed_in/already_in_call`。
+
 ## 说明
 
-- 集成测试均依赖真 `signal_server_26_11_3/build/signaling_server`，各测试使用独立端口（9799/9899/9898/9897/9896/9895/9893/9892/9891），避免互扰。
+- 集成测试均依赖真 `signal_server_26_11_3/build/signaling_server`，各测试使用独立端口（9799/9899/9898/9897/9896/9895/9893/9892/9891/9890），避免互扰。
 - IPC 层已纳入断言的改动：连接握手 + 命令清单、roster 带在线用户状态、`register` 指定/切换服务器、`signal_disconnect`/崩溃拆 PC、信令转发 `signal_msg`、运行时状态快照 `get_stats`。
+- 错误事件分三类 scope：`ipc.error`（受理拒绝）、`engine.error`（引擎内部异步失败）、`signal_client.error`（信令服务器返回），完整命令 ↔ 事件/错误码汇总见 [IPC_PROTOCOL.md](IPC_PROTOCOL.md)。
 - `get_stats` 返回的 `stats` 事件含三块：`data_channel`（状态/计数/积压，同步采集）、`transport` + `candidate_pair`（字节/DTLS/ICE/RTT，来自 PeerConnection GetStats）。
 - 事件协议（后端 → 上层）为 JSON，字段以 `event` 路由；命令（上层 → 后端）保持纯文本。

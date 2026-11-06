@@ -103,7 +103,7 @@ void webrtc_engine::DisconnectSignal() {
 }
 
 void webrtc_engine::RegisterObserver(EngineObserver* observer) {
-  observer_ = observer;
+  engine_observer_ = observer;
 }
 
 // ============================================================================
@@ -216,6 +216,8 @@ bool webrtc_engine::InitializePeerConnectionFactoryImpl() {
       CreateModularPeerConnectionFactory(std::move(deps));
   if (!peer_connection_factory_) {
     RTC_LOG(LS_ERROR) << "CreateModularPeerConnectionFactory failed";
+    if (engine_observer_) engine_observer_->OnEngineError("peer_connection_factory_failed",
+                      "CreateModularPeerConnectionFactory failed");
     return false;
   }
   RTC_LOG(LS_INFO) << "PeerConnectionFactory created";
@@ -228,6 +230,7 @@ bool webrtc_engine::CreatePeerConnectionImpl() {
   }
   if (!peer_connection_factory_) {
     RTC_LOG(LS_WARNING) << "CreatePeerConnection: factory not created";
+    if (engine_observer_) engine_observer_->OnEngineError("peer_connection_failed", "factory not created");
     return false;
   }
   PeerConnectionDependencies pc_deps(this);
@@ -236,6 +239,7 @@ bool webrtc_engine::CreatePeerConnectionImpl() {
   if (!result.ok()) {
     RTC_LOG(LS_ERROR) << "CreatePeerConnection failed: "
                       << result.error().message();
+    if (engine_observer_) engine_observer_->OnEngineError("peer_connection_failed", result.error().message());
     return false;
   }
   peer_connection_ = std::move(result.value());
@@ -249,6 +253,7 @@ bool webrtc_engine::CreateDataChannelImpl() {
   }
   if (!peer_connection_) {
     RTC_LOG(LS_WARNING) << "CreateDataChannel: PeerConnection not created";
+    if (engine_observer_) engine_observer_->OnEngineError("data_channel_failed", "PeerConnection not created");
     return false;
   }
   DataChannelInit init;
@@ -258,6 +263,7 @@ bool webrtc_engine::CreateDataChannelImpl() {
   if (!result.ok()) {
     RTC_LOG(LS_ERROR) << "CreateDataChannel failed: "
                       << result.error().message();
+    if (engine_observer_) engine_observer_->OnEngineError("data_channel_failed", result.error().message());
     return false;
   }
   data_channel_ = std::move(result.value());
@@ -303,6 +309,7 @@ void webrtc_engine::SetRemoteOffer(const std::string& sdp) {
   auto desc = CreateSessionDescription(SdpType::kOffer, sdp);
   if (!desc) {
     RTC_LOG(LS_ERROR) << "Failed to parse remote offer";
+    if (engine_observer_) engine_observer_->OnEngineError("set_remote_desc_failed", "failed to parse remote offer");
     return;
   }
   peer_connection_->SetRemoteDescription(
@@ -313,6 +320,7 @@ void webrtc_engine::SetRemoteAnswer(const std::string& sdp) {
   auto desc = CreateSessionDescription(SdpType::kAnswer, sdp);
   if (!desc) {
     RTC_LOG(LS_ERROR) << "Failed to parse remote answer";
+    if (engine_observer_) engine_observer_->OnEngineError("set_remote_desc_failed", "failed to parse remote answer");
     return;
   }
   peer_connection_->SetRemoteDescription(
@@ -358,8 +366,8 @@ void webrtc_engine::RequestStatsImpl() {
         make_ref_counted<StatsCollector>(this, std::move(stats));
     // GetStats 内部会把裸指针包成 scoped_refptr 持有，回调期间保持存活。
     peer_connection_->GetStats(collector.get());
-  } else if (observer_) {
-    observer_->OnStats(stats);  // 无 PC：只上抛 DataChannel 信息（可能全空）
+  } else if (engine_observer_) {
+    engine_observer_->OnStats(stats);  // 无 PC：只上抛 DataChannel 信息（可能全空）
   }
 }
 
@@ -385,42 +393,42 @@ void webrtc_engine::CollectDataChannelStatsImpl(
 //  观察者实现 —— SignalingClientObserver（signaling 线程，经 executor marshal）
 // ============================================================================
 
-void webrtc_engine::OnSignedIn(int my_id) {
+void webrtc_engine::OnSignalSignedIn(int my_id) {
   callback_on_signaling_thread_ =
       (webrtc::Thread::Current() == signaling_thread_.get());
   my_id_ = my_id;
   signed_in_ = true;
-  RTC_LOG(LS_INFO) << "OnSignedIn my_id=" << my_id;
-  if (observer_) {
-    observer_->OnSignedIn(my_id);
+  RTC_LOG(LS_INFO) << "OnSignalSignedIn my_id=" << my_id;
+  if (engine_observer_) {
+    engine_observer_->OnSignalSignedIn(my_id);
   }
 }
 
-void webrtc_engine::OnDisconnected() {
+void webrtc_engine::OnSignalDisconnected() {
   signed_in_ = false;
   my_id_ = -1;
-  RTC_LOG(LS_INFO) << "OnDisconnected";
-  if (observer_) {
-    observer_->OnSignalClientDisconnected();
+  RTC_LOG(LS_INFO) << "OnSignalDisconnected";
+  if (engine_observer_) {
+    engine_observer_->OnSignalDisconnected();
   }
   ClosePeerConnection();  // 信令断开 → 拆 PC/DC（不发 leave，信令已不通）
 }
 
-void webrtc_engine::OnRoster(const std::vector<PeerInfo>& peers) {
+void webrtc_engine::OnSignalRoster(const std::vector<PeerInfo>& peers) {
   peers_ = peers;
-  RTC_LOG(LS_INFO) << "OnRoster peers=" << peers.size();
-  if (observer_) {
-    observer_->OnRoster(peers);
+  RTC_LOG(LS_INFO) << "OnSignalRoster peers=" << peers.size();
+  if (engine_observer_) {
+    engine_observer_->OnSignalRoster(peers);
   }
 }
 
-void webrtc_engine::OnCall(int from, const std::string& sdp) {
-  RTC_LOG(LS_INFO) << "OnCall from=" << from;
+void webrtc_engine::OnSignalCall(int from, const std::string& sdp) {
+  RTC_LOG(LS_INFO) << "OnSignalCall from=" << from;
   peer_id_ = from;
   is_offerer_ = false;
-  if (observer_) {
-    observer_->OnIncomingCall(from);
-    observer_->OnRemoteSdp("offer", sdp);
+  if (engine_observer_) {
+    engine_observer_->OnSignalCall(from);
+    engine_observer_->OnRemoteSdp("offer", sdp);
   }
   if (!InitializePeerConnectionFactoryImpl()) {
     return;
@@ -431,51 +439,51 @@ void webrtc_engine::OnCall(int from, const std::string& sdp) {
   SetRemoteOffer(sdp);
 }
 
-void webrtc_engine::OnAnswer(int from, const std::string& sdp) {
-  RTC_LOG(LS_INFO) << "OnAnswer from=" << from;
-  if (observer_) {
-    observer_->OnRemoteSdp("answer", sdp);
+void webrtc_engine::OnSignalAnswer(int from, const std::string& sdp) {
+  RTC_LOG(LS_INFO) << "OnSignalAnswer from=" << from;
+  if (engine_observer_) {
+    engine_observer_->OnRemoteSdp("answer", sdp);
   }
   SetRemoteAnswer(sdp);
 }
 
-void webrtc_engine::OnCandidate(int from, const std::string& candidate,
+void webrtc_engine::OnSignalCandidate(int from, const std::string& candidate,
                                 const std::string& sdp_mid,
                                 int sdp_mline_index) {
-  RTC_LOG(LS_INFO) << "OnCandidate from=" << from;
-  if (observer_) {
-    observer_->OnRemoteCandidate(candidate, sdp_mid, sdp_mline_index);
+  RTC_LOG(LS_INFO) << "OnSignalCandidate from=" << from;
+  if (engine_observer_) {
+    engine_observer_->OnRemoteCandidate(candidate, sdp_mid, sdp_mline_index);
   }
   AddRemoteCandidate(candidate, sdp_mid, sdp_mline_index);
 }
 
-void webrtc_engine::OnLeave(int from) {
-  RTC_LOG(LS_INFO) << "OnLeave from=" << from;
+void webrtc_engine::OnSignalLeave(int from) {
+  RTC_LOG(LS_INFO) << "OnSignalLeave from=" << from;
   ClosePeerConnection();
-  if (observer_) {
-    observer_->OnCallEnded(from);
+  if (engine_observer_) {
+    engine_observer_->OnCallEnded(from);
   }
 }
 
-void webrtc_engine::OnPeerGone(int from) {
-  RTC_LOG(LS_INFO) << "OnPeerGone from=" << from;
+void webrtc_engine::OnSignalPeerGone(int from) {
+  RTC_LOG(LS_INFO) << "OnSignalPeerGone from=" << from;
   ClosePeerConnection();
-  if (observer_) {
-    observer_->OnCallEnded(from);
+  if (engine_observer_) {
+    engine_observer_->OnCallEnded(from);
   }
 }
 
-void webrtc_engine::OnMessage(int from, const std::string& text) {
-  RTC_LOG(LS_INFO) << "OnMessage from=" << from;
-  if (observer_) {
-    observer_->OnSignalClientMessage(from, text);
+void webrtc_engine::OnSignalMessage(int from, const std::string& text) {
+  RTC_LOG(LS_INFO) << "OnSignalMessage from=" << from;
+  if (engine_observer_) {
+    engine_observer_->OnSignalMessage(from, text);
   }
 }
 
-void webrtc_engine::OnError(const std::string& code, const std::string& msg) {
-  RTC_LOG(LS_WARNING) << "OnError code=" << code << " msg=" << msg;
-  if (observer_) {
-    observer_->OnError(code, msg);
+void webrtc_engine::OnSignalError(const std::string& code, const std::string& msg) {
+  RTC_LOG(LS_WARNING) << "OnSignalError code=" << code << " msg=" << msg;
+  if (engine_observer_) {
+    engine_observer_->OnSignalError(code, msg);
   }
 }
 
@@ -509,8 +517,8 @@ void webrtc_engine::OnIceCandidate(const IceCandidate* candidate) {
   }
   std::string candidate_str;
   candidate->ToString(&candidate_str);
-  if (observer_) {
-    observer_->OnLocalCandidate(candidate_str, candidate->sdp_mid(),
+  if (engine_observer_) {
+    engine_observer_->OnLocalCandidate(candidate_str, candidate->sdp_mid(),
                                 candidate->sdp_mline_index());
   }
   signaling_client_.Candidate(peer_id_, candidate_str, candidate->sdp_mid(),
@@ -522,8 +530,8 @@ void webrtc_engine::OnConnectionChange(
   RTC_LOG(LS_INFO) << "PeerConnectionState: "
                    << PeerConnectionInterface::AsString(state);
   is_connected_ = (state == PeerConnectionInterface::PeerConnectionState::kConnected);
-  if (observer_) {
-    observer_->OnPeerConnectionStateChange(state);
+  if (engine_observer_) {
+    engine_observer_->OnPeerConnectionStateChange(state);
   }
 }
 
@@ -539,8 +547,8 @@ void webrtc_engine::OnStateChange() {
   RTC_LOG(LS_INFO) << "DataChannel state: "
                    << DataChannelInterface::DataStateString(state);
   data_channel_open_ = (state == DataChannelInterface::kOpen);
-  if (observer_) {
-    observer_->OnDataChannelStateChange(state);
+  if (engine_observer_) {
+    engine_observer_->OnDataChannelStateChange(state);
   }
 }
 
@@ -548,8 +556,8 @@ void webrtc_engine::OnMessage(const DataBuffer& buffer) {
   last_received_message_ =
       std::string(buffer.data.data<char>(), buffer.data.size());
   RTC_LOG(LS_INFO) << "DataChannel onMessage: " << last_received_message_;
-  if (observer_) {
-    observer_->OnDataChannelMessage(last_received_message_);
+  if (engine_observer_) {
+    engine_observer_->OnDataChannelMessage(last_received_message_);
   }
 }
 
@@ -563,8 +571,8 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
   std::string sdp;
   desc->ToString(&sdp);
   std::string type = engine_->is_offerer_ ? "offer" : "answer";
-  if (engine_->observer_) {
-    engine_->observer_->OnLocalSdp(type, sdp);
+  if (engine_->engine_observer_) {
+    engine_->engine_observer_->OnLocalSdp(type, sdp);
   }
   engine_->peer_connection_->SetLocalDescription(
       std::unique_ptr<SessionDescriptionInterface>(desc),
@@ -578,6 +586,7 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
 
 void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
   RTC_LOG(LS_ERROR) << "CreateOffer/Answer failed: " << error.message();
+  if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("sdp_create_failed", error.message());
 }
 
 // ============================================================================
@@ -590,6 +599,7 @@ void webrtc_engine::SetLocalObserver::OnSetLocalDescriptionComplete(
     RTC_LOG(LS_INFO) << "SetLocalDescription OK";
   } else {
     RTC_LOG(LS_ERROR) << "SetLocalDescription failed: " << error.message();
+    if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("set_local_desc_failed", error.message());
   }
 }
 
@@ -607,6 +617,7 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
     }
   } else {
     RTC_LOG(LS_ERROR) << "SetRemoteDescription failed: " << error.message();
+    if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("set_remote_desc_failed", error.message());
   }
 }
 
@@ -784,7 +795,7 @@ void webrtc_engine::StatsCollector::OnStatsDelivered(
     }
   }
 
-  if (engine_ && engine_->observer_) {
-    engine_->observer_->OnStats(stats_);
+  if (engine_ && engine_->engine_observer_) {
+    engine_->engine_observer_->OnStats(stats_);
   }
 }
