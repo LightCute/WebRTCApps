@@ -3,6 +3,7 @@
 #include <websocketpp/close.hpp>
 #include <websocketpp/frame.hpp>
 
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -49,6 +50,9 @@ WebSocketSignalingClient::WebSocketSignalingClient() {
   endpoint_.clear_access_channels(websocketpp::log::alevel::all);
   endpoint_.clear_error_channels(websocketpp::log::elevel::all);
   endpoint_.init_asio();
+  // 保活：装上 work guard，让 run() 在空闲（无连接）时也不返回，
+  // 否则最后一个连接关闭后 io 线程会提前退出，导致无法重连。
+  endpoint_.start_perpetual();
   endpoint_.set_open_handler(bind(&WebSocketSignalingClient::OnOpen, this, ::_1));
   endpoint_.set_close_handler(
       bind(&WebSocketSignalingClient::OnClose, this, ::_1));
@@ -73,6 +77,15 @@ void WebSocketSignalingClient::RegisterObserver(
 
 void WebSocketSignalingClient::Connect(const std::string& server, int port,
                                        const std::string& name) {
+  // 若已有活跃连接，先软关闭旧的，避免新旧连接并存（on_close 靠 hdl_ 判断，不会误伤新连接）。
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (connected_) {
+      websocketpp::lib::error_code ec;
+      endpoint_.close(hdl_, websocketpp::close::status::normal, "reconnect", ec);
+    }
+  }
+
   websocketpp::lib::error_code ec;
   client::connection_ptr con;
   {
@@ -95,12 +108,39 @@ void WebSocketSignalingClient::Connect(const std::string& server, int port,
 }
 
 void WebSocketSignalingClient::Close() {
-  if (running_) {
-    running_ = false;
-    endpoint_.stop();
-    if (io_thread_.joinable()) {
-      io_thread_.join();
+  if (!running_) {
+    return;
+  }
+
+  // 优雅关闭：发 close frame，让服务器检测到断开。
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (connected_) {
+      websocketpp::lib::error_code ec;
+      endpoint_.close(hdl_, websocketpp::close::status::normal, "close", ec);
     }
+  }
+
+  // 等 close 握手完成（on_close 置 close_done_），最多 1 秒。
+  {
+    std::unique_lock<std::mutex> lk(close_mutex_);
+    close_cv_.wait_for(lk, std::chrono::milliseconds(1000),
+                       [this] { return close_done_; });
+  }
+
+  running_ = false;
+  endpoint_.stop();
+  if (io_thread_.joinable()) {
+    io_thread_.join();
+  }
+}
+
+void WebSocketSignalingClient::Disconnect() {
+  // 软断开：只发 close 帧关当前连接，保留 io 线程运行，便于再次 Connect()。
+  websocketpp::lib::error_code ec;
+  std::lock_guard<std::mutex> lk(mutex_);
+  if (connected_) {
+    endpoint_.close(hdl_, websocketpp::close::status::normal, "disconnect", ec);
   }
 }
 
@@ -181,6 +221,11 @@ void WebSocketSignalingClient::OnClose(websocketpp::connection_hdl hdl) {
       was_current = true;
     }
   }
+  {
+    std::lock_guard<std::mutex> lk(close_mutex_);
+    close_done_ = true;
+  }
+  close_cv_.notify_all();
   if (was_current) {
     Fire([](SignalingClientObserver* o) { o->OnDisconnected(); });
   }

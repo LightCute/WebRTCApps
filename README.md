@@ -7,7 +7,7 @@
 | 工程 | 构建方式 | 依赖 |
 |------|----------|------|
 | `webrtc_client-26-11-4` | WebRTC **GN/ninja** 构建（`build_x64.sh`） | WebRTC 源码（精确 commit）+ 本仓库源码（third_party 已 vendor 进工程内） |
-| `peerconnection/signal_server_26_11_3` / `peer_connection_client_26_11_3` | 独立 **g++** 构建（各自 `build.sh`） | websocketpp / asio / jsoncpp（在本仓库 `peerconnection/` 下） |
+| `signal_server_26_11_3` / `peer_connection_client_26_11_3` | 独立 **g++** 构建（各自 `build.sh`） | websocketpp / asio（在 `third_party/`）/ jsoncpp（WebRTC 源码内） |
 
 ---
 
@@ -113,7 +113,7 @@ bash build_x64.sh
 | `webrtc_engine_smoke` | 冒烟测试 |
 | `webrtc_engine_signaling_test` / `_call_test` / `_teardown_test` / `_multicall_test` | 引擎集成测试 |
 
-> 说明：本工程的 `websocketpp` / `asio` 头文件已 vendor 到 `webrtc_client-26-11-4/third_party/`，**无需**外部再装这两个库；唯一外部依赖是 WebRTC 源码本身。
+> 说明：本工程的 `websocketpp` / `asio` 头文件已 vendor 到 `third_party/`，**无需**外部再装这两个库；唯一外部依赖是 WebRTC 源码本身。
 
 ---
 
@@ -122,7 +122,7 @@ bash build_x64.sh
 `webrtc_client` 的集成测试需要真信令服务器：
 
 ```bash
-cd src/apps/peerconnection/signal_server_26_11_3
+cd src/apps/signal_server_26_11_3
 bash build.sh
 # 产物：build/signaling_server、build/test_client 等
 ```
@@ -160,7 +160,7 @@ python3 test/ipc_multicall_test.py
 | 构建系统 | depot_tools 的 gn + ninja |
 | 构建目录 | `src/out/webrtc_client_x64` |
 | 关键 GN 参数 | `is_debug=true`、`use_clang_modules=false`、`use_sysroot=true` |
-| 客户端依赖（已 vendor） | websocketpp、standalone Asio 头文件（`webrtc_client-26-11-4/third_party/`） |
+| 客户端依赖（已 vendor） | websocketpp、standalone Asio 头文件（`third_party/`） |
 
 > **为什么必须锁 commit**：本仓库代码依赖该 WebRTC 版本的特定 API（`namespace webrtc`、`GetStats(RTCStatsCollectorCallback*)`、`make_ref_counted` 等）。换 commit 会导致 API 不匹配、编译失败。
 
@@ -170,5 +170,5 @@ python3 test/ipc_multicall_test.py
 
 - **`gn`/`ninja` 找不到**：depot_tools 未加进 `PATH`，重新 `export PATH="$PWD/depot_tools:$PATH"`。
 - **`gclient sync` 报错**：确认 `git checkout 1c7365...` 已执行成功（`git rev-parse HEAD` 应等于该 hash）。
-- **编译报 `websocketpp` 找不到**：只影响 `signal_server` 等独立 g++ 工程；`webrtc_client` 用的是 vendor 在 `third_party/` 里的头文件，不受影响。
+- **编译报 `websocketpp` 找不到**：检查 `apps/third_party/websocketpp` 是否存在；webrtc_client 与 signal_server 都从这里引用。
 - **磁盘不足**：WebRTC 全量源码 + 构建产物较大，建议预留 40GB+。

@@ -4,7 +4,7 @@ assert(is_linux || is_chromeos,
        "apps/webrtc_client-26-11-4 supports Linux/ChromeOS only.")
 
 # websocketpp + standalone Asio 的编译配置。
-# 这两个第三方库的头文件已 vendor 到本工程的 third_party/ 下（自包含，便于分发编译）。
+# 这两个第三方库的头文件已 vendor 到 apps/third_party/ 下（自包含，便于分发编译）。
 # standalone Asio 需要 RTTI（typeid），故开启官方 rtti 配置；同时关掉 -Wundef
 # （Asio 引用了未定义的 __cpp_coroutines）。模块已在 gn args 里整体关闭。
 config("signaling_deps_config") {
@@ -13,9 +13,9 @@ config("signaling_deps_config") {
     "//build/config/compiler:exceptions",
   ]
   include_dirs = [
-    "src",                        # 让 test/ 下的源码能 #include "webrtc_engine.h" 等
-    "third_party/websocketpp",    # <websocketpp/...>
-    "third_party/asio/include",   # <asio/...> / <asio.hpp>
+    "src",                         # 让 test/ 下的源码能 #include "webrtc_engine.h" 等
+    "../third_party/websocketpp",  # <websocketpp/...>
+    "../third_party/asio/include", # <asio/...> / <asio.hpp>
   ]
   defines = [ "ASIO_STANDALONE" ]
   cflags = [

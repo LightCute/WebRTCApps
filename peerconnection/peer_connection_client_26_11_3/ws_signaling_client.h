@@ -5,6 +5,7 @@
 #include <websocketpp/client.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -51,6 +52,8 @@ class WebSocketSignalingClient {
 
   void Connect(const std::string& server, int port, const std::string& name);
   void Close();
+  // 软断开：只关当前连接，保留 io 线程运行，便于再次 Connect() 重连。
+  void Disconnect();
 
   bool is_connected() const;
   int id() const;
@@ -86,6 +89,11 @@ class WebSocketSignalingClient {
   websocketpp::connection_hdl hdl_;
   bool connected_ = false;
   int my_id_ = 0;
+
+  // 优雅关闭协调：Close() 等待 on_close 完成。
+  std::mutex close_mutex_;
+  std::condition_variable close_cv_;
+  bool close_done_ = false;
 
   SignalingClientObserver* observer_ = nullptr;  // Connect 前设置，运行期只读
   std::function<void(std::function<void()>)> executor_;

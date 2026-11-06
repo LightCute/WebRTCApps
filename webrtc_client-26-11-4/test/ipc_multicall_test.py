@@ -12,7 +12,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.normpath(
-    os.path.join(HERE, "../../peerconnection/signal_server_26_11_3/build/signaling_server"))
+    os.path.join(HERE, "../../signal_server_26_11_3/build/signaling_server"))
 ENGINE = os.path.normpath(os.path.join(HERE, "../../../out/webrtc_client_x64/webrtc_engine_main"))
 PORT = 9895
 ROUNDS = 20

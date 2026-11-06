@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_ROOT="$(cd "$ENGINE_DIR/../.." && pwd)"
 
-SERVER="$ENGINE_DIR/../peerconnection/signal_server_26_11_3/build/signaling_server"
+SERVER="$ENGINE_DIR/../signal_server_26_11_3/build/signaling_server"
 TEST_BIN="$SRC_ROOT/out/webrtc_client_x64/webrtc_engine_call_test"
 PORT=9899
 
