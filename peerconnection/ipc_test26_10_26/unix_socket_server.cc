@@ -6,6 +6,10 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+
+#include "rtc_base/logging.h"
+
+using namespace webrtc;
 #include <string>
 #include <string_view>
 #include <sys/epoll.h>
@@ -64,12 +68,14 @@ void UnixSocketServer::RemoveObserver(UnixSocketObserver* observer) {
 }
 
 void UnixSocketServer::SendToClient(int client_id, const std::string& data) {
+  std::lock_guard<std::mutex> lock(send_mutex_);
   auto it = id_to_fd_.find(client_id);   // id → fd 路由
   if (it == id_to_fd_.end()) return;
   SendLine(it->second, data);
 }
 
 void UnixSocketServer::Broadcast(const std::string& data) {
+  std::lock_guard<std::mutex> lock(send_mutex_);
   for (const auto& kv : clients_) {
     SendLine(kv.second.fd, data);
   }
@@ -104,7 +110,7 @@ void UnixSocketServer::IoLoop() {
 
   listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);  // 创建 socket，返回 fd
   if (listen_fd_ < 0) {
-    fprintf(stderr, "[ERR] Failed to create Unix socket: %s\n", strerror(errno));
+    RTC_LOG(LS_ERROR) << "Failed to create Unix socket: " << strerror(errno);
     return;
   }
 
@@ -112,15 +118,14 @@ void UnixSocketServer::IoLoop() {
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);  // 对 addr 做配置，设置地址
   if (bind(listen_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {  // 地址绑定到监听 fd
-    fprintf(stderr, "[ERR] Failed to bind Unix socket: %s\n", strerror(errno));
+    RTC_LOG(LS_ERROR) << "Failed to bind Unix socket: " << strerror(errno);
     close(listen_fd_);
     listen_fd_ = -1;
     return;
   }
 
   if (listen(listen_fd_, max_clients_) < 0) {  // backlog = 最大客户端数
-    fprintf(stderr, "[ERR] Failed to listen on Unix socket: %s\n",
-            strerror(errno));
+    RTC_LOG(LS_ERROR) << "Failed to listen on Unix socket: " << strerror(errno);
     close(listen_fd_);
     listen_fd_ = -1;
     return;
@@ -128,7 +133,7 @@ void UnixSocketServer::IoLoop() {
 
   int epfd = epoll_create1(0);
   if (epfd < 0) {
-    fprintf(stderr, "[ERR] Failed to create epoll: %s\n", strerror(errno));
+    RTC_LOG(LS_ERROR) << "Failed to create epoll: " << strerror(errno);
     return;
   }
 
@@ -150,19 +155,22 @@ void UnixSocketServer::IoLoop() {
         int cfd = accept(listen_fd_, nullptr, nullptr);
         if (cfd < 0) continue;
         if ((int)clients_.size() >= max_clients_) {  // 超上限，拒绝
-          fprintf(stderr, "[WARN] Too many clients, rejecting fd=%d\n", cfd);
+          RTC_LOG(LS_WARNING) << "Too many clients, rejecting fd=" << cfd;
           close(cfd);
           continue;
         }
         int id = next_client_id_++;  // 分配稳定 client_id
-        clients_[cfd].id = id;
-        clients_[cfd].fd = cfd;
-        id_to_fd_[id] = cfd;
+        {
+          std::lock_guard<std::mutex> lock(send_mutex_);
+          clients_[cfd].id = id;
+          clients_[cfd].fd = cfd;
+          id_to_fd_[id] = cfd;
+        }
         struct epoll_event cev = {};
         cev.events = EPOLLIN | EPOLLRDHUP;
         cev.data.fd = cfd;
         epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &cev);  // 把新客户端 fd 放进 epoll 表
-        fprintf(stderr, "[INFO] client %d connected (fd=%d)\n", id, cfd);
+        RTC_LOG(LS_INFO) << "client " << id << " connected (fd=" << cfd << ")";
         NotifyConnected(id);
       } else {  // 是客户端 fd，直接读取消息
         auto it = clients_.find(fd);
@@ -177,9 +185,12 @@ void UnixSocketServer::IoLoop() {
           int id = client.id;
           epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
           close(fd);
-          clients_.erase(it);   // 从两张表里删除
-          id_to_fd_.erase(id);
-          fprintf(stderr, "[INFO] client %d disconnected\n", id);
+          {
+            std::lock_guard<std::mutex> lock(send_mutex_);
+            clients_.erase(it);   // 从两张表里删除
+            id_to_fd_.erase(id);
+          }
+          RTC_LOG(LS_INFO) << "client " << id << " disconnected";
           NotifyDisconnected(id);
           continue;
         }
@@ -205,9 +216,9 @@ void UnixSocketServer::IoLoop() {
           }
           if (line.size() > kMaxLineBytes) {
             // 已完整的超长行：丢弃、告警，不交付上层
-            fprintf(stderr,
-                    "[WARN] client %d dropped over-long line (%zu bytes)\n",
-                    client.id, line.size());
+            RTC_LOG(LS_WARNING) << "client " << client.id
+                                << " dropped over-long line (" << line.size()
+                                << " bytes)";
             continue;
           }
           NotifyLine(client.id, line);
@@ -218,20 +229,22 @@ void UnixSocketServer::IoLoop() {
           size_t dropped = client.line_buf.size();
           client.line_buf.clear();
           client.discarding = true;
-          fprintf(stderr,
-                  "[WARN] client %d line too long (%zu bytes), discarding until newline\n",
-                  client.id, dropped);
+          RTC_LOG(LS_WARNING) << "client " << client.id << " line too long ("
+                              << dropped << " bytes), discarding until newline";
         }
       }
     }
   }
 
   // 收尾：关闭所有客户端 fd（统一在 io 线程收尾，避免 Stop 并发 close 竞态）
-  for (auto& kv : clients_) {
-    close(kv.second.fd);
+  {
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    for (auto& kv : clients_) {
+      close(kv.second.fd);
+    }
+    clients_.clear();
+    id_to_fd_.clear();
   }
-  clients_.clear();
-  id_to_fd_.clear();
   close(epfd);
   close(listen_fd_);
   listen_fd_ = -1;

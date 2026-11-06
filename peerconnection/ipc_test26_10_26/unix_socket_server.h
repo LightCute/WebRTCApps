@@ -71,6 +71,10 @@ class UnixSocketServer {
   std::mutex mutex_;
   std::condition_variable shutdown_cv_;
   std::atomic<bool> running_{false};
+
+  // 保护 clients_ / id_to_fd_ 与发送路径：io 线程修改表、SendToClient/Broadcast
+  // 从其它线程读取并 write，需同一把锁串行化。
+  std::mutex send_mutex_;
 };
 
 #endif  // APPS_PEERCONNECTION_IPC_TEST_UNIX_SOCKET_SERVER_H_
