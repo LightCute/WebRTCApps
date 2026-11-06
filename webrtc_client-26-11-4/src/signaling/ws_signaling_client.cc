@@ -232,7 +232,21 @@ void WebSocketSignalingClient::OnClose(websocketpp::connection_hdl hdl) {
 }
 
 void WebSocketSignalingClient::OnFail(websocketpp::connection_hdl hdl) {
-  OnClose(hdl);
+  // 区分「已建立连接异常断开」与「连接尝试失败（从未建立）」：
+  // hdl_ 只在 OnOpen 时赋值，连接从未建立时 hdl != hdl_。
+  bool was_established = false;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    was_established = !hdl.owner_before(hdl_) && !hdl_.owner_before(hdl);
+  }
+  if (was_established) {
+    OnClose(hdl);  // 已建立连接异常断开 → OnSignalDisconnected
+  } else {
+    // 连接尝试失败（服务器不可达/超时/拒连，websocketpp 自带 5s 超时）→ 通知连接错误
+    Fire([](SignalingClientObserver* o) {
+      o->OnSignalError("connect", "unable to connect to signal server");
+    });
+  }
 }
 
 void WebSocketSignalingClient::OnMessage(websocketpp::connection_hdl,

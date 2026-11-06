@@ -16,6 +16,7 @@ SERVER = os.path.normpath(
     os.path.join(HERE, "../../signal_server_26_11_3/build/signaling_server"))
 ENGINE = os.path.normpath(os.path.join(HERE, "../../../out/webrtc_client_x64/webrtc_engine_main"))
 PORT = 9890
+PORT_DEAD = 9889  # 无服务监听，用于测试连接失败
 
 
 class Client:
@@ -83,14 +84,29 @@ def connect_retry(sock_path, timeout=10.0):
     raise RuntimeError("engine not ready: " + sock_path)
 
 
+def wait_for_port(port, timeout=10.0):
+    """等待指定端口开始监听（信号服务器启动完成），避免固定 sleep 在负载下不够。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            s.close()
+            return
+        s.close()
+        time.sleep(0.2)
+    raise RuntimeError("port not listening: " + str(port))
+
+
 def main():
-    for p in ("/tmp/wt_fail_a.sock", "/tmp/wt_fail_b.sock"):
+    for p in ("/tmp/wt_fail_a.sock", "/tmp/wt_fail_b.sock", "/tmp/wt_fail_c.sock"):
         if os.path.exists(p):
             os.unlink(p)
 
     srv = subprocess.Popen(
         [SERVER, "--port", str(PORT), "--ping_interval", "2"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_for_port(PORT)
     eng_a = subprocess.Popen(
         [ENGINE, "--socket_path", "/tmp/wt_fail_a.sock", "--server", "127.0.0.1",
          "--port", str(PORT), "--log_dir", "/tmp/wt_logs"],
@@ -99,12 +115,22 @@ def main():
         [ENGINE, "--socket_path", "/tmp/wt_fail_b.sock", "--server", "127.0.0.1",
          "--port", str(PORT), "--log_dir", "/tmp/wt_logs"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    eng_c = subprocess.Popen(
+        [ENGINE, "--socket_path", "/tmp/wt_fail_c.sock", "--server", "127.0.0.1",
+         "--port", str(PORT_DEAD), "--log_dir", "/tmp/wt_logs"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.5)
 
     a = connect_retry("/tmp/wt_fail_a.sock")
     b = connect_retry("/tmp/wt_fail_b.sock")
+    c = connect_retry("/tmp/wt_fail_c.sock")
 
     try:
+        # ===== 连接不可达：register 应收到 connect 错误 =====
+        c.send("register c")
+        if c.wait_for_event("signal_client.error", "code", "connect", timeout=8.0) is None:
+            fail("连接不可达未报 connect 错误")
+
         # ===== 未注册：受理校验应即时拒绝 =====
         a.send("data_channel_msg hello")
         if a.wait_for_event("ipc.error", "code", "data_channel_not_open") is None:
@@ -152,12 +178,13 @@ def main():
         a.wait_for_event("signal_client.call_ended")
         b.wait_for_event("signal_client.call_ended")
 
-        print("ipc failure ok: data_channel_not_open/signal_send_failed/"
+        print("ipc failure ok: connect/data_channel_not_open/signal_send_failed/"
               "not_signed_in/already_in_call")
     finally:
         a.close()
         b.close()
-        for p in (eng_a, eng_b, srv):
+        c.close()
+        for p in (eng_a, eng_b, eng_c, srv):
             if p.poll() is None:
                 p.terminate()
         time.sleep(0.5)
