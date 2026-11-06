@@ -1,7 +1,7 @@
 mpp
 
 build
-
+out
 out/
 client_arm64_linux/out
 client_x64_linux/out

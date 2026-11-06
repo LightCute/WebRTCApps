@@ -68,17 +68,17 @@ webrtc/
 
 ---
 
-## 5. 获取本仓库代码（`apps/`）
+## 5. 获取本仓库代码
 
-把本仓库克隆到 WebRTC 源码树的 `src/apps/` 位置（GN 的 `//` 根即 `src/`，本仓库 BUILD 目标路径为 `//apps/...`）：
+把本仓库（远程仓库名 `WebRTCApps`）克隆到 WebRTC 源码树的 `src/` 下。**目录名随意**（`apps` 或 `WebRTCApps` 均可），`build_x64.sh` 会从实际路径动态推导 GN 标签，不再写死 `apps`：
 
 ```bash
 cd src
-git clone <你的 apps 仓库地址> apps
-# 例如：git clone git@your-host:your-org/apps.git apps
+git clone <你的 apps 仓库地址> apps          # 目录名任意：apps 或 WebRTCApps 都行
+# 例如：git clone git@your-host:your-org/WebRTCApps.git
 ```
 
-> 只要保证 `src/apps/webrtc_client-26-11-4/` 存在即可。
+> 只要保证 `src/<任意目录>/webrtc_client-26-11-4/` 存在即可；`signal_server_26_11_3` 与它同级，共享 `third_party/`。
 
 ---
 
