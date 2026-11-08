@@ -69,8 +69,9 @@
 | code | 含义 | 触发命令 |
 |---|---|---|
 | `usage` | 参数缺失/非法 | `register`（name 空）、`call`（peer<=0）、`signal_msg`（peer<=0） |
-| `not_signed_in` | 未登录信令服务器 | `call` / `get_roster` / `leave` |
+| `not_signed_in` | 未登录信令服务器 | `call` / `get_roster` / `leave` / `signal_disconnect` |
 | `already_in_call` | 已在通话中 | `call` |
+| `not_in_call` | 不在通话中 | `leave` |
 | `data_channel_not_open` | 数据通道未打开（未通话） | `data_channel_msg` |
 | `signal_send_failed` | 信令消息发送失败（未连服务器） | `signal_msg` |
 
@@ -102,12 +103,12 @@
 | `call <peer_id>` | `usage` / `not_signed_in` / `already_in_call` | `signal_client.local_sdp` → `peer_connection.state`=connected → `data_channel.state`=open | `signal_client.error`（offline / busy）、`engine.error`（§3.2）、`peer_connection.state`=failed |
 | `data_channel_msg <text>` | `data_channel_not_open` | 无异步事件（bool true = 已入 SCTP 发送队列） | 无（送达确认需应用层 ack，未实现） |
 | `signal_msg <peer_id> <text>` | `usage` / `signal_send_failed` | 无异步事件（已发服务器；对端收到 `signal_client.message`） | `signal_client.error`（offline） |
-| `leave` | `not_signed_in` | `signal_client.call_ended`（双方） | —— |
-| `get_roster` | `not_signed_in` | `signal_client.roster` | —— |
-| `get_stats` | —— | `stats` | —— |
-| `peer_connection_status` | —— | `peer_connection_status`（同步） | —— |
-| `signal_disconnect` | —— | `signal_client.disconnected` | —— |
-| `quit` | —— | 进程退出 | —— |
+| `leave` | `not_signed_in` / `not_in_call` | `signal_client.call_ended`（双方） | 无（已受理即触发 call_ended） |
+| `get_roster` | `not_signed_in` | `signal_client.roster` | 无（已受理即回 roster；连接中断走 disconnected） |
+| `get_stats` | 无（无前置） | `stats` | 无（总返回；PC 为空回全空快照） |
+| `peer_connection_status` | 无（纯同步查询） | `peer_connection_status`（同步） | 无（总成功） |
+| `signal_disconnect` | `not_signed_in` | `signal_client.disconnected` | 无（已受理即触发 disconnected） |
+| `quit` | 无（总执行） | 无事件（unix socket 关闭即退出） | 无（总执行） |
 
 ## 5. 说明
 

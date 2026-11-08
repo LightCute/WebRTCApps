@@ -152,6 +152,10 @@ def main():
         if a.wait_for_event("ipc.error", "code", "not_signed_in") is None:
             fail("未注册 call 未报 not_signed_in")
 
+        a.send("signal_disconnect")
+        if a.wait_for_event("ipc.error", "code", "not_signed_in") is None:
+            fail("未注册 signal_disconnect 未报 not_signed_in")
+
         # ===== 注册 + 通话，通话中再 call =====
         a.send("register a")
         ev = a.wait_for_event("signal_client.signed_in")
@@ -162,6 +166,11 @@ def main():
         if ev is None or ev.get("id", 0) <= 0:
             fail("b 注册失败")
         b_id = ev["id"]
+
+        # ===== 已登录但不在通话：leave 应拒绝 not_in_call =====
+        a.send("leave")
+        if a.wait_for_event("ipc.error", "code", "not_in_call") is None:
+            fail("不在通话 leave 未报 not_in_call")
 
         a.send(f"call {b_id}")
         if a.wait_for_event("peer_connection.state", "state", "connected") is None:
@@ -179,7 +188,7 @@ def main():
         b.wait_for_event("signal_client.call_ended")
 
         print("ipc failure ok: connect/data_channel_not_open/signal_send_failed/"
-              "not_signed_in/already_in_call")
+              "not_signed_in/not_in_call/already_in_call")
     finally:
         a.close()
         b.close()

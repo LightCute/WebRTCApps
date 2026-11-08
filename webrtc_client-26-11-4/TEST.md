@@ -160,11 +160,10 @@ out/webrtc_client_x64/webrtc_engine_validation_test
 
 | 覆盖内容 | 结果 |
 |---|---|
-| 受理校验谓词：未注册时 `CanStartCall/CanGetRoster/CanLeave` 返回 `not_signed_in` | 通过 |
 | bool 语义：未建 DC `SendDataChannelMessage` 返回 false；未连服务器 `SendSignalMessage` 返回 false | 通过 |
 | engine.error：无 factory 建 PC → `peer_connection_failed`；无 PC 建 DC → `data_channel_failed`；非法远端 offer → `set_remote_desc_failed` | 通过 |
 
-输出：`validation ok: predicates + engine.error`。
+输出：`validation ok: bool semantics + engine.error`。
 
 ## 11. 命令失败返回 IPC 测试 `ipc_failure_test.py`
 
@@ -172,16 +171,18 @@ out/webrtc_client_x64/webrtc_engine_validation_test
 python3 test/ipc_failure_test.py
 ```
 
-起真信令服务器(9890) + 两个 `webrtc_engine_main`，未注册/未通话状态下发命令，断言 `ipc.error` 错误码：
+起真信令服务器(9890) + 三个 `webrtc_engine_main`（第三个指向无服务监听的 9889），断言各命令的失败返回：
 
 | 覆盖内容 | 结果 |
 |---|---|
+| 连接不可达 `register` → `signal_client.error` code=`connect` | 通过 |
 | 未通话 `data_channel_msg` → `data_channel_not_open` | 通过 |
 | 未注册 `signal_msg` → `signal_send_failed` | 通过 |
-| 未注册 `get_roster`/`leave`/`call` → `not_signed_in` | 通过 |
+| 未注册 `get_roster`/`leave`/`call`/`signal_disconnect` → `not_signed_in` | 通过 |
+| 已登录但不在通话 `leave` → `not_in_call` | 通过 |
 | 通话中再 `call` → `already_in_call` | 通过 |
 
-输出：`ipc failure ok: data_channel_not_open/signal_send_failed/not_signed_in/already_in_call`。
+输出：`ipc failure ok: connect/data_channel_not_open/signal_send_failed/not_signed_in/not_in_call/already_in_call`。
 
 ## 说明
 

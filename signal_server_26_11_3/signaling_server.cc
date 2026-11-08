@@ -21,6 +21,8 @@ SignalingServer::SignalingServer(int port, int ping_interval_s,
   endpoint_.clear_access_channels(websocketpp::log::alevel::all);
   endpoint_.clear_error_channels(websocketpp::log::elevel::all);
   endpoint_.init_asio();
+  // 允许端口在 TIME_WAIT 期间立即重用，否则服务器重启后 60s 内 bind 会报 Address already in use。
+  endpoint_.set_reuse_addr(true);
   endpoint_.set_open_handler(bind(&SignalingServer::OnOpen, this, ::_1));
   endpoint_.set_close_handler(bind(&SignalingServer::OnClose, this, ::_1));
   endpoint_.set_fail_handler(bind(&SignalingServer::OnFail, this, ::_1));

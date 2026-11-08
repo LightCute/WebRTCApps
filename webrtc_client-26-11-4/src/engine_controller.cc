@@ -339,6 +339,10 @@ void EngineController::HandleCommand(const std::string& line) {
     }
     engine_->ConnectToServer(server, port, name);
   } else if (cmd == "signal_disconnect") {
+    if (!engine_->is_signed_in()) {
+      SendError("not_signed_in", "not signed in");
+      return;
+    }
     engine_->DisconnectSignal();
   } else if (cmd == "call") {
     int peer = 0;
@@ -383,6 +387,10 @@ void EngineController::HandleCommand(const std::string& line) {
   } else if (cmd == "leave") {
     if (!engine_->is_signed_in()) {
       SendError("not_signed_in", "not signed in");
+      return;
+    }
+    if (engine_->peer_id() <= 0 && !engine_->is_connected()) {
+      SendError("not_in_call", "not in a call");
       return;
     }
     engine_->Leave();
