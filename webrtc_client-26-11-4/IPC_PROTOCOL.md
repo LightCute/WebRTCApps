@@ -52,7 +52,7 @@
 
 | 事件 | 字段 | 含义 |
 |---|---|---|
-| `stats` | `data_channel`,`transport`,`candidate_pair`,`inbound_rtp[]`,`outbound_rtp[]`,`remote_inbound_rtp[]`,`data_channels_opened`,`data_channels_closed` | `get_stats` 触发，采集 DataChannel 计数 + GetStats 传输/候选对/RTP |
+| `stats` | `data_channel`,`transport`,`candidate_pair`,`local_candidates[]`,`remote_candidates[]`,`inbound_rtp[]`,`outbound_rtp[]`,`remote_inbound_rtp[]`,`data_channels_opened`,`data_channels_closed` | `get_stats` 触发，采集 DataChannel 计数 + GetStats 传输/候选对/全部候选（`local_candidates[]`/`remote_candidates[]` 各含 `ip/port/protocol/candidate_type/selected`）/RTP |
 
 ### 2.5 错误
 

@@ -45,6 +45,7 @@ struct EngineStats {
     int port = 0;               // 该候选的端口号
     std::string protocol;       // 传输协议：udp / tcp
     std::string candidate_type; // 候选类型：host(直连本机地址) / srflx(STUN 反射地址) / relay(TURN 中继地址) / prflx(对端反射地址)
+    bool selected = false;      // 是否被选中作为实际传输路径（对应 candidate_pair 的 local/remote）
   };
 
   // ===== 候选对信息（来自 GetStats 的 RTCIceCandidatePairStats：实际承载数据的那条网络路径）=====
@@ -110,6 +111,8 @@ struct EngineStats {
   DataChannelInfo data_channel;        // 数据通道快照
   TransportInfo transport;             // 传输层快照
   CandidatePairInfo candidate_pair;    // 活跃候选对（RTT + 两端地址）
+  std::vector<CandidateInfo> local_candidates;   // 全部本端候选（selected 标记被选中者）
+  std::vector<CandidateInfo> remote_candidates;  // 全部对端候选（selected 标记被选中者）
   std::vector<InboundRtpInfo> inbound_rtp;          // 接收的媒体流（0~N 路，音频/视频各一路）
   std::vector<OutboundRtpInfo> outbound_rtp;        // 发送的媒体流（0~N 路）
   std::vector<RemoteInboundRtpInfo> remote_inbound_rtp;  // 对端反馈（每路发送流对应一条）

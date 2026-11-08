@@ -184,6 +184,25 @@ python3 test/ipc_failure_test.py
 
 输出：`ipc failure ok: connect/data_channel_not_open/signal_send_failed/not_signed_in/not_in_call/already_in_call`。
 
+## 12. STUN 候选收集测试 `webrtc_engine_stun_test`
+
+```bash
+bash test/stun_integration_test.sh   # 本机 answerer+offerer 双角色
+```
+
+测试拆成两个角色（`--role=answerer|offerer`），各连同一信号服务器，配谷歌 STUN + `srflx` 模式（屏蔽 host），验证 srflx 候选收集：
+
+| 覆盖内容 | 结果 |
+|---|---|
+| `--role=answerer`：连信号服务器 → 等来电 → 自动应答 → 收集候选 | 通过 |
+| `--role=offerer`：连信号服务器 → 从 roster 找 answerer → call → 收集候选 | 通过 |
+| 双方 `get_stats` 的 `local_candidates` 含 `srflx`（谷歌 STUN 可达） | 通过 |
+| srflx 端到端连通 | 环境相关（同 LAN 同 NAT 需 hairpin；需不同网络才能真连通） |
+
+输出：`[role] ok: srflx candidate gathered`。
+
+> 跨机跑：把 `webrtc_engine_stun_test` 拷到远端（可用 `apps/mcp_ssh` 的 MCP 工具），远端跑 `--role=answerer --server=<本机LAN IP>`，本机跑 `--role=offerer`。
+
 ## 说明
 
 - 集成测试均依赖真 `signal_server_26_11_3/build/signaling_server`，各测试使用独立端口（9799/9899/9898/9897/9896/9895/9893/9892/9891/9890），避免互扰。

@@ -1,6 +1,8 @@
+#include "ice_config.h"
 #include "webrtc_engine.h"
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -44,6 +46,37 @@ struct RecordingObserver : public EngineObserver {
 }  // namespace
 
 int main() {
+  // === ICE 配置解析 ===
+  {
+    if (ParseIceTransports("host") != IceTransportsMode::kHost)
+      return Fail("parse host");
+    if (ParseIceTransports("SRFLX") != IceTransportsMode::kSrflx)
+      return Fail("parse srflx (case-insensitive)");
+    if (ParseIceTransports("relay") != IceTransportsMode::kRelay)
+      return Fail("parse relay");
+    if (ParseIceTransports("auto") != IceTransportsMode::kAuto)
+      return Fail("parse auto");
+    if (ParseIceTransports("bogus") != IceTransportsMode::kAuto)
+      return Fail("parse bogus -> auto");
+
+    const char* path = "/tmp/wc_env_test.env";
+    {
+      std::ofstream out(path);
+      out << "# comment\n";
+      out << "WEBRTC_STUN=stun:stun.l.google.com:19302\n";
+      out << "ICE_TRANSPORTS=srflx\n";
+      out << "EMPTY=\n";
+      out << "\n";
+    }
+    auto kv = LoadEnvFile(path);
+    if (kv["WEBRTC_STUN"] != "stun:stun.l.google.com:19302")
+      return Fail("env stun");
+    if (kv["ICE_TRANSPORTS"] != "srflx") return Fail("env transports");
+    if (kv.count("EMPTY") == 0 || !kv["EMPTY"].empty())
+      return Fail("env empty value");
+    if (kv.count("# comment") != 0) return Fail("env comment parsed");
+  }
+
   // === 引擎层 bool 语义 ===
   {
     webrtc_engine engine;

@@ -141,6 +141,14 @@ rtc_executable("webrtc_engine_validation_test") {
   libs = [ "pthread" ]
 }
 
+rtc_executable("webrtc_engine_stun_test") {
+  testonly = true
+  sources = [ "test/stun_integration_main.cc" ]
+  configs += [ ":signaling_deps_config" ]
+  deps = [ ":webrtc_engine" ]
+  libs = [ "pthread" ]
+}
+
 group("webrtc_client") {
   testonly = true
   deps = [
@@ -150,6 +158,7 @@ group("webrtc_client") {
     ":webrtc_engine_teardown_test",
     ":webrtc_engine_multicall_test",
     ":webrtc_engine_validation_test",
+    ":webrtc_engine_stun_test",
     ":webrtc_engine_main",
   ]
 }

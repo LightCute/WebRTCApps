@@ -16,6 +16,7 @@
 #include "api/stats/rtc_stats_report.h"
 #include "api/set_remote_description_observer_interface.h"
 #include "engine_observer.h"
+#include "ice_config.h"
 #include "rtc_base/thread.h"
 #include "signaling/ws_signaling_client.h"
 
@@ -46,6 +47,8 @@ class webrtc_engine : public SignalingClientObserver,
   // 软断开信令服务器（保留 io 线程，可再次 ConnectToServer 重连）。
   void DisconnectSignal();
   void RegisterObserver(EngineObserver* observer);
+  // 配置 ICE（STUN/TURN + 传输模式），须在首次 call 前调用。
+  void ConfigureIce(const IceConfig& cfg);
 
   bool is_signed_in() const { return signed_in_; }
   int my_id() const { return my_id_; }

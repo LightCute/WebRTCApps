@@ -106,6 +106,51 @@ void webrtc_engine::RegisterObserver(EngineObserver* observer) {
   engine_observer_ = observer;
 }
 
+void webrtc_engine::ConfigureIce(const IceConfig& cfg) {
+  rtc_configuration_.servers.clear();
+
+  auto add_stun = [&]() {
+    if (cfg.stun_uri.empty()) return;
+    PeerConnectionInterface::IceServer s;
+    s.uri = cfg.stun_uri;
+    rtc_configuration_.servers.push_back(s);
+  };
+  auto add_turn = [&]() {
+    if (cfg.turn_uri.empty()) return;
+    PeerConnectionInterface::IceServer t;
+    t.uri = cfg.turn_uri;
+    t.username = cfg.turn_user;
+    t.password = cfg.turn_pass;
+    rtc_configuration_.servers.push_back(t);
+  };
+
+  switch (cfg.mode) {
+    case IceTransportsMode::kHost:
+      // 不加任何 server → 只收集 host 候选。
+      rtc_configuration_.type =
+          PeerConnectionInterface::IceTransportsType::kAll;
+      break;
+    case IceTransportsMode::kSrflx:
+      // 屏蔽 host，只留 STUN 反射（不配 TURN 就只有 srflx）。
+      rtc_configuration_.type =
+          PeerConnectionInterface::IceTransportsType::kNoHost;
+      add_stun();
+      break;
+    case IceTransportsMode::kRelay:
+      rtc_configuration_.type =
+          PeerConnectionInterface::IceTransportsType::kRelay;
+      add_turn();
+      break;
+    case IceTransportsMode::kAuto:
+    default:
+      rtc_configuration_.type =
+          PeerConnectionInterface::IceTransportsType::kAll;
+      add_stun();
+      add_turn();
+      break;
+  }
+}
+
 // ============================================================================
 //  公共 API（BlockingCall marshal 到 signaling 线程）
 // ============================================================================
@@ -648,6 +693,15 @@ void webrtc_engine::StatsCollector::OnStatsDelivered(
             *t->selected_candidate_pair_id;
     }
 
+    // 填充候选地址（local/remote 候选共用的字段）。
+    auto fill_candidate = [](const auto* c, EngineStats::CandidateInfo* out) {
+      if (c->ip) out->ip = *c->ip;
+      else if (c->address) out->ip = *c->address;
+      if (c->port) out->port = *c->port;
+      if (c->protocol) out->protocol = *c->protocol;
+      if (c->candidate_type) out->candidate_type = *c->candidate_type;
+    };
+
     // 活跃候选对：优先「被提名且可写」，退而取第一个可写。
     const webrtc::RTCIceCandidatePairStats* active = nullptr;
     for (const auto* p :
@@ -684,42 +738,27 @@ void webrtc_engine::StatsCollector::OnStatsDelivered(
       if (active->available_incoming_bitrate)
         stats_.candidate_pair.available_incoming_bitrate =
             *active->available_incoming_bitrate;
+    }
 
-      // 本端 / 对端候选地址（按 candidate-pair 里的 id 去查）。
-      if (active->local_candidate_id) {
-        for (const auto* c :
-             report->GetStatsOfType<webrtc::RTCLocalIceCandidateStats>()) {
-          if (c->id() == *active->local_candidate_id) {
-            if (c->ip) stats_.candidate_pair.local_candidate.ip = *c->ip;
-            else if (c->address)
-              stats_.candidate_pair.local_candidate.ip = *c->address;
-            if (c->port) stats_.candidate_pair.local_candidate.port = *c->port;
-            if (c->protocol)
-              stats_.candidate_pair.local_candidate.protocol = *c->protocol;
-            if (c->candidate_type)
-              stats_.candidate_pair.local_candidate.candidate_type =
-                  *c->candidate_type;
-            break;
-          }
-        }
-      }
-      if (active->remote_candidate_id) {
-        for (const auto* c :
-             report->GetStatsOfType<webrtc::RTCRemoteIceCandidateStats>()) {
-          if (c->id() == *active->remote_candidate_id) {
-            if (c->ip) stats_.candidate_pair.remote_candidate.ip = *c->ip;
-            else if (c->address)
-              stats_.candidate_pair.remote_candidate.ip = *c->address;
-            if (c->port) stats_.candidate_pair.remote_candidate.port = *c->port;
-            if (c->protocol)
-              stats_.candidate_pair.remote_candidate.protocol = *c->protocol;
-            if (c->candidate_type)
-              stats_.candidate_pair.remote_candidate.candidate_type =
-                  *c->candidate_type;
-            break;
-          }
-        }
-      }
+    // 全部本端候选（selected 标记被选中的那一个，并回填 candidate_pair）。
+    for (const auto* c :
+         report->GetStatsOfType<webrtc::RTCLocalIceCandidateStats>()) {
+      EngineStats::CandidateInfo info;
+      fill_candidate(c, &info);
+      info.selected = active && active->local_candidate_id &&
+                      c->id() == *active->local_candidate_id;
+      if (info.selected) stats_.candidate_pair.local_candidate = info;
+      stats_.local_candidates.push_back(std::move(info));
+    }
+    // 全部对端候选（selected 标记被选中的那一个）。
+    for (const auto* c :
+         report->GetStatsOfType<webrtc::RTCRemoteIceCandidateStats>()) {
+      EngineStats::CandidateInfo info;
+      fill_candidate(c, &info);
+      info.selected = active && active->remote_candidate_id &&
+                      c->id() == *active->remote_candidate_id;
+      if (info.selected) stats_.candidate_pair.remote_candidate = info;
+      stats_.remote_candidates.push_back(std::move(info));
     }
 
     // PeerConnection 级计数。

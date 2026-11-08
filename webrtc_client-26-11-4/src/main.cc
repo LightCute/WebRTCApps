@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "engine_controller.h"
+#include "ice_config.h"
 #include "rtc_base/logging.h"
 #include "rtc_log_sink.h"
 #include "ipc/unix_socket_server.h"
@@ -47,12 +48,40 @@ std::string MakeLogFilePath(const std::string& log_dir) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // 配置优先级：命令行 flag > .env 文件 > 默认值。
+  std::string env_file = ParseStrFlag(argc, argv, "env_file", ".env");
+  auto env = LoadEnvFile(env_file);
+  auto Get = [&](const char* key, const std::string& flag_val,
+                 const std::string& def) -> std::string {
+    if (!flag_val.empty()) return flag_val;
+    auto it = env.find(key);
+    return (it != env.end() && !it->second.empty()) ? it->second : def;
+  };
+
   std::string socket_path =
       ParseStrFlag(argc, argv, "socket_path", "/tmp/webrtc_engine.sock");
-  std::string signal_server = ParseStrFlag(argc, argv, "server", "127.0.0.1");
-  int signal_port = ParseIntFlag(argc, argv, "port", 8888);
+  std::string signal_server =
+      Get("WEBRTC_SERVER", ParseStrFlag(argc, argv, "server", ""), "127.0.0.1");
+  int signal_port = ParseIntFlag(argc, argv, "port", 0);
+  if (signal_port == 0) {
+    auto it = env.find("WEBRTC_SERVER_PORT");
+    signal_port = (it != env.end()) ? std::atoi(it->second.c_str()) : 8888;
+  }
   std::string log_dir =
       ParseStrFlag(argc, argv, "log_dir", "/tmp/webrtc_engine");
+
+  IceConfig ice_cfg;
+  ice_cfg.stun_uri =
+      Get("WEBRTC_STUN", ParseStrFlag(argc, argv, "stun", ""), "");
+  ice_cfg.turn_uri =
+      Get("WEBRTC_TURN_SERVER", ParseStrFlag(argc, argv, "turn", ""), "");
+  ice_cfg.turn_user =
+      Get("WEBRTC_TURN_USER", ParseStrFlag(argc, argv, "turn_user", ""), "");
+  ice_cfg.turn_pass =
+      Get("WEBRTC_TURN_PASSWORD", ParseStrFlag(argc, argv, "turn_pass", ""), "");
+  ice_cfg.mode = ParseIceTransports(Get(
+      "ICE_TRANSPORTS", ParseStrFlag(argc, argv, "ice_transports", ""),
+      "auto"));
 
   // 日志：所有 RTC_LOG 统一走 RtcLogSink（时间戳 + file:line + stderr + 文件）。
   RtcLogSink log_sink(MakeLogFilePath(log_dir));
@@ -64,6 +93,7 @@ int main(int argc, char* argv[]) {
     RTC_LOG(LS_ERROR) << "engine Start failed";
     return 1;
   }
+  engine.ConfigureIce(ice_cfg);
 
   UnixSocketServer server(socket_path);
   EngineController controller(&engine, &server, signal_server, signal_port);

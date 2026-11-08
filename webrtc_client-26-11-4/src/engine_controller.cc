@@ -257,6 +257,30 @@ void EngineController::OnStats(const EngineStats& stats) {
 
   v["candidate_pair"] = cp;
 
+  Json::Value lcs(Json::arrayValue);
+  for (const auto& c : stats.local_candidates) {
+    Json::Value e;
+    e["ip"] = c.ip;
+    e["port"] = c.port;
+    e["protocol"] = c.protocol;
+    e["candidate_type"] = c.candidate_type;
+    e["selected"] = c.selected;
+    lcs.append(e);
+  }
+  v["local_candidates"] = lcs;
+
+  Json::Value rcs(Json::arrayValue);
+  for (const auto& c : stats.remote_candidates) {
+    Json::Value e;
+    e["ip"] = c.ip;
+    e["port"] = c.port;
+    e["protocol"] = c.protocol;
+    e["candidate_type"] = c.candidate_type;
+    e["selected"] = c.selected;
+    rcs.append(e);
+  }
+  v["remote_candidates"] = rcs;
+
   v["data_channels_opened"] = stats.data_channels_opened;
   v["data_channels_closed"] = stats.data_channels_closed;
 
