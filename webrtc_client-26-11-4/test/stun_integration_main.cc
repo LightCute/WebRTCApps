@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -24,8 +25,9 @@ bool WaitFor(const std::function<bool()>& cond, int timeout_ms) {
 // 关心 OnStats（候选类型）和 OnSignalRoster（找对端 id），其余事件空实现。
 struct StatsObserver : public EngineObserver {
   EngineStats last_stats;
-  bool got_stats = false;
-  bool got_call = false;
+  // 主线程轮询、signaling 线程写入：用 atomic 消除数据竞争（否则可能读到脏值超时）。
+  std::atomic<bool> got_stats{false};
+  std::atomic<bool> got_call{false};
   std::vector<PeerInfo> peers;
   void OnStats(const EngineStats& s) override {
     last_stats = s;
@@ -57,6 +59,8 @@ int main(int argc, char* argv[]) {
   std::string server = "127.0.0.1";
   std::string transports = "srflx";
   int port = 8888;
+  int min_port = 0;
+  int max_port = 0;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if (a.rfind("--role=", 0) == 0) {
@@ -69,6 +73,10 @@ int main(int argc, char* argv[]) {
       port = std::atoi(a.c_str() + 7);
     } else if (a == "--port" && i + 1 < argc) {
       port = std::atoi(argv[++i]);
+    } else if (a.rfind("--min_port=", 0) == 0) {
+      min_port = std::atoi(a.c_str() + 11);
+    } else if (a.rfind("--max_port=", 0) == 0) {
+      max_port = std::atoi(a.c_str() + 11);
     }
   }
 
@@ -80,6 +88,8 @@ int main(int argc, char* argv[]) {
   IceConfig cfg;
   cfg.stun_uri = "stun:stun.l.google.com:19302";
   cfg.mode = ParseIceTransports(transports);
+  cfg.min_port = min_port;
+  cfg.max_port = max_port;
   engine.ConfigureIce(cfg);
 
   if (!engine.Start()) {
@@ -110,7 +120,7 @@ int main(int argc, char* argv[]) {
     engine.StartCall(answerer_id);
   } else {
     // answerer 被动等来电，引擎在 OnSignalCall 里自动应答。
-    if (!WaitFor([&] { return obs.got_call; }, 30000)) {
+    if (!WaitFor([&] { return obs.got_call.load(); }, 30000)) {
       std::cerr << "FAIL: no incoming call\n";
       return 1;
     }
@@ -123,7 +133,7 @@ int main(int argc, char* argv[]) {
   bool connected = engine.is_connected();
 
   engine.RequestStats();
-  if (!WaitFor([&] { return obs.got_stats; }, 5000)) {
+  if (!WaitFor([&] { return obs.got_stats.load(); }, 5000)) {
     std::cerr << "FAIL: no stats\n";
     return 1;
   }
@@ -142,11 +152,9 @@ int main(int argc, char* argv[]) {
     std::cout << " " << c.candidate_type << (c.selected ? "*" : "");
   std::cout << "\n";
 
-  // answerer 报完结果后多等几秒再断开，让 offerer 也完成候选收集（否则 offerer 会
-  // 因 peer_gone 被提前关掉 PC，拿不到候选）。
-  if (role == "answerer") {
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-  }
+  // 双方都多等 3 秒再断开：先完成的一方断开会触发对端 peer_gone、关掉对端 PC，
+  // 给对端留出统计/报告的时间窗口（反向角色下也一样安全）。
+  std::this_thread::sleep_for(std::chrono::seconds(3));
 
   engine.DisconnectFromServer();
   engine.Stop();

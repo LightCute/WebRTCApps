@@ -203,6 +203,31 @@ bash test/stun_integration_test.sh   # 本机 answerer+offerer 双角色
 
 > 跨机跑：把 `webrtc_engine_stun_test` 拷到远端（可用 `apps/mcp_ssh` 的 MCP 工具），远端跑 `--role=answerer --server=<本机LAN IP>`，本机跑 `--role=offerer`。
 
+## 13. 跨 NAT 断开/重连抗压测试 `reconnect_integration_test.py`
+
+```bash
+python3 test/reconnect_integration_test.py                  # 全量：2 方向 × 8 项 × 5 遍
+python3 test/reconnect_integration_test.py --direction A --items offer_leave --cycles 1  # 冒烟
+```
+
+驱动真实 `webrtc_engine_main`（本地 + 云端各一个，走 unix socket IPC），反复「建立通话 → 断开 → 重连」。覆盖 **8 种断开方式 × 2 个角色方向 × 每项 5 遍**：
+
+| 断开方式 | 重连机制 |
+|---|---|
+| `leave` | 同进程再 call |
+| `signal_disconnect`（软断信令） | 同进程重连信令再 call |
+| `quit`（进程优雅退出） | 重启进程 |
+| `SIGKILL`（强杀） | 重启进程 |
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 16 项（2 方向 × 8 项）全部通过 | 通过 |
+| 每项 1 初始建立 + 5 次断连 = 6 次 connected | 通过 |
+| 断开/失败后 busy 状态正确清理、可再连 | 通过 |
+
+> 前置：云端信令服务器 8888 + 云端 daemon `.env`（`WEBRTC_MIN_PORT/MAX_PORT=50000/50019`）+ 阿里云安全组放行 8888(TCP)、50000–50019(UDP)。
+> 固定端口是为让 srflx 跨 NAT 打洞（云端端口保留型 NAT 把本机固定端口原样映射到公网）。手动复现见 [MANUAL_TEST.md](MANUAL_TEST.md)。
+
 ## 说明
 
 - 集成测试均依赖真 `signal_server_26_11_3/build/signaling_server`，各测试使用独立端口（9799/9899/9898/9897/9896/9895/9893/9892/9891/9890），避免互扰。
