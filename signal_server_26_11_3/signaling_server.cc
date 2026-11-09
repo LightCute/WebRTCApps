@@ -88,7 +88,7 @@ void SignalingServer::OnMessage(websocketpp::connection_hdl hdl,
     int id = registry_.Register(name);
     if (id < 0) {
       logger_.Warn("register rejected, name taken: " + name);
-      SendToHdl(hdl, BuildError("name_taken", "名字已被占用"));
+      SendToHdl(hdl, BuildError("name_taken", "name already taken"));
       return;
     }
     id_to_hdl_[id] = hdl;
@@ -116,11 +116,11 @@ void SignalingServer::OnMessage(websocketpp::connection_hdl hdl,
     } else if (r == ClientRegistry::CallResult::kTargetBusy) {
       logger_.Info("call rejected (busy): " + std::to_string(self) + " -> " +
                    std::to_string(to));
-      SendToHdl(hdl, BuildError("busy", "对方忙线"));
+      SendToHdl(hdl, BuildError("peer_busy", "peer is busy"));
     } else if (r == ClientRegistry::CallResult::kTargetOffline) {
       logger_.Info("call rejected (offline): " + std::to_string(self) +
                    " -> " + std::to_string(to));
-      SendToHdl(hdl, BuildError("offline", "对方不在线"));
+      SendToHdl(hdl, BuildError("peer_offline", "peer is offline"));
     }
     // kCallerBusy -> ignore
   } else if (type == "answer" || type == "candidate") {
@@ -136,7 +136,7 @@ void SignalingServer::OnMessage(websocketpp::connection_hdl hdl,
                    std::to_string(to));
       SendTo(to, BuildMessage(self, text));
     } else {
-      SendToHdl(hdl, BuildError("offline", "对方不在线"));
+      SendToHdl(hdl, BuildError("peer_offline", "peer is offline"));
     }
   } else if (type == "leave") {
     int peer = registry_.GetPeer(self);

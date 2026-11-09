@@ -14,3 +14,4 @@ peerconnection/websocketpp
 docs/superpowers/
 mcp_ssh/
 .env
+__pycache__

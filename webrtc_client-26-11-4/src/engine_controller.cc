@@ -383,6 +383,24 @@ void EngineController::HandleCommand(const std::string& line) {
       SendError("already_in_call", "already in a call");
       return;
     }
+    // Layer 1：roster 预校验（peers_ 由服务器每次广播刷新），离线和忙线分开。
+    bool found = false;
+    bool idle = false;
+    for (const auto& p : peers_) {
+      if (p.id == peer) {
+        found = true;
+        idle = (p.state == "idle");
+        break;
+      }
+    }
+    if (!found) {
+      SendError("peer_offline", "peer is offline");
+      return;
+    }
+    if (!idle) {
+      SendError("peer_busy", "peer is busy");
+      return;
+    }
     engine_->StartCall(peer);
   } else if (cmd == "data_channel_msg") {
     std::string text;

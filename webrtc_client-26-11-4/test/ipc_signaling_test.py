@@ -126,7 +126,7 @@ def main():
 
         # T10: 离线对端报错
         a.send("signal_msg 999 offline-test")
-        if a.wait_for_event("signal_client.error", "code", "offline") is None:
+        if a.wait_for_event("signal_client.error", "code", "peer_offline") is None:
             fail("signal_msg 离线对端未报错")
 
         # T3: 切换服务器
