@@ -82,6 +82,10 @@ int main(int argc, char* argv[]) {
   ice_cfg.mode = ParseIceTransports(Get(
       "ICE_TRANSPORTS", ParseStrFlag(argc, argv, "ice_transports", ""),
       "auto"));
+  ice_cfg.min_port = std::atoi(
+      Get("WEBRTC_MIN_PORT", ParseStrFlag(argc, argv, "min_port", ""), "0").c_str());
+  ice_cfg.max_port = std::atoi(
+      Get("WEBRTC_MAX_PORT", ParseStrFlag(argc, argv, "max_port", ""), "0").c_str());
 
   // 日志：所有 RTC_LOG 统一走 RtcLogSink（时间戳 + file:line + stderr + 文件）。
   RtcLogSink log_sink(MakeLogFilePath(log_dir));

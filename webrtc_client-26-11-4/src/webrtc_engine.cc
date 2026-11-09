@@ -149,6 +149,10 @@ void webrtc_engine::ConfigureIce(const IceConfig& cfg) {
       add_turn();
       break;
   }
+
+  // 限制本机 ICE 端口范围（0 = 不限制），配合云安全组放行固定端口段。
+  rtc_configuration_.set_min_port(cfg.min_port);
+  rtc_configuration_.set_max_port(cfg.max_port);
 }
 
 // ============================================================================
@@ -577,6 +581,13 @@ void webrtc_engine::OnConnectionChange(
   is_connected_ = (state == PeerConnectionInterface::PeerConnectionState::kConnected);
   if (engine_observer_) {
     engine_observer_->OnPeerConnectionStateChange(state);
+  }
+
+  // ICE/DTLS 彻底失败：主动挂断，让信令服务器清掉 busy 状态、双方清理通话。
+  // kDisconnected 是临时抖动（交给 ICE 自动恢复）；kClosed 是正常关闭，都不处理。
+  if (state == PeerConnectionInterface::PeerConnectionState::kFailed &&
+      peer_id_ > 0) {
+    signaling_client_.Leave();
   }
 }
 

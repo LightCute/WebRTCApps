@@ -13,3 +13,4 @@ peerconnection/asio
 peerconnection/websocketpp
 docs/superpowers/
 mcp_ssh/
+.env

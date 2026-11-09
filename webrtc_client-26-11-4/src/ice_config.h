@@ -17,6 +17,8 @@ struct IceConfig {
   std::string turn_user;
   std::string turn_pass;
   IceTransportsMode mode = IceTransportsMode::kAuto;
+  int min_port = 0;        // ICE 本机端口范围下限，0=不限制
+  int max_port = 0;        // ICE 本机端口范围上限，0=不限制
 };
 
 namespace ice_detail {
