@@ -119,6 +119,7 @@ class Daemon:
             self.rfile = self.proc.stdout
             self.wfile = self.proc.stdin
 
+        self.q = queue.Queue()  # 清空旧连接遗留的事件，避免污染 wait_*
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
         self.reader.start()
 
@@ -243,10 +244,19 @@ DIRECTIONS = {
 
 # ===================== 单条项的执行 =====================
 
+def kill_all_daemons():
+    """清理残留 daemon + 重启云端 coturn（清掉 TURN 残留会话，避免 sigkill 后源端口复用触发 437）。"""
+    subprocess.run(["pkill", "-f", "webrtc_engine_mai[n]"], capture_output=True)
+    subprocess.run(ssh_cmd("pkill", "-f", "webrtc_engine_mai[n]"), capture_output=True)
+    subprocess.run(ssh_cmd("systemctl", "restart", "coturn"), capture_output=True)
+    time.sleep(2.0)
+
+
 def run_item(direction, item, cycles):
     """跑一个 (方向, 项)：1 次初始建立 + cycles 次断连。返回通过/失败。"""
     name, initiator_role, teardown = item
     loc = DIRECTIONS[direction]
+    kill_all_daemons()
     offerer = Daemon("offerer", loc["offerer"])
     answerer = Daemon("answerer", loc["answerer"])
 
@@ -315,6 +325,10 @@ def run_item(direction, item, cycles):
                     initiator.send("quit")
                 else:
                     initiator.kill9()
+                    # 重启 coturn：强杀后残留 TURN 会话，重启端复用源端口会触发 437
+                    subprocess.run(ssh_cmd("systemctl", "restart", "coturn"),
+                                   capture_output=True)
+                    time.sleep(2.0)
                 time.sleep(1.0)
                 survivor.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
                 # 重启断开方
@@ -329,6 +343,8 @@ def run_item(direction, item, cycles):
 
     finally:
         offerer.stop(); answerer.stop()
+        time.sleep(0.5)
+        offerer.kill9(); answerer.kill9()
         time.sleep(0.5)
 
     return result
