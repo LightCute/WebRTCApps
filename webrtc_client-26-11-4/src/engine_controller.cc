@@ -383,6 +383,11 @@ void EngineController::HandleCommand(const std::string& line) {
       SendError("already_in_call", "already in a call");
       return;
     }
+    // Layer 1：自呼校验（呼叫自己的 id，不建 PC/SDP）。
+    if (peer == engine_->my_id()) {
+      SendError("self_call", "cannot call yourself");
+      return;
+    }
     // Layer 1：roster 预校验（peers_ 由服务器每次广播刷新），离线和忙线分开。
     bool found = false;
     bool idle = false;

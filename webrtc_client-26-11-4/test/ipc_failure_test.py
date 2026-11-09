@@ -99,7 +99,8 @@ def wait_for_port(port, timeout=10.0):
 
 
 def main():
-    for p in ("/tmp/wt_fail_a.sock", "/tmp/wt_fail_b.sock", "/tmp/wt_fail_c.sock"):
+    for p in ("/tmp/wt_fail_a.sock", "/tmp/wt_fail_b.sock", "/tmp/wt_fail_c.sock",
+              "/tmp/wt_fail_d.sock"):
         if os.path.exists(p):
             os.unlink(p)
 
@@ -119,11 +120,16 @@ def main():
         [ENGINE, "--socket_path", "/tmp/wt_fail_c.sock", "--server", "127.0.0.1",
          "--port", str(PORT_DEAD), "--log_dir", "/tmp/wt_logs"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    eng_d = subprocess.Popen(
+        [ENGINE, "--socket_path", "/tmp/wt_fail_d.sock", "--server", "127.0.0.1",
+         "--port", str(PORT), "--log_dir", "/tmp/wt_logs"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.5)
 
     a = connect_retry("/tmp/wt_fail_a.sock")
     b = connect_retry("/tmp/wt_fail_b.sock")
     c = connect_retry("/tmp/wt_fail_c.sock")
+    d = connect_retry("/tmp/wt_fail_d.sock")
 
     try:
         # ===== 连接不可达：register 应收到 connect 错误 =====
@@ -161,11 +167,25 @@ def main():
         ev = a.wait_for_event("signal_client.signed_in")
         if ev is None or ev.get("id", 0) <= 0:
             fail("a 注册失败")
+        a_id = ev["id"]
         b.send("register b")
         ev = b.wait_for_event("signal_client.signed_in")
         if ev is None or ev.get("id", 0) <= 0:
             fail("b 注册失败")
         b_id = ev["id"]
+
+        # 等 a 的 roster 广播刷新（b 刚注册），避免 Layer 1 用过期 peers_ 误判 peer_offline
+        time.sleep(0.5)
+
+        # ===== 呼叫自己的 id：应拒绝 self_call =====
+        a.send(f"call {a_id}")
+        if a.wait_for_event("ipc.error", "code", "self_call") is None:
+            fail("呼叫自己的 id 未报 self_call")
+
+        # ===== 呼叫不存在的 id：应拒绝 peer_offline =====
+        a.send("call 9999")
+        if a.wait_for_event("ipc.error", "code", "peer_offline") is None:
+            fail("呼叫不存在的 id 未报 peer_offline")
 
         # ===== 已登录但不在通话：leave 应拒绝 not_in_call =====
         a.send("leave")
@@ -178,6 +198,15 @@ def main():
         if b.wait_for_event("peer_connection.state", "state", "connected") is None:
             fail("对端未 connected")
 
+        # ===== 呼叫忙线的对端：应拒绝 peer_busy =====
+        d.send("register d")
+        if d.wait_for_event("signal_client.signed_in") is None:
+            fail("d 注册失败")
+        d.wait_for_event("signal_client.roster")  # 等 roster 刷新（b 已 busy）
+        d.send(f"call {b_id}")
+        if d.wait_for_event("ipc.error", "code", "peer_busy") is None:
+            fail("呼叫忙线的对端未报 peer_busy")
+
         a.send(f"call {b_id}")
         if a.wait_for_event("ipc.error", "code", "already_in_call") is None:
             fail("通话中再 call 未报 already_in_call")
@@ -188,12 +217,13 @@ def main():
         b.wait_for_event("signal_client.call_ended")
 
         print("ipc failure ok: connect/data_channel_not_open/signal_send_failed/"
-              "not_signed_in/not_in_call/already_in_call")
+              "not_signed_in/not_in_call/self_call/peer_offline/peer_busy/already_in_call")
     finally:
         a.close()
         b.close()
         c.close()
-        for p in (eng_a, eng_b, eng_c, srv):
+        d.close()
+        for p in (eng_a, eng_b, eng_c, eng_d, srv):
             if p.poll() is None:
                 p.terminate()
         time.sleep(0.5)

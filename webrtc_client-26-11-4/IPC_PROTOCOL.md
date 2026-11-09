@@ -74,6 +74,9 @@
 | `not_in_call` | 不在通话中 | `leave` |
 | `data_channel_not_open` | 数据通道未打开（未通话） | `data_channel_msg` |
 | `signal_send_failed` | 信令消息发送失败（未连服务器） | `signal_msg` |
+| `self_call` | 呼叫自己的 id | `call` |
+| `peer_offline` | 对端不在线（call 前 roster 校验） | `call` |
+| `peer_busy` | 对端忙线（call 前 roster 校验） | `call` |
 
 ### 3.2 `engine.error` —— 引擎内部异步失败
 
@@ -92,8 +95,8 @@
 |---|---|
 | `connect` | 无法连接信令服务器（服务器不可达 / 连接超时 / 拒连） |
 | `name_taken` | 名字已被占用（register） |
-| `busy` | 对方忙线（call） |
-| `offline` | 对方不在线（call / signal_msg） |
+| `peer_busy` | 对方忙线（call） |
+| `peer_offline` | 对方不在线（call / signal_msg） |
 
 ## 4. 命令 ↔ 事件总表
 

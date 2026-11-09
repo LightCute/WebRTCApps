@@ -534,6 +534,10 @@ void webrtc_engine::OnSignalError(const std::string& code, const std::string& ms
   if (engine_observer_) {
     engine_observer_->OnSignalError(code, msg);
   }
+  // 呼叫被拒（对端离线/忙线）：清理半开的 PC、复位 peer_id_，避免卡在 in-call 状态。
+  if ((code == "peer_offline" || code == "peer_busy") && peer_id_ > 0) {
+    ClosePeerConnection();
+  }
 }
 
 // ============================================================================
