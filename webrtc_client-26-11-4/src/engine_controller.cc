@@ -26,6 +26,8 @@ const char* const kCommands[] = {
     "leave",                       "get_roster",
     "peer_connection_status",      "signal_disconnect",
     "get_stats",                   "quit",
+    "set_ice_transports <mode>",   "switch_ice <mode>",
+    "get_ice_config",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -42,6 +44,16 @@ Json::Value Event(const std::string& name) {
   Json::Value v;
   v["event"] = name;
   return v;
+}
+
+const char* ModeToString(IceTransportsMode m) {
+  switch (m) {
+    case IceTransportsMode::kHost: return "host";
+    case IceTransportsMode::kSrflx: return "srflx";
+    case IceTransportsMode::kRelay: return "relay";
+    case IceTransportsMode::kAuto: return "auto";
+  }
+  return "auto";
 }
 
 }  // namespace
@@ -337,6 +349,18 @@ void EngineController::OnStats(const EngineStats& stats) {
   Send(SerializeJson(v));
 }
 
+void EngineController::OnSignalSwitchIce(int from) {
+  Json::Value v = Event("signal_client.switch_ice");
+  v["from"] = from;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnIceSwitched(bool success) {
+  Json::Value v = Event("ice_switched");
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
 // ===== 命令处理（signaling 线程）=====
 
 void EngineController::HandleCommand(const std::string& line) {
@@ -457,6 +481,34 @@ void EngineController::HandleCommand(const std::string& line) {
     v["data_channel_open"] = engine_->is_data_channel_open();
     v["peer_id"] = engine_->peer_id();
     Send(SerializeJson(v));
+  } else if (cmd == "set_ice_transports") {
+    std::string mode;
+    ss >> mode;
+    if (mode.empty()) {
+      SendError("usage", "usage: set_ice_transports <mode>");
+      return;
+    }
+    if (engine_->is_connected() || engine_->peer_id() > 0) {
+      SendError("already_in_call", "already in a call");
+      return;
+    }
+    engine_->SetIceTransports(mode);
+    SendIceConfig();
+  } else if (cmd == "switch_ice") {
+    std::string mode;
+    ss >> mode;
+    if (mode.empty()) {
+      SendError("usage", "usage: switch_ice <mode>");
+      return;
+    }
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->SwitchIce(mode);
+    SendIceConfig();
+  } else if (cmd == "get_ice_config") {
+    SendIceConfig();
   } else if (cmd == "quit") {
     // 只发退出信号让 main 去 Stop（main 的 Wait 返回后负责停引擎）。
     // 不能在此调 engine_->Stop()：当前在 signaling 线程，Stop 会 BlockingCall 自身 → abort。
@@ -470,6 +522,17 @@ void EngineController::SendError(const std::string& code, const std::string& msg
   Json::Value v = Event("ipc.error");
   v["code"] = code;
   v["msg"] = msg;
+  Send(SerializeJson(v));
+}
+
+void EngineController::SendIceConfig() {
+  const IceConfig& cfg = engine_->ice_config();
+  Json::Value v = Event("ice_config");
+  v["mode"] = ModeToString(cfg.mode);
+  v["stun"] = cfg.stun_uri;
+  v["turn"] = cfg.turn_uri;
+  v["turn_user"] = cfg.turn_user;
+  v["turn_pass"] = cfg.turn_pass;
   Send(SerializeJson(v));
 }
 

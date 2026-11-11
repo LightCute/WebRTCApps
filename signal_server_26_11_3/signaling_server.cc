@@ -123,7 +123,8 @@ void SignalingServer::OnMessage(websocketpp::connection_hdl hdl,
       SendToHdl(hdl, BuildError("peer_offline", "peer is offline"));
     }
     // kCallerBusy -> ignore
-  } else if (type == "answer" || type == "candidate") {
+  } else if (type == "answer" || type == "candidate" ||
+             type == "switch_ice" || type == "reoffer") {
     int to = GetIntField(j, "to", 0);
     if (registry_.IsPaired(self, to)) {
       SendTo(to, StampFrom(j, self));

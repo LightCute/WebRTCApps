@@ -200,6 +200,22 @@ bool WebSocketSignalingClient::SendMessage(int peer_id,
   return SendJson(SerializeJson(v));
 }
 
+bool WebSocketSignalingClient::SendSwitchIce(int peer_id) {
+  Json::Value v;
+  v["type"] = "switch_ice";
+  v["to"] = peer_id;
+  return SendJson(SerializeJson(v));
+}
+
+bool WebSocketSignalingClient::SendReoffer(int peer_id,
+                                           const std::string& sdp) {
+  Json::Value v;
+  v["type"] = "reoffer";
+  v["to"] = peer_id;
+  v["sdp"] = sdp;
+  return SendJson(SerializeJson(v));
+}
+
 void WebSocketSignalingClient::OnOpen(websocketpp::connection_hdl hdl) {
   {
     std::lock_guard<std::mutex> lk(mutex_);
@@ -295,6 +311,15 @@ void WebSocketSignalingClient::DispatchMessage(const Json::Value& j) {
     int idx = GetIntField(j, "sdpMLineIndex", 0);
     Fire([from, cand, mid, idx](SignalingClientObserver* o) {
       o->OnSignalCandidate(from, cand, mid, idx);
+    });
+  } else if (type == "switch_ice") {
+    int from = GetIntField(j, "from", 0);
+    Fire([from](SignalingClientObserver* o) { o->OnSignalSwitchIce(from); });
+  } else if (type == "reoffer") {
+    int from = GetIntField(j, "from", 0);
+    std::string sdp = GetStringField(j, "sdp");
+    Fire([from, sdp](SignalingClientObserver* o) {
+      o->OnSignalReoffer(from, sdp);
     });
   } else if (type == "leave") {
     int from = GetIntField(j, "from", 0);

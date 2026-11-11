@@ -49,6 +49,13 @@ class webrtc_engine : public SignalingClientObserver,
   void RegisterObserver(EngineObserver* observer);
   // 配置 ICE（STUN/TURN + 传输模式），须在首次 call 前调用。
   void ConfigureIce(const IceConfig& cfg);
+  // 运行时切换 ICE 模式（空闲时用，下次 call 生效；只改 mode，server 沿用）。
+  void SetIceTransports(const std::string& mode);
+  // 通话中切换本端 ICE 模式 + 重建 PC 重新连接（通知对端 switch_ice，
+  // 由 offerer 重建后重新 offer；对端 mode 不变）。
+  void SwitchIce(const std::string& mode);
+  // 当前 ICE 配置（供前端回显）。
+  const IceConfig& ice_config() const { return ice_config_; }
 
   bool is_signed_in() const { return signed_in_; }
   int my_id() const { return my_id_; }
@@ -97,6 +104,8 @@ class webrtc_engine : public SignalingClientObserver,
   void OnSignalPeerGone(int from) override;
   void OnSignalMessage(int from, const std::string& text) override;
   void OnSignalError(const std::string& code, const std::string& msg) override;
+  void OnSignalSwitchIce(int from) override;
+  void OnSignalReoffer(int from, const std::string& sdp) override;
 
   // PeerConnectionObserver
   void OnSignalingChange(
@@ -169,6 +178,8 @@ class webrtc_engine : public SignalingClientObserver,
   bool SendDataChannelMessageImpl(const std::string& message);
   void CreateOffer();
   void CreateAnswer();
+  void ReleasePeerConnection();   // 只拆 PC/DC，保留 factory 与通话身份
+  void ReconnectAsOfferer();      // 释放旧 PC 后按本端 mode 重建并发起新 offer
   void SetRemoteOffer(const std::string& sdp);
   void SetRemoteAnswer(const std::string& sdp);
   void AddRemoteCandidate(const std::string& candidate,
@@ -188,6 +199,7 @@ class webrtc_engine : public SignalingClientObserver,
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel_;
   webrtc::PeerConnectionInterface::RTCConfiguration rtc_configuration_;
+  IceConfig ice_config_;  // 当前 ICE 配置（mode 可变，server 固定）
   webrtc::scoped_refptr<CreateSdpObserver> sdp_observer_;
 
   bool signed_in_ = false;
@@ -200,6 +212,8 @@ class webrtc_engine : public SignalingClientObserver,
   bool is_offerer_ = false;     // 本轮是主叫(true)还是被叫(false)
   bool is_connected_ = false;   // PC 已连通
   bool data_channel_open_ = false;
+  bool ice_switch_in_progress_ = false;  // 正在切换 ICE 模式（重建中）
+  bool renegotiating_ = false;            // 本轮 CreateOffer 是重建 reoffer 而非首次 call
   std::string last_received_message_;
 };
 

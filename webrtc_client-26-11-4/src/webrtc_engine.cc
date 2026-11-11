@@ -107,6 +107,7 @@ void webrtc_engine::RegisterObserver(EngineObserver* observer) {
 }
 
 void webrtc_engine::ConfigureIce(const IceConfig& cfg) {
+  ice_config_ = cfg;
   rtc_configuration_.servers.clear();
 
   auto add_stun = [&]() {
@@ -153,6 +154,30 @@ void webrtc_engine::ConfigureIce(const IceConfig& cfg) {
   // 限制本机 ICE 端口范围（0 = 不限制），配合云安全组放行固定端口段。
   rtc_configuration_.set_min_port(cfg.min_port);
   rtc_configuration_.set_max_port(cfg.max_port);
+}
+
+// 运行时切换 ICE 模式（空闲时用；须在 signaling 线程调用）。
+void webrtc_engine::SetIceTransports(const std::string& mode) {
+  ice_config_.mode = ParseIceTransports(mode);
+  ConfigureIce(ice_config_);
+  RTC_LOG(LS_INFO) << "SetIceTransports mode=" << mode
+                   << " type=" << static_cast<int>(rtc_configuration_.type)
+                   << " servers=" << rtc_configuration_.servers.size();
+}
+
+// 通话中切换本端 ICE 模式 + 重建 PC 重新连接（须在 signaling 线程调用）。
+void webrtc_engine::SwitchIce(const std::string& mode) {
+  SetIceTransports(mode);  // 只改本端 mode
+  RTC_LOG(LS_INFO) << "SwitchIce mode=" << mode
+                   << " type=" << static_cast<int>(rtc_configuration_.type)
+                   << " servers=" << rtc_configuration_.servers.size();
+  ice_switch_in_progress_ = true;
+  signaling_client_.SendSwitchIce(peer_id_);
+  if (is_offerer_) {
+    ReconnectAsOfferer();
+  } else {
+    ReleasePeerConnection();  // 释放旧 PC（旧 TURN 分配），等对端 reoffer
+  }
 }
 
 // ============================================================================
@@ -324,6 +349,7 @@ bool webrtc_engine::CreateDataChannelImpl() {
 void webrtc_engine::StartCallImpl(int peer_id) {
   peer_id_ = peer_id;
   is_offerer_ = true;
+  renegotiating_ = false;
   if (!InitializePeerConnectionFactoryImpl()) {
     return;
   }
@@ -407,6 +433,34 @@ void webrtc_engine::ClosePeerConnection() {
   data_channel_open_ = false;
 }
 
+// 只拆 PC/DC，保留 factory 与 peer_id_/is_offerer_（切换 mode 时重建用）。
+void webrtc_engine::ReleasePeerConnection() {
+  data_channel_ = nullptr;
+  if (peer_connection_) {
+    peer_connection_->Close();
+    peer_connection_ = nullptr;
+  }
+  is_connected_ = false;
+  data_channel_open_ = false;
+}
+
+// 释放旧 PC 后按本端当前 mode 重建 PC/DC 并发起新 offer（offerer 用）。
+void webrtc_engine::ReconnectAsOfferer() {
+  renegotiating_ = true;
+  ReleasePeerConnection();
+  if (!CreatePeerConnectionImpl()) {
+    if (engine_observer_) engine_observer_->OnIceSwitched(false);
+    signaling_client_.Leave();
+    return;
+  }
+  if (!CreateDataChannelImpl()) {
+    if (engine_observer_) engine_observer_->OnIceSwitched(false);
+    signaling_client_.Leave();
+    return;
+  }
+  CreateOffer();
+}
+
 void webrtc_engine::RequestStatsImpl() {
   EngineStats stats;
   CollectDataChannelStatsImpl(&stats.data_channel);
@@ -475,6 +529,7 @@ void webrtc_engine::OnSignalCall(int from, const std::string& sdp) {
   RTC_LOG(LS_INFO) << "OnSignalCall from=" << from;
   peer_id_ = from;
   is_offerer_ = false;
+  renegotiating_ = false;
   if (engine_observer_) {
     engine_observer_->OnSignalCall(from);
     engine_observer_->OnRemoteSdp("offer", sdp);
@@ -540,6 +595,39 @@ void webrtc_engine::OnSignalError(const std::string& code, const std::string& ms
   }
 }
 
+void webrtc_engine::OnSignalSwitchIce(int from) {
+  RTC_LOG(LS_INFO) << "OnSignalSwitchIce from=" << from;
+  // 对端要切模式：本端 mode 不变，只重建自己的 PC。
+  ice_switch_in_progress_ = true;
+  if (is_offerer_) {
+    ReconnectAsOfferer();
+  } else {
+    ReleasePeerConnection();  // 释放旧 PC（旧 TURN 分配），等 reoffer
+  }
+  if (engine_observer_) {
+    engine_observer_->OnSignalSwitchIce(from);
+  }
+}
+
+void webrtc_engine::OnSignalReoffer(int from, const std::string& sdp) {
+  RTC_LOG(LS_INFO) << "OnSignalReoffer from=" << from;
+  if (from != peer_id_) {
+    return;  // 防御：非当前通话对端的重建 offer 忽略
+  }
+  if (!peer_connection_) {
+    if (!InitializePeerConnectionFactoryImpl()) {
+      return;
+    }
+    if (!CreatePeerConnectionImpl()) {
+      return;
+    }
+  }
+  if (engine_observer_) {
+    engine_observer_->OnRemoteSdp("offer", sdp);
+  }
+  SetRemoteOffer(sdp);  // → CreateAnswer → 回 answer
+}
+
 // ============================================================================
 //  观察者实现 —— PeerConnectionObserver（signaling 线程）
 // ============================================================================
@@ -585,6 +673,17 @@ void webrtc_engine::OnConnectionChange(
   is_connected_ = (state == PeerConnectionInterface::PeerConnectionState::kConnected);
   if (engine_observer_) {
     engine_observer_->OnPeerConnectionStateChange(state);
+  }
+
+  // ICE 模式切换结果检测
+  if (ice_switch_in_progress_) {
+    if (state == PeerConnectionInterface::PeerConnectionState::kConnected) {
+      ice_switch_in_progress_ = false;
+      if (engine_observer_) engine_observer_->OnIceSwitched(true);
+    } else if (state == PeerConnectionInterface::PeerConnectionState::kFailed) {
+      ice_switch_in_progress_ = false;
+      if (engine_observer_) engine_observer_->OnIceSwitched(false);
+    }
   }
 
   // ICE/DTLS 彻底失败：主动挂断，让信令服务器清掉 busy 状态、双方清理通话。
@@ -638,7 +737,11 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
       std::unique_ptr<SessionDescriptionInterface>(desc),
       make_ref_counted<SetLocalObserver>(engine_));
   if (engine_->is_offerer_) {
-    engine_->signaling_client_.Call(engine_->peer_id_, sdp);
+    if (engine_->renegotiating_) {
+      engine_->signaling_client_.SendReoffer(engine_->peer_id_, sdp);
+    } else {
+      engine_->signaling_client_.Call(engine_->peer_id_, sdp);
+    }
   } else {
     engine_->signaling_client_.Answer(engine_->peer_id_, sdp);
   }

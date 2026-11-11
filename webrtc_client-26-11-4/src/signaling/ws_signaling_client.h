@@ -37,6 +37,8 @@ struct SignalingClientObserver {
   virtual void OnSignalPeerGone(int from) = 0;
   virtual void OnSignalError(const std::string& code, const std::string& msg) = 0;
   virtual void OnSignalMessage(int from, const std::string& text) = 0;
+  virtual void OnSignalSwitchIce(int from) = 0;
+  virtual void OnSignalReoffer(int from, const std::string& sdp) = 0;
 };
 
 // WebSocket 信令客户端：直接收发线上协议（register/call/answer/candidate/
@@ -65,6 +67,8 @@ class WebSocketSignalingClient {
   bool Leave();
   bool GetRoster();
   bool SendMessage(int peer_id, const std::string& text);
+  bool SendSwitchIce(int peer_id);
+  bool SendReoffer(int peer_id, const std::string& sdp);
 
  protected:
   // 解析后的消息分发：virtual 便于测试子类暴露直接调用，以及将来扩展。

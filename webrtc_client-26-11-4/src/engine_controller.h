@@ -42,11 +42,14 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
       webrtc::DataChannelInterface::DataState state) override;
   void OnDataChannelMessage(const std::string& message) override;
   void OnStats(const EngineStats& stats) override;
+  void OnSignalSwitchIce(int from) override;
+  void OnIceSwitched(bool success) override;
 
  private:
   void HandleCommand(const std::string& line);  // signaling 线程执行
   void Send(const std::string& msg);
   void SendError(const std::string& code, const std::string& msg);
+  void SendIceConfig();  // 回显当前 ICE 配置
 
   webrtc_engine* engine_;
   UnixSocketServer* server_;
