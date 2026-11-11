@@ -162,8 +162,12 @@ struct EngineObserver {
   // ICE 模式切换相关（默认空实现，避免破坏既有 observer）。
   // 对端发来 switch_ice 请求（本端是被动方，需重建 PC 但 mode 不变）。
   virtual void OnSignalSwitchIce(int from) {}
+  // 对端发来 reconnect 请求（本端是被动方，offerer 需发起 ICE 重启）。
+  virtual void OnSignalReconnect(int from) {}
   // 模式切换结果（success=true 表示已用新模式重新连通）。
   virtual void OnIceSwitched(bool success) {}
+  // ICE 重连结果（success=true 表示复用旧候选重新连通）。
+  virtual void OnReconnected(bool success) {}
 };
 
 #endif  // APPS_PEERCONNECTION_WEBRTC_CLIENT_ENGINE_OBSERVER_H_

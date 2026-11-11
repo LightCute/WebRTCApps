@@ -38,6 +38,7 @@ struct SignalingClientObserver {
   virtual void OnSignalError(const std::string& code, const std::string& msg) = 0;
   virtual void OnSignalMessage(int from, const std::string& text) = 0;
   virtual void OnSignalSwitchIce(int from) = 0;
+  virtual void OnSignalReconnect(int from) = 0;
   virtual void OnSignalReoffer(int from, const std::string& sdp) = 0;
 };
 
@@ -68,6 +69,7 @@ class WebSocketSignalingClient {
   bool GetRoster();
   bool SendMessage(int peer_id, const std::string& text);
   bool SendSwitchIce(int peer_id);
+  bool SendReconnect(int peer_id);
   bool SendReoffer(int peer_id, const std::string& sdp);
 
  protected:

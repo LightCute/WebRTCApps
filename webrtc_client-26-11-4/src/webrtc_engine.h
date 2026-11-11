@@ -54,6 +54,8 @@ class webrtc_engine : public SignalingClientObserver,
   // 通话中切换本端 ICE 模式 + 重建 PC 重新连接（通知对端 switch_ice，
   // 由 offerer 重建后重新 offer；对端 mode 不变）。
   void SwitchIce(const std::string& mode);
+  // 通话中手动触发 ICE 重启（复用旧候选，不重建 PC、不改 mode）。
+  void Reconnect();
   // 当前 ICE 配置（供前端回显）。
   const IceConfig& ice_config() const { return ice_config_; }
 
@@ -105,6 +107,7 @@ class webrtc_engine : public SignalingClientObserver,
   void OnSignalMessage(int from, const std::string& text) override;
   void OnSignalError(const std::string& code, const std::string& msg) override;
   void OnSignalSwitchIce(int from) override;
+  void OnSignalReconnect(int from) override;
   void OnSignalReoffer(int from, const std::string& sdp) override;
 
   // PeerConnectionObserver
@@ -114,6 +117,8 @@ class webrtc_engine : public SignalingClientObserver,
       webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override;
   void OnIceGatheringChange(
       webrtc::PeerConnectionInterface::IceGatheringState new_state) override;
+  void OnIceConnectionChange(
+      webrtc::PeerConnectionInterface::IceConnectionState new_state) override;
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override;
   void OnConnectionChange(
       webrtc::PeerConnectionInterface::PeerConnectionState state) override;
@@ -178,6 +183,8 @@ class webrtc_engine : public SignalingClientObserver,
   bool SendDataChannelMessageImpl(const std::string& message);
   void CreateOffer();
   void CreateAnswer();
+  void CreateOfferIceRestart();   // 同 PC 上 ICE 重启（复用旧候选，新 ufrag）
+  void ReconnectImpl();           // reconnect 命令的 signaling 线程实现
   void ReleasePeerConnection();   // 只拆 PC/DC，保留 factory 与通话身份
   void ReconnectAsOfferer();      // 释放旧 PC 后按本端 mode 重建并发起新 offer
   void SetRemoteOffer(const std::string& sdp);
@@ -213,6 +220,7 @@ class webrtc_engine : public SignalingClientObserver,
   bool is_connected_ = false;   // PC 已连通
   bool data_channel_open_ = false;
   bool ice_switch_in_progress_ = false;  // 正在切换 ICE 模式（重建中）
+  bool reconnect_in_progress_ = false;   // 正在 ICE 重连（复用旧候选）
   bool renegotiating_ = false;            // 本轮 CreateOffer 是重建 reoffer 而非首次 call
   std::string last_received_message_;
 };

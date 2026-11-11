@@ -76,6 +76,10 @@ ssh root@120.79.210.6 'nc -U /tmp/wc_cloud.sock'
 | `data_channel_msg <text>` | 发数据消息 | — |
 | `signal_msg <peer_id> <text>` | 发信令文本 | — |
 | `get_stats` | 采集运行时状态 | `stats` |
+| `set_ice_transports <mode>` | 空闲时改下次 call 的 ICE 模式 | `ice_config` |
+| `switch_ice <mode>` | 通话中切本端 ICE 模式（重建 PC 重连） | `ice_switched`（success/failed） |
+| `reconnect` | 通话中 ICE 重启（复用旧候选，不改 mode） | `reconnected`（success/failed） |
+| `get_ice_config` | 查当前 ICE 配置 | `ice_config`（mode/stun/turn） |
 | `quit` | 退出后端进程 | — |
 
 ## 6. 手把手：一次手动通话
@@ -118,3 +122,70 @@ quit
 - 连接**失败**（`peer_connection.state`=failed）时，后端会自动发 `leave` 清掉信令服务器的
   `busy` 状态并通知双方清理（不再一直卡 busy）。
 - `signal_disconnect` 后可再 `register` 重连（软断，保留进程）。
+
+## 8. 通话中切换 ICE 模式 / 重连（流畅性测试）
+
+### 语义（先搞清楚，否则容易误判）
+
+- **mode 是每端本地的**：`switch_ice <mode>` 只切换**被命令的那端**，对端 mode 不变。
+- `switch_ice <mode>` = **重建 PeerConnection**：释放旧候选（旧 TURN 分配）→ 用新 mode
+  重新采集 → 重新 offer/answer。候选类型变了，所以必须重建。
+- `reconnect` = **同 PC 上 ICE 重启**：复用旧候选（新 ufrag）、不重建、不改 mode。
+  对应「网络闪断又恢复」后手动重连的场景。
+
+### 跨 NAT 的组合边界（本地 ↔ 云端）
+
+| 组合 | 是否可连 | 原因 |
+|---|---|---|
+| srflx↔srflx / relay↔relay / srflx↔relay | ✅ | 两端都是公网候选 |
+| 含 host 的任意组合 | ❌ | host 是私网（本地 192.168.x / 云端 172.17.14.131），互相够不着 |
+
+> 所以跨 NAT 测「切换流畅性」请用 **srflx / relay** 两档来回切；host 只在同网段（hairpin）有意义。
+
+### 手把手流程
+
+**终端 A（本地 offerer）** 与 **终端 B（云端 answerer）** 分别 `nc -U` 连上后：
+
+```text
+# --- 建立通话：answerer 用 auto（host/srflx/relay 都采集，方便任意 offerer mode 配对）
+B> set_ice_transports auto
+A> set_ice_transports relay
+A> call <B的id>
+    ... 双方 peer_connection.state=connected
+
+# --- 切模式：offerer relay -> srflx（重建 PC，旧 relay 分配释放）
+A> switch_ice srflx
+A< {"event":"ice_switched","result":"success"}       # 完成信号
+A> get_ice_config                                    # mode=srflx
+A> get_stats                                         # selected 类型应为 srflx
+A> peer_connection_status                            # connected 仍为 true（流畅）
+
+# --- 切回来：offerer srflx -> relay
+A> switch_ice relay
+A< {"event":"ice_switched","result":"success"}
+
+# --- answerer 被命令：answerer auto -> relay（offerer 保持 relay 不变）
+B> switch_ice relay
+B< {"event":"ice_switched","result":"success"}
+
+# --- 重连：ICE 重启（复用旧候选，不重建、不改 mode）
+A> reconnect
+A< {"event":"reconnected","result":"success"}
+A> get_ice_config                                    # mode 仍是 relay（不变）
+```
+
+### 要观察的事件
+
+| 事件 | 何时出现 |
+|---|---|
+| `ice_switched` | `switch_ice` 后（重建 PC 重新连通用 success/failed 报告） |
+| `reconnected` | `reconnect` 后（ICE 重启协商完成 success/failed 报告） |
+| `signal_client.switch_ice` | 对端收到你的 switch_ice 请求（它会被动重建） |
+| `signal_client.reconnect` | 对端收到你的 reconnect 请求（offerer 会被动发起 ICE 重启） |
+
+### 流畅性判据
+
+- 切模式 / 重连期间 `peer_connection.state` 短暂波动（connected→connecting→connected），
+  最终稳定在 `connected`，`data_channel.state` 保持 `open`，即算流畅。
+- 每次 `switch_ice`/`reconnect` 都应收到对应的 `ice_switched`/`reconnected` success；
+  若收到 `failed` 或一直收不到，说明该组合/该网络下连不上（参考上面的组合边界）。

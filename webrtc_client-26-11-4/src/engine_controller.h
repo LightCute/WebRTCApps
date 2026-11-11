@@ -43,7 +43,9 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   void OnDataChannelMessage(const std::string& message) override;
   void OnStats(const EngineStats& stats) override;
   void OnSignalSwitchIce(int from) override;
+  void OnSignalReconnect(int from) override;
   void OnIceSwitched(bool success) override;
+  void OnReconnected(bool success) override;
 
  private:
   void HandleCommand(const std::string& line);  // signaling 线程执行

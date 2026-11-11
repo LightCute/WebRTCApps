@@ -207,6 +207,13 @@ bool WebSocketSignalingClient::SendSwitchIce(int peer_id) {
   return SendJson(SerializeJson(v));
 }
 
+bool WebSocketSignalingClient::SendReconnect(int peer_id) {
+  Json::Value v;
+  v["type"] = "reconnect";
+  v["to"] = peer_id;
+  return SendJson(SerializeJson(v));
+}
+
 bool WebSocketSignalingClient::SendReoffer(int peer_id,
                                            const std::string& sdp) {
   Json::Value v;
@@ -315,6 +322,9 @@ void WebSocketSignalingClient::DispatchMessage(const Json::Value& j) {
   } else if (type == "switch_ice") {
     int from = GetIntField(j, "from", 0);
     Fire([from](SignalingClientObserver* o) { o->OnSignalSwitchIce(from); });
+  } else if (type == "reconnect") {
+    int from = GetIntField(j, "from", 0);
+    Fire([from](SignalingClientObserver* o) { o->OnSignalReconnect(from); });
   } else if (type == "reoffer") {
     int from = GetIntField(j, "from", 0);
     std::string sdp = GetStringField(j, "sdp");

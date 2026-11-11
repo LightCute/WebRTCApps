@@ -123,6 +123,19 @@ def wait_switched(*daemons, timeout=25.0):
     return False
 
 
+def wait_reconnected(*daemons, timeout=25.0):
+    deadline = time.time() + timeout
+    ok = {d: False for d in daemons}
+    while time.time() < deadline:
+        for d in list(ok):
+            if not ok[d] and d.wait("reconnected",
+                                    lambda e: e.get("result") == "success", 0.3):
+                ok[d] = True
+        if all(ok.values()):
+            return True
+    return False
+
+
 def wait_selected(d, expected, timeout=20.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -201,6 +214,24 @@ def main():
         if ice_mode(offerer) != "relay":
             fail(f"T4 offerer mode changed: {ice_mode(offerer)}")
         print("T4 answerer switch relay OK: answerer=relay, offerer=relay unchanged")
+
+        # T4.5: offerer reconnect（复用旧候选的 ICE 重启，不重建 PC、不改 mode）
+        offerer.send("reconnect")
+        if not wait_reconnected(offerer):
+            fail("T4.5 offerer reconnect: no reconnected")
+        if ice_mode(offerer) != "relay":
+            fail(f"T4.5 offerer mode changed: {ice_mode(offerer)}")
+        if not wait_selected(offerer, "relay"):
+            fail("T4.5 offerer selected != relay after reconnect")
+        print("T4.5 offerer reconnect OK (mode unchanged, selected=relay)")
+
+        # T4.6: answerer reconnect（answerer 被命令 → 通知 offerer 发起 ICE 重启）
+        answerer.send("reconnect")
+        if not wait_reconnected(answerer, offerer):
+            fail("T4.6 answerer reconnect: no reconnected")
+        if ice_mode(answerer) != "relay":
+            fail(f"T4.6 answerer mode changed: {ice_mode(answerer)}")
+        print("T4.6 answerer reconnect OK")
 
         # T5: leave
         offerer.send("leave")

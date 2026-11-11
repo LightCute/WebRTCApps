@@ -124,7 +124,8 @@ void SignalingServer::OnMessage(websocketpp::connection_hdl hdl,
     }
     // kCallerBusy -> ignore
   } else if (type == "answer" || type == "candidate" ||
-             type == "switch_ice" || type == "reoffer") {
+             type == "switch_ice" || type == "reconnect" ||
+             type == "reoffer") {
     int to = GetIntField(j, "to", 0);
     if (registry_.IsPaired(self, to)) {
       SendTo(to, StampFrom(j, self));

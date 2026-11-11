@@ -180,6 +180,28 @@ void webrtc_engine::SwitchIce(const std::string& mode) {
   }
 }
 
+// 通话中手动触发 ICE 重启（复用旧候选，不重建 PC、不改 mode）。
+void webrtc_engine::Reconnect() {
+  if (!signaling_thread_) {
+    return;
+  }
+  if (signaling_thread_->IsCurrent()) {
+    ReconnectImpl();
+    return;
+  }
+  signaling_thread_->BlockingCall([&] { ReconnectImpl(); });
+}
+
+void webrtc_engine::ReconnectImpl() {
+  RTC_LOG(LS_INFO) << "Reconnect";
+  reconnect_in_progress_ = true;
+  if (is_offerer_) {
+    CreateOfferIceRestart();
+  } else {
+    signaling_client_.SendReconnect(peer_id_);  // 请 offerer 发起 ICE 重启
+  }
+}
+
 // ============================================================================
 //  公共 API（BlockingCall marshal 到 signaling 线程）
 // ============================================================================
@@ -378,6 +400,13 @@ void webrtc_engine::CreateOffer() {
 void webrtc_engine::CreateAnswer() {
   PeerConnectionInterface::RTCOfferAnswerOptions options;
   peer_connection_->CreateAnswer(sdp_observer_.get(), options);
+}
+
+void webrtc_engine::CreateOfferIceRestart() {
+  renegotiating_ = true;  // 使 OnSuccess 走 reoffer 而非首次 call
+  PeerConnectionInterface::RTCOfferAnswerOptions options;
+  options.ice_restart = true;
+  peer_connection_->CreateOffer(sdp_observer_.get(), options);
 }
 
 void webrtc_engine::SetRemoteOffer(const std::string& sdp) {
@@ -609,6 +638,17 @@ void webrtc_engine::OnSignalSwitchIce(int from) {
   }
 }
 
+void webrtc_engine::OnSignalReconnect(int from) {
+  RTC_LOG(LS_INFO) << "OnSignalReconnect from=" << from;
+  reconnect_in_progress_ = true;
+  if (is_offerer_) {
+    CreateOfferIceRestart();  // offerer 收到对端请求后发起 ICE 重启
+  }
+  if (engine_observer_) {
+    engine_observer_->OnSignalReconnect(from);
+  }
+}
+
 void webrtc_engine::OnSignalReoffer(int from, const std::string& sdp) {
   RTC_LOG(LS_INFO) << "OnSignalReoffer from=" << from;
   if (from != peer_id_) {
@@ -649,6 +689,11 @@ void webrtc_engine::OnIceGatheringChange(
     PeerConnectionInterface::IceGatheringState new_state) {
   RTC_LOG(LS_INFO) << "IceGatheringState: "
                    << PeerConnectionInterface::AsString(new_state);
+}
+
+void webrtc_engine::OnIceConnectionChange(
+    PeerConnectionInterface::IceConnectionState new_state) {
+  RTC_LOG(LS_INFO) << "IceConnectionState: " << static_cast<int>(new_state);
 }
 
 void webrtc_engine::OnIceCandidate(const IceCandidate* candidate) {
@@ -744,12 +789,21 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
     }
   } else {
     engine_->signaling_client_.Answer(engine_->peer_id_, sdp);
+    // answerer 发出 answer 即 ICE 重启协商完成
+    if (engine_->reconnect_in_progress_) {
+      engine_->reconnect_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
+    }
   }
 }
 
 void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
   RTC_LOG(LS_ERROR) << "CreateOffer/Answer failed: " << error.message();
   if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("sdp_create_failed", error.message());
+  if (engine_->reconnect_in_progress_) {
+    engine_->reconnect_in_progress_ = false;
+    if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(false);
+  }
 }
 
 // ============================================================================
@@ -777,10 +831,18 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
     if (!engine_->is_offerer_) {
       // 答方：设完远端 offer 后生成 answer
       engine_->CreateAnswer();
+    } else if (engine_->reconnect_in_progress_) {
+      // offerer 收到答案（ICE 重启协商完成）
+      engine_->reconnect_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
     }
   } else {
     RTC_LOG(LS_ERROR) << "SetRemoteDescription failed: " << error.message();
     if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("set_remote_desc_failed", error.message());
+    if (engine_->reconnect_in_progress_) {
+      engine_->reconnect_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(false);
+    }
   }
 }
 

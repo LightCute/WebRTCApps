@@ -27,6 +27,7 @@ const char* const kCommands[] = {
     "peer_connection_status",      "signal_disconnect",
     "get_stats",                   "quit",
     "set_ice_transports <mode>",   "switch_ice <mode>",
+    "reconnect",
     "get_ice_config",
 };
 
@@ -355,8 +356,20 @@ void EngineController::OnSignalSwitchIce(int from) {
   Send(SerializeJson(v));
 }
 
+void EngineController::OnSignalReconnect(int from) {
+  Json::Value v = Event("signal_client.reconnect");
+  v["from"] = from;
+  Send(SerializeJson(v));
+}
+
 void EngineController::OnIceSwitched(bool success) {
   Json::Value v = Event("ice_switched");
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnReconnected(bool success) {
+  Json::Value v = Event("reconnected");
   v["result"] = success ? "success" : "failed";
   Send(SerializeJson(v));
 }
@@ -507,6 +520,12 @@ void EngineController::HandleCommand(const std::string& line) {
     }
     engine_->SwitchIce(mode);
     SendIceConfig();
+  } else if (cmd == "reconnect") {
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->Reconnect();
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

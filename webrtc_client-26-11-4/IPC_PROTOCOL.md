@@ -62,13 +62,15 @@
 | `engine.error` | `code`,`msg` | 引擎内部异步失败 |
 | `signal_client.error` | `code`,`msg` | 信令服务器返回错误 / 连接失败 |
 
-### 2.6 ICE 模式切换
+### 2.6 ICE 模式切换 / 重连
 
 | 事件 | 字段 | 含义 |
 |---|---|---|
 | `ice_config` | `mode`,`stun`,`turn`,`turn_user`,`turn_pass` | 当前 ICE 配置回显（`get_ice_config` / `set_ice_transports` / `switch_ice` 后） |
 | `signal_client.switch_ice` | `from`（int） | 对端发来 switch_ice 请求（本端是被动方：重建 PC 但 mode 不变） |
+| `signal_client.reconnect` | `from`（int） | 对端发来 reconnect 请求（本端是被动方：offerer 发起 ICE 重启） |
 | `ice_switched` | `result`（`success`/`failed`） | 模式切换完成：重建后是否重新连通 |
+| `reconnected` | `result`（`success`/`failed`） | ICE 重连完成：复用旧候选重新协商是否完成 |
 
 ## 3. 错误码词汇表
 
@@ -79,7 +81,7 @@
 | `usage` | 参数缺失/非法 | `register`（name 空）、`call`（peer<=0）、`signal_msg`（peer<=0）、`set_ice_transports`/`switch_ice`（mode 空） |
 | `not_signed_in` | 未登录信令服务器 | `call` / `get_roster` / `leave` / `signal_disconnect` |
 | `already_in_call` | 已在通话中 | `call` / `set_ice_transports` |
-| `not_in_call` | 不在通话中 | `leave` / `switch_ice` |
+| `not_in_call` | 不在通话中 | `leave` / `switch_ice` / `reconnect` |
 | `data_channel_not_open` | 数据通道未打开（未通话） | `data_channel_msg` |
 | `signal_send_failed` | 信令消息发送失败（未连服务器） | `signal_msg` |
 | `self_call` | 呼叫自己的 id | `call` |
@@ -121,6 +123,7 @@
 | `signal_disconnect` | `not_signed_in` | `signal_client.disconnected` | 无（已受理即触发 disconnected） |
 | `set_ice_transports <mode>` | `usage` / `already_in_call` | `ice_config` | 无（空闲时改下次 call 的 mode，不触发连接） |
 | `switch_ice <mode>` | `usage` / `not_in_call` | `ice_config` → 重建后 `ice_switched`（success/failed）；对端收 `signal_client.switch_ice` | `ice_switched`=failed |
+| `reconnect` | `not_in_call` | 协商后 `reconnected`（success/failed）；对端收 `signal_client.reconnect` | `reconnected`=failed |
 | `get_ice_config` | 无（纯查询） | `ice_config` | 无（总返回） |
 | `quit` | 无（总执行） | 无事件（unix socket 关闭即退出） | 无（总执行） |
 
