@@ -8,12 +8,25 @@
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials.h"
+#include "api/rtp_parameters.h"
 #include "api/stats/rtcstats_objects.h"
 #include "media_source.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 
 using namespace webrtc;
+
+namespace {
+
+// "maintain_resolution" -> MAINTAIN_RESOLUTION，未知回 BALANCED。
+DegradationPreference StringToDegradation(const std::string& mode) {
+  if (mode == "maintain_resolution") return DegradationPreference::MAINTAIN_RESOLUTION;
+  if (mode == "maintain_framerate") return DegradationPreference::MAINTAIN_FRAMERATE;
+  if (mode == "disabled") return DegradationPreference::DISABLED;
+  return DegradationPreference::BALANCED;
+}
+
+}  // namespace
 
 // ============================================================================
 //  构造 / 析构
@@ -176,11 +189,7 @@ void webrtc_engine::SwitchIce(const std::string& mode) {
                    << " servers=" << rtc_configuration_.servers.size();
   ice_switch_in_progress_ = true;
   signaling_client_.SendSwitchIce(peer_id_);
-  if (is_offerer_) {
-    ReconnectAsOfferer();
-  } else {
-    ReleasePeerConnection();  // 释放旧 PC（旧 TURN 分配），等对端 reoffer
-  }
+  RebuildAndOffer();  // 命令方重建 PC + offer（对称：谁被命令谁 offer）
 }
 
 // 通话中手动触发 ICE 重启（复用旧候选，不重建 PC、不改 mode）。
@@ -198,11 +207,8 @@ void webrtc_engine::Reconnect() {
 void webrtc_engine::ReconnectImpl() {
   RTC_LOG(LS_INFO) << "Reconnect";
   reconnect_in_progress_ = true;
-  if (is_offerer_) {
-    CreateOfferIceRestart();
-  } else {
-    signaling_client_.SendReconnect(peer_id_);  // 请 offerer 发起 ICE 重启
-  }
+  signaling_client_.SendReconnect(peer_id_);  // 告诉对端「这是 reconnect」，对端标记完成检测
+  CreateOfferIceRestart();  // 命令方直接 ICE 重启 + offer（对称）
 }
 
 // 视频开关（第一阶段：合成测试图源；空闲时开，通话中暂不支持）。
@@ -271,7 +277,13 @@ void webrtc_engine::VideoOff() {
 
 void webrtc_engine::VideoOnImpl() {
   video_enabled_ = true;
-  AddVideoTrackToPc();
+  video_switch_in_progress_ = true;
+  if (!AddVideoTrackToPc()) {
+    video_switch_in_progress_ = false;
+    RTC_LOG(LS_ERROR) << "VideoOn: AddVideoTrack failed";
+    if (engine_observer_) engine_observer_->OnVideoSwitched(true, false);
+    return;
+  }
   TriggerRenegotiation();
   RTC_LOG(LS_INFO) << "VideoOn";
   if (engine_observer_) {
@@ -281,7 +293,13 @@ void webrtc_engine::VideoOnImpl() {
 
 void webrtc_engine::VideoOffImpl() {
   video_enabled_ = false;
-  RemoveVideoTrackFromPc();
+  video_switch_in_progress_ = true;
+  if (!RemoveVideoTrackFromPc()) {
+    video_switch_in_progress_ = false;
+    RTC_LOG(LS_ERROR) << "VideoOff: RemoveVideoTrack failed";
+    if (engine_observer_) engine_observer_->OnVideoSwitched(false, false);
+    return;
+  }
   TriggerRenegotiation();
   RTC_LOG(LS_INFO) << "VideoOff";
   if (engine_observer_) {
@@ -319,26 +337,103 @@ void webrtc_engine::CreateVideoTrack() {
   RTC_LOG(LS_INFO) << "VideoTrack created";
 }
 
-void webrtc_engine::AddVideoTrackToPc() {
+bool webrtc_engine::AddVideoTrackToPc() {
   CreateVideoTrack();
   if (!peer_connection_ || !video_track_) {
-    return;
+    return false;
   }
   auto result = peer_connection_->AddTrack(video_track_, {"stream"});
   if (result.ok()) {
     video_sender_ = result.value();
     RTC_LOG(LS_INFO) << "Video track added to PC";
-  } else {
-    RTC_LOG(LS_ERROR) << "AddTrack failed: " << result.error().message();
+    return true;
   }
+  RTC_LOG(LS_ERROR) << "AddTrack failed: " << result.error().message();
+  return false;
 }
 
-void webrtc_engine::RemoveVideoTrackFromPc() {
+bool webrtc_engine::RemoveVideoTrackFromPc() {
   if (peer_connection_ && video_sender_) {
-    peer_connection_->RemoveTrackOrError(video_sender_);
+    RTCError err = peer_connection_->RemoveTrackOrError(video_sender_);
+    if (!err.ok()) {
+      RTC_LOG(LS_ERROR) << "RemoveTrack failed: " << err.message();
+      return false;
+    }
   }
   video_sender_ = nullptr;
   video_track_ = nullptr;
+  return true;
+}
+
+// ============================================================================
+//  视频参数控制（SetParameters 动态改，不重协商）
+// ============================================================================
+
+void webrtc_engine::SetBitrate(int max_kbps) {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { SetBitrateImpl(max_kbps); return; }
+  signaling_thread_->BlockingCall([&] { SetBitrateImpl(max_kbps); });
+}
+
+void webrtc_engine::SetFramerate(int fps) {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { SetFramerateImpl(fps); return; }
+  signaling_thread_->BlockingCall([&] { SetFramerateImpl(fps); });
+}
+
+void webrtc_engine::SetDegradation(const std::string& mode) {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { SetDegradationImpl(mode); return; }
+  signaling_thread_->BlockingCall([&] { SetDegradationImpl(mode); });
+}
+
+void webrtc_engine::GetVideoStatus() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { GetVideoStatusImpl(); return; }
+  signaling_thread_->BlockingCall([&] { GetVideoStatusImpl(); });
+}
+
+void webrtc_engine::SetBitrateImpl(int max_kbps) {
+  video_bitrate_kbps_ = max_kbps;
+  bool ok = ApplyRtpParameters();
+  if (engine_observer_) engine_observer_->OnVideoSwitched(video_enabled_, ok);
+  GetVideoStatusImpl();
+}
+
+void webrtc_engine::SetFramerateImpl(int fps) {
+  video_fps_ = fps;
+  bool ok = ApplyRtpParameters();
+  if (engine_observer_) engine_observer_->OnVideoSwitched(video_enabled_, ok);
+  GetVideoStatusImpl();
+}
+
+void webrtc_engine::SetDegradationImpl(const std::string& mode) {
+  video_degradation_ = mode;
+  bool ok = ApplyRtpParameters();
+  if (engine_observer_) engine_observer_->OnVideoSwitched(video_enabled_, ok);
+  GetVideoStatusImpl();
+}
+
+void webrtc_engine::GetVideoStatusImpl() {
+  if (engine_observer_) {
+    engine_observer_->OnVideoStatus(video_width_, video_height_, video_fps_,
+                                    video_bitrate_kbps_, video_degradation_);
+  }
+}
+
+// 用当前 video_* 参数调 video_sender_->SetParameters（码率/帧率/降质）。
+bool webrtc_engine::ApplyRtpParameters() {
+  if (!video_sender_) return false;
+  RtpParameters params = video_sender_->GetParameters();
+  if (params.encodings.empty()) return false;
+  if (video_bitrate_kbps_ > 0) {
+    params.encodings[0].max_bitrate_bps = video_bitrate_kbps_ * 1000;
+  }
+  if (video_fps_ > 0) {
+    params.encodings[0].max_framerate = video_fps_;
+  }
+  params.degradation_preference = StringToDegradation(video_degradation_);
+  return video_sender_->SetParameters(params).ok();
 }
 
 // ============================================================================
@@ -631,8 +726,8 @@ void webrtc_engine::ReleasePeerConnection() {
   data_channel_open_ = false;
 }
 
-// 释放旧 PC 后按本端当前 mode 重建 PC/DC 并发起新 offer（offerer 用）。
-void webrtc_engine::ReconnectAsOfferer() {
+// 释放旧 PC 后按本端当前 mode 重建 PC/DC 并发起新 offer（命令方用，对称）。
+void webrtc_engine::RebuildAndOffer() {
   renegotiating_ = true;
   ReleasePeerConnection();
   if (!CreatePeerConnectionImpl()) {
@@ -792,11 +887,7 @@ void webrtc_engine::OnSignalSwitchIce(int from) {
   RTC_LOG(LS_INFO) << "OnSignalSwitchIce from=" << from;
   // 对端要切模式：本端 mode 不变，只重建自己的 PC。
   ice_switch_in_progress_ = true;
-  if (is_offerer_) {
-    ReconnectAsOfferer();
-  } else {
-    ReleasePeerConnection();  // 释放旧 PC（旧 TURN 分配），等 reoffer
-  }
+  ReleasePeerConnection();  // 对端释放旧 PC（旧 TURN 分配），等 reoffer（对称）
   if (engine_observer_) {
     engine_observer_->OnSignalSwitchIce(from);
   }
@@ -804,10 +895,7 @@ void webrtc_engine::OnSignalSwitchIce(int from) {
 
 void webrtc_engine::OnSignalReconnect(int from) {
   RTC_LOG(LS_INFO) << "OnSignalReconnect from=" << from;
-  reconnect_in_progress_ = true;
-  if (is_offerer_) {
-    CreateOfferIceRestart();  // offerer 收到对端请求后发起 ICE 重启
-  }
+  reconnect_in_progress_ = true;  // 对端只标记完成检测（命令方已 ICE 重启 + offer）
   if (engine_observer_) {
     engine_observer_->OnSignalReconnect(from);
   }
@@ -989,6 +1077,9 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
     if (engine_->reconnect_in_progress_) {
       engine_->reconnect_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
+    } else if (engine_->video_switch_in_progress_) {
+      engine_->video_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, true);
     }
   }
 }
@@ -999,6 +1090,9 @@ void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
   if (engine_->reconnect_in_progress_) {
     engine_->reconnect_in_progress_ = false;
     if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(false);
+  } else if (engine_->video_switch_in_progress_) {
+    engine_->video_switch_in_progress_ = false;
+    if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, false);
   }
 }
 
@@ -1031,6 +1125,10 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
       // 收的是 answer（ICE 重启协商完成）
       engine_->reconnect_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
+    } else if (engine_->video_switch_in_progress_) {
+      // 收的是 answer（视频开关重协商完成）
+      engine_->video_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, true);
     }
   } else {
     RTC_LOG(LS_ERROR) << "SetRemoteDescription failed: " << error.message();
@@ -1038,6 +1136,9 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
     if (engine_->reconnect_in_progress_) {
       engine_->reconnect_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(false);
+    } else if (engine_->video_switch_in_progress_) {
+      engine_->video_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, false);
     }
   }
 }

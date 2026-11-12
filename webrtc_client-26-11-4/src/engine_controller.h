@@ -47,6 +47,9 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   void OnIceSwitched(bool success) override;
   void OnReconnected(bool success) override;
   void OnVideoStateChanged(bool enabled) override;
+  void OnVideoSwitched(bool enabled, bool success) override;
+  void OnVideoStatus(int width, int height, int fps, int bitrate_kbps,
+                     const std::string& degradation) override;
   void OnRemoteVideoStarted() override;
   void OnRemoteVideoStopped() override;
 

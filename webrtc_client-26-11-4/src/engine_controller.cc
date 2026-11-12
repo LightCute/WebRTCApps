@@ -31,6 +31,8 @@ const char* const kCommands[] = {
     "get_ice_config",
     "start_video",                  "stop_video",
     "video_on",                     "video_off",
+    "set_bitrate <kbps>",           "set_framerate <fps>",
+    "set_degradation <mode>",       "get_video_status",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -382,6 +384,25 @@ void EngineController::OnVideoStateChanged(bool enabled) {
   Send(SerializeJson(v));
 }
 
+void EngineController::OnVideoSwitched(bool enabled, bool success) {
+  Json::Value v = Event("video_switched");
+  v["enabled"] = enabled;
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoStatus(int width, int height, int fps,
+                                     int bitrate_kbps,
+                                     const std::string& degradation) {
+  Json::Value v = Event("video_params");
+  v["width"] = width;
+  v["height"] = height;
+  v["fps"] = fps;
+  v["bitrate_kbps"] = bitrate_kbps;
+  v["degradation"] = degradation;
+  Send(SerializeJson(v));
+}
+
 void EngineController::OnRemoteVideoStarted() {
   Send(SerializeJson(Event("remote_video.started")));
 }
@@ -566,6 +587,44 @@ void EngineController::HandleCommand(const std::string& line) {
       return;
     }
     engine_->VideoOff();
+  } else if (cmd == "set_bitrate") {
+    int kbps = 0;
+    ss >> kbps;
+    if (kbps <= 0) {
+      SendError("usage", "usage: set_bitrate <kbps>");
+      return;
+    }
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->SetBitrate(kbps);
+  } else if (cmd == "set_framerate") {
+    int fps = 0;
+    ss >> fps;
+    if (fps <= 0) {
+      SendError("usage", "usage: set_framerate <fps>");
+      return;
+    }
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->SetFramerate(fps);
+  } else if (cmd == "set_degradation") {
+    std::string mode;
+    ss >> mode;
+    if (mode.empty()) {
+      SendError("usage", "usage: set_degradation <mode>");
+      return;
+    }
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->SetDegradation(mode);
+  } else if (cmd == "get_video_status") {
+    engine_->GetVideoStatus();
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

@@ -172,6 +172,11 @@ struct EngineObserver {
   // 视频（第一阶段）
   // 本端视频开关状态变化（true=已开，false=已关）。
   virtual void OnVideoStateChanged(bool enabled) {}
+  // 视频操作完成/失败（video_on/off 及参数设置的 result：success/failed；enabled=当前视频轨状态）。
+  virtual void OnVideoSwitched(bool enabled, bool success) {}
+  // 回读当前视频参数（get_video_status / 参数设置后回显）。
+  virtual void OnVideoStatus(int width, int height, int fps, int bitrate_kbps,
+                             const std::string& degradation) {}
   // 收到远端视频轨（远端开始发视频）。
   virtual void OnRemoteVideoStarted() {}
   // 远端视频轨移除（远端停止发视频）。

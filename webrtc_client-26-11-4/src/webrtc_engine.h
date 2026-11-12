@@ -69,6 +69,12 @@ class webrtc_engine : public SignalingClientObserver,
   // 通话中开/关本端视频轨（AddTrack/RemoveTrack + 重新 offer/answer）。
   void VideoOn();
   void VideoOff();
+  // 视频参数控制（通话中，SetParameters 动态改，不重协商）。
+  void SetBitrate(int max_kbps);
+  void SetFramerate(int fps);
+  void SetDegradation(const std::string& mode);
+  // 回读当前视频参数（供前端回显）。
+  void GetVideoStatus();
   bool video_enabled() const { return video_enabled_; }
   // 当前 ICE 配置（供前端回显）。
   const IceConfig& ice_config() const { return ice_config_; }
@@ -208,7 +214,7 @@ class webrtc_engine : public SignalingClientObserver,
   void CreateOfferIceRestart();   // 同 PC 上 ICE 重启（复用旧候选，新 ufrag）
   void ReconnectImpl();           // reconnect 命令的 signaling 线程实现
   void ReleasePeerConnection();   // 只拆 PC/DC，保留 factory 与通话身份
-  void ReconnectAsOfferer();      // 释放旧 PC 后按本端 mode 重建并发起新 offer
+  void RebuildAndOffer();         // 释放旧 PC 后按本端 mode 重建并发起新 offer（命令方对称）
   void SetRemoteOffer(const std::string& sdp);
   void SetRemoteAnswer(const std::string& sdp);
   void AddRemoteCandidate(const std::string& candidate,
@@ -221,10 +227,15 @@ class webrtc_engine : public SignalingClientObserver,
   void StopVideoImpl();
   void VideoOnImpl();
   void VideoOffImpl();
+  void SetBitrateImpl(int max_kbps);
+  void SetFramerateImpl(int fps);
+  void SetDegradationImpl(const std::string& mode);
+  void GetVideoStatusImpl();
   void TriggerRenegotiation();      // 命令方直接 CreateOffer（对称重协商）
   void CreateVideoTrack();          // 懒创建合成源 + VideoTrack
-  void AddVideoTrackToPc();         // AddTrack 到当前 PC
-  void RemoveVideoTrackFromPc();    // RemoveTrack + 释放 track/sender
+  bool AddVideoTrackToPc();         // AddTrack 到当前 PC（返回成败）
+  bool RemoveVideoTrackFromPc();    // RemoveTrack + 释放 track/sender（返回成败）
+  bool ApplyRtpParameters();        // 用当前 video_params_ 调 video_sender_->SetParameters
 
   std::unique_ptr<webrtc::Thread> signaling_thread_;
   std::unique_ptr<webrtc::Thread> worker_thread_;
@@ -244,10 +255,17 @@ class webrtc_engine : public SignalingClientObserver,
 
   // 视频（第一阶段）
   bool video_enabled_ = false;
+  bool video_switch_in_progress_ = false;  // video_on/off 重协商进行中
   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;
   webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
   webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender_;
   std::unique_ptr<webrtc::VideoSinkInterface<webrtc::VideoFrame>> remote_video_sink_;
+  // 当前视频参数（供 get_video_status 回显 + SetParameters 应用）
+  int video_width_ = 640;
+  int video_height_ = 480;
+  int video_fps_ = 30;
+  int video_bitrate_kbps_ = 0;   // 0 = 不设上限
+  std::string video_degradation_ = "balanced";
 
   bool signed_in_ = false;
   int my_id_ = -1;
