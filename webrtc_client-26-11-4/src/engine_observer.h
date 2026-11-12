@@ -168,6 +168,14 @@ struct EngineObserver {
   virtual void OnIceSwitched(bool success) {}
   // ICE 重连结果（success=true 表示复用旧候选重新连通）。
   virtual void OnReconnected(bool success) {}
+
+  // 视频（第一阶段）
+  // 本端视频开关状态变化（true=已开，false=已关）。
+  virtual void OnVideoStateChanged(bool enabled) {}
+  // 收到远端视频轨（远端开始发视频）。
+  virtual void OnRemoteVideoStarted() {}
+  // 远端视频轨移除（远端停止发视频）。
+  virtual void OnRemoteVideoStopped() {}
 };
 
 #endif  // APPS_PEERCONNECTION_WEBRTC_CLIENT_ENGINE_OBSERVER_H_

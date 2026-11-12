@@ -2,11 +2,14 @@
 
 #include <map>
 
+#include "api/audio/audio_device.h"
+#include "api/audio/create_audio_device_module.h"
 #include "api/create_modular_peer_connection_factory.h"
 #include "api/environment/environment.h"
 #include "api/environment/environment_factory.h"
 #include "api/field_trials.h"
 #include "api/stats/rtcstats_objects.h"
+#include "media_source.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 
@@ -202,6 +205,142 @@ void webrtc_engine::ReconnectImpl() {
   }
 }
 
+// 视频开关（第一阶段：合成测试图源；空闲时开，通话中暂不支持）。
+void webrtc_engine::StartVideo() {
+  if (!signaling_thread_) {
+    return;
+  }
+  if (signaling_thread_->IsCurrent()) {
+    StartVideoImpl();
+    return;
+  }
+  signaling_thread_->BlockingCall([&] { StartVideoImpl(); });
+}
+
+void webrtc_engine::StopVideo() {
+  if (!signaling_thread_) {
+    return;
+  }
+  if (signaling_thread_->IsCurrent()) {
+    StopVideoImpl();
+    return;
+  }
+  signaling_thread_->BlockingCall([&] { StopVideoImpl(); });
+}
+
+void webrtc_engine::StartVideoImpl() {
+  video_enabled_ = true;
+  RTC_LOG(LS_INFO) << "StartVideo";
+  if (engine_observer_) {
+    engine_observer_->OnVideoStateChanged(true);
+  }
+}
+
+void webrtc_engine::StopVideoImpl() {
+  video_enabled_ = false;
+  RemoveVideoTrackFromPc();
+  RTC_LOG(LS_INFO) << "StopVideo";
+  if (engine_observer_) {
+    engine_observer_->OnVideoStateChanged(false);
+  }
+}
+
+// 通话中开视频轨（AddTrack + 重新 offer/answer）。
+void webrtc_engine::VideoOn() {
+  if (!signaling_thread_) {
+    return;
+  }
+  if (signaling_thread_->IsCurrent()) {
+    VideoOnImpl();
+    return;
+  }
+  signaling_thread_->BlockingCall([&] { VideoOnImpl(); });
+}
+
+// 通话中关视频轨（RemoveTrack + 重新 offer/answer）。
+void webrtc_engine::VideoOff() {
+  if (!signaling_thread_) {
+    return;
+  }
+  if (signaling_thread_->IsCurrent()) {
+    VideoOffImpl();
+    return;
+  }
+  signaling_thread_->BlockingCall([&] { VideoOffImpl(); });
+}
+
+void webrtc_engine::VideoOnImpl() {
+  video_enabled_ = true;
+  AddVideoTrackToPc();
+  TriggerRenegotiation();
+  RTC_LOG(LS_INFO) << "VideoOn";
+  if (engine_observer_) {
+    engine_observer_->OnVideoStateChanged(true);
+  }
+}
+
+void webrtc_engine::VideoOffImpl() {
+  video_enabled_ = false;
+  RemoveVideoTrackFromPc();
+  TriggerRenegotiation();
+  RTC_LOG(LS_INFO) << "VideoOff";
+  if (engine_observer_) {
+    engine_observer_->OnVideoStateChanged(false);
+  }
+}
+
+// 通用重协商触发：谁改轨谁 CreateOffer（对称重协商，双方都能 offer）。
+void webrtc_engine::TriggerRenegotiation() {
+  renegotiating_ = true;
+  CreateOffer();
+}
+
+// 懒创建合成视频源 + VideoTrack（源可跨 PC 重建复用，track 每 PC 重建）。
+void webrtc_engine::CreateVideoTrack() {
+  if (video_track_) {
+    return;
+  }
+  if (!video_source_) {
+    if (!environment_) {
+      RTC_LOG(LS_ERROR) << "CreateVideoTrack: environment not ready";
+      return;
+    }
+    video_source_ = webrtc_media::CreateSyntheticVideoSource(environment_->task_queue_factory());
+    if (!video_source_) {
+      RTC_LOG(LS_ERROR) << "CreateVideoTrack: failed to create source";
+      return;
+    }
+  }
+  if (!peer_connection_factory_) {
+    RTC_LOG(LS_WARNING) << "CreateVideoTrack: factory not created";
+    return;
+  }
+  video_track_ = peer_connection_factory_->CreateVideoTrack(video_source_, "video");
+  RTC_LOG(LS_INFO) << "VideoTrack created";
+}
+
+void webrtc_engine::AddVideoTrackToPc() {
+  CreateVideoTrack();
+  if (!peer_connection_ || !video_track_) {
+    return;
+  }
+  auto result = peer_connection_->AddTrack(video_track_, {"stream"});
+  if (result.ok()) {
+    video_sender_ = result.value();
+    RTC_LOG(LS_INFO) << "Video track added to PC";
+  } else {
+    RTC_LOG(LS_ERROR) << "AddTrack failed: " << result.error().message();
+  }
+}
+
+void webrtc_engine::RemoveVideoTrackFromPc() {
+  if (peer_connection_ && video_sender_) {
+    peer_connection_->RemoveTrackOrError(video_sender_);
+  }
+  video_sender_ = nullptr;
+  video_track_ = nullptr;
+}
+
 // ============================================================================
 //  公共 API（BlockingCall marshal 到 signaling 线程）
 // ============================================================================
@@ -300,14 +439,23 @@ bool webrtc_engine::InitializePeerConnectionFactoryImpl() {
     return true;
   }
   InitializeSSL();
-  Environment environment =
-      CreateEnvironment(std::make_unique<FieldTrials>(""));
+  environment_ = CreateEnvironment(std::make_unique<FieldTrials>(""));
   PeerConnectionFactoryDependencies deps;
   deps.signaling_thread = signaling_thread_.get();
   deps.network_thread = network_thread_.get();
   deps.worker_thread = worker_thread_.get();
-  deps.env = environment;
-  deps.adm = nullptr;
+  deps.env = *environment_;
+  // dummy ADM（视频-only，headless 无音频设备，避免 ALSA 阻塞），须在 worker 线程创建。
+  deps.adm = worker_thread_->BlockingCall(
+      [this]() -> scoped_refptr<AudioDeviceModule> {
+        auto adm = CreateAudioDeviceModule(*environment_,
+                                           AudioDeviceModule::kDummyAudio);
+        if (adm) {
+          adm->Init();
+        }
+        return adm;
+      });
+  webrtc_media::ConfigureVideoCodecs(deps);
   peer_connection_factory_ =
       CreateModularPeerConnectionFactory(std::move(deps));
   if (!peer_connection_factory_) {
@@ -381,6 +529,9 @@ void webrtc_engine::StartCallImpl(int peer_id) {
   if (!CreateDataChannelImpl()) {
     return;
   }
+  if (video_enabled_) {
+    AddVideoTrackToPc();  // 建 offer 前加视频轨，offer 才含视频 m-line
+  }
   CreateOffer();
 }
 
@@ -417,7 +568,7 @@ void webrtc_engine::SetRemoteOffer(const std::string& sdp) {
     return;
   }
   peer_connection_->SetRemoteDescription(
-      std::move(desc), make_ref_counted<SetRemoteObserver>(this));
+      std::move(desc), make_ref_counted<SetRemoteObserver>(this, true));
 }
 
 void webrtc_engine::SetRemoteAnswer(const std::string& sdp) {
@@ -428,7 +579,7 @@ void webrtc_engine::SetRemoteAnswer(const std::string& sdp) {
     return;
   }
   peer_connection_->SetRemoteDescription(
-      std::move(desc), make_ref_counted<SetRemoteObserver>(this));
+      std::move(desc), make_ref_counted<SetRemoteObserver>(this, false));
 }
 
 void webrtc_engine::AddRemoteCandidate(const std::string& candidate,
@@ -456,6 +607,10 @@ void webrtc_engine::ClosePeerConnection() {
     peer_connection_ = nullptr;
   }
   peer_connection_factory_ = nullptr;
+  video_source_ = nullptr;   // 全拆：视频源也释放（frame generator 停）
+  video_track_ = nullptr;
+  video_sender_ = nullptr;
+  remote_video_sink_.reset();
   peer_id_ = -1;
   is_offerer_ = false;
   is_connected_ = false;
@@ -469,6 +624,9 @@ void webrtc_engine::ReleasePeerConnection() {
     peer_connection_->Close();
     peer_connection_ = nullptr;
   }
+  video_track_ = nullptr;   // track 随 PC 走，重建后重加（source 复用）
+  video_sender_ = nullptr;
+  remote_video_sink_.reset();
   is_connected_ = false;
   data_channel_open_ = false;
 }
@@ -486,6 +644,9 @@ void webrtc_engine::ReconnectAsOfferer() {
     if (engine_observer_) engine_observer_->OnIceSwitched(false);
     signaling_client_.Leave();
     return;
+  }
+  if (video_enabled_) {
+    AddVideoTrackToPc();  // 重建后补回视频轨
   }
   CreateOffer();
 }
@@ -568,6 +729,9 @@ void webrtc_engine::OnSignalCall(int from, const std::string& sdp) {
   }
   if (!CreatePeerConnectionImpl()) {
     return;
+  }
+  if (video_enabled_) {
+    AddVideoTrackToPc();  // 建 answer 前加视频轨
   }
   SetRemoteOffer(sdp);
 }
@@ -662,6 +826,9 @@ void webrtc_engine::OnSignalReoffer(int from, const std::string& sdp) {
       return;
     }
   }
+  if (video_enabled_ && !video_track_) {
+    AddVideoTrackToPc();  // 重建后补回视频轨（answer 前）
+  }
   if (engine_observer_) {
     engine_observer_->OnRemoteSdp("offer", sdp);
   }
@@ -683,6 +850,33 @@ void webrtc_engine::OnDataChannel(
   RTC_LOG(LS_INFO) << "OnDataChannel";
   data_channel_ = data_channel;
   data_channel_->RegisterObserver(this);
+}
+
+void webrtc_engine::OnAddTrack(
+    scoped_refptr<RtpReceiverInterface> receiver,
+    const std::vector<scoped_refptr<MediaStreamInterface>>& streams) {
+  auto track = receiver->track();
+  if (!track || track->kind() != MediaStreamTrackInterface::kVideoKind) {
+    return;
+  }
+  RTC_LOG(LS_INFO) << "OnAddTrack: remote video";
+  auto* video_track = static_cast<VideoTrackInterface*>(track.get());
+  remote_video_sink_ = webrtc_media::CreateRemoteVideoFrameCounter();
+  video_track->AddOrUpdateSink(remote_video_sink_.get(), VideoSinkWants());
+  if (engine_observer_) {
+    engine_observer_->OnRemoteVideoStarted();
+  }
+}
+
+void webrtc_engine::OnRemoveTrack(scoped_refptr<RtpReceiverInterface> receiver) {
+  auto track = receiver->track();
+  if (track && track->kind() == MediaStreamTrackInterface::kVideoKind) {
+    RTC_LOG(LS_INFO) << "OnRemoveTrack: remote video";
+    remote_video_sink_.reset();
+    if (engine_observer_) {
+      engine_observer_->OnRemoteVideoStopped();
+    }
+  }
 }
 
 void webrtc_engine::OnIceGatheringChange(
@@ -774,14 +968,16 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
   RTC_LOG(LS_INFO) << "Local SDP created (type=" << desc->GetType() << ")";
   std::string sdp;
   desc->ToString(&sdp);
-  std::string type = engine_->is_offerer_ ? "offer" : "answer";
+  // 对称重协商：以产出的 SDP 类型（offer/answer）决定发什么，而非 is_offerer_。
+  const bool is_offer = (desc->GetType() == SdpType::kOffer);
+  std::string type = is_offer ? "offer" : "answer";
   if (engine_->engine_observer_) {
     engine_->engine_observer_->OnLocalSdp(type, sdp);
   }
   engine_->peer_connection_->SetLocalDescription(
       std::unique_ptr<SessionDescriptionInterface>(desc),
       make_ref_counted<SetLocalObserver>(engine_));
-  if (engine_->is_offerer_) {
+  if (is_offer) {
     if (engine_->renegotiating_) {
       engine_->signaling_client_.SendReoffer(engine_->peer_id_, sdp);
     } else {
@@ -789,7 +985,7 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
     }
   } else {
     engine_->signaling_client_.Answer(engine_->peer_id_, sdp);
-    // answerer 发出 answer 即 ICE 重启协商完成
+    // 答方发出 answer 即 ICE 重启协商完成
     if (engine_->reconnect_in_progress_) {
       engine_->reconnect_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
@@ -828,11 +1024,11 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
     RTCError error) {
   if (error.ok()) {
     RTC_LOG(LS_INFO) << "SetRemoteDescription OK";
-    if (!engine_->is_offerer_) {
-      // 答方：设完远端 offer 后生成 answer
+    if (is_offer_) {
+      // 收的是 offer → 生成 answer
       engine_->CreateAnswer();
     } else if (engine_->reconnect_in_progress_) {
-      // offerer 收到答案（ICE 重启协商完成）
+      // 收的是 answer（ICE 重启协商完成）
       engine_->reconnect_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnReconnected(true);
     }

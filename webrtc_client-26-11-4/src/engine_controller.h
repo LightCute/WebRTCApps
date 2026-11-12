@@ -46,6 +46,9 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   void OnSignalReconnect(int from) override;
   void OnIceSwitched(bool success) override;
   void OnReconnected(bool success) override;
+  void OnVideoStateChanged(bool enabled) override;
+  void OnRemoteVideoStarted() override;
+  void OnRemoteVideoStopped() override;
 
  private:
   void HandleCommand(const std::string& line);  // signaling 线程执行

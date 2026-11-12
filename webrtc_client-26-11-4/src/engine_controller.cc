@@ -29,6 +29,8 @@ const char* const kCommands[] = {
     "set_ice_transports <mode>",   "switch_ice <mode>",
     "reconnect",
     "get_ice_config",
+    "start_video",                  "stop_video",
+    "video_on",                     "video_off",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -374,6 +376,20 @@ void EngineController::OnReconnected(bool success) {
   Send(SerializeJson(v));
 }
 
+void EngineController::OnVideoStateChanged(bool enabled) {
+  Json::Value v = Event("video.state");
+  v["enabled"] = enabled;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnRemoteVideoStarted() {
+  Send(SerializeJson(Event("remote_video.started")));
+}
+
+void EngineController::OnRemoteVideoStopped() {
+  Send(SerializeJson(Event("remote_video.stopped")));
+}
+
 // ===== 命令处理（signaling 线程）=====
 
 void EngineController::HandleCommand(const std::string& line) {
@@ -526,6 +542,30 @@ void EngineController::HandleCommand(const std::string& line) {
       return;
     }
     engine_->Reconnect();
+  } else if (cmd == "start_video") {
+    if (engine_->is_connected() || engine_->peer_id() > 0) {
+      SendError("already_in_call", "already in a call");
+      return;
+    }
+    engine_->StartVideo();
+  } else if (cmd == "stop_video") {
+    if (engine_->is_connected() || engine_->peer_id() > 0) {
+      SendError("already_in_call", "already in a call");
+      return;
+    }
+    engine_->StopVideo();
+  } else if (cmd == "video_on") {
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->VideoOn();
+  } else if (cmd == "video_off") {
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->VideoOff();
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

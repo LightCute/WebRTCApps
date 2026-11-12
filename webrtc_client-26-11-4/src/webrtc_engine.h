@@ -2,19 +2,26 @@
 #define APPS_PEERCONNECTION_WEBRTC_CLIENT_WEBRTC_ENGINE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "api/data_channel_interface.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
+#include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
+#include "api/rtp_receiver_interface.h"
+#include "api/rtp_sender_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/set_local_description_observer_interface.h"
 #include "api/stats/rtc_stats_collector_callback.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/set_remote_description_observer_interface.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_sink_interface.h"
+#include "api/video/video_source_interface.h"
 #include "engine_observer.h"
 #include "ice_config.h"
 #include "rtc_base/thread.h"
@@ -56,6 +63,13 @@ class webrtc_engine : public SignalingClientObserver,
   void SwitchIce(const std::string& mode);
   // 通话中手动触发 ICE 重启（复用旧候选，不重建 PC、不改 mode）。
   void Reconnect();
+  // 视频开关（第一阶段：合成测试图源，空闲时用，通话中暂不支持）。
+  void StartVideo();
+  void StopVideo();
+  // 通话中开/关本端视频轨（AddTrack/RemoveTrack + 重新 offer/answer）。
+  void VideoOn();
+  void VideoOff();
+  bool video_enabled() const { return video_enabled_; }
   // 当前 ICE 配置（供前端回显）。
   const IceConfig& ice_config() const { return ice_config_; }
 
@@ -115,6 +129,12 @@ class webrtc_engine : public SignalingClientObserver,
       webrtc::PeerConnectionInterface::SignalingState new_state) override;
   void OnDataChannel(
       webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override;
+  void OnAddTrack(
+      webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+      const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+          streams) override;
+  void OnRemoveTrack(
+      webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) override;
   void OnIceGatheringChange(
       webrtc::PeerConnectionInterface::IceGatheringState new_state) override;
   void OnIceConnectionChange(
@@ -150,15 +170,17 @@ class webrtc_engine : public SignalingClientObserver,
     webrtc_engine* engine_;
   };
 
-  // SetRemoteDescription 回调（每次新建）
+  // SetRemoteDescription 回调（每次新建；is_offer 区分收的是 offer 还是 answer）
   class SetRemoteObserver
       : public webrtc::SetRemoteDescriptionObserverInterface {
    public:
-    explicit SetRemoteObserver(webrtc_engine* engine) : engine_(engine) {}
+    SetRemoteObserver(webrtc_engine* engine, bool is_offer)
+        : engine_(engine), is_offer_(is_offer) {}
     void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override;
 
    private:
     webrtc_engine* engine_;
+    bool is_offer_;
   };
 
   // GetStats 回调：携带已采集的 DataChannel 快照，收到 RTCStatsReport 后补齐
@@ -194,12 +216,23 @@ class webrtc_engine : public SignalingClientObserver,
   void ClosePeerConnection();
   void RequestStatsImpl();
   void CollectDataChannelStatsImpl(EngineStats::DataChannelInfo* out);
+  // 视频（第一阶段：合成测试图源）
+  void StartVideoImpl();
+  void StopVideoImpl();
+  void VideoOnImpl();
+  void VideoOffImpl();
+  void TriggerRenegotiation();      // 命令方直接 CreateOffer（对称重协商）
+  void CreateVideoTrack();          // 懒创建合成源 + VideoTrack
+  void AddVideoTrackToPc();         // AddTrack 到当前 PC
+  void RemoveVideoTrackFromPc();    // RemoveTrack + 释放 track/sender
 
   std::unique_ptr<webrtc::Thread> signaling_thread_;
   std::unique_ptr<webrtc::Thread> worker_thread_;
   std::unique_ptr<webrtc::Thread> network_thread_;
 
   WebSocketSignalingClient signaling_client_;
+
+  std::optional<webrtc::Environment> environment_;  // 供合成视频源取 task_queue_factory
 
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
       peer_connection_factory_;
@@ -208,6 +241,13 @@ class webrtc_engine : public SignalingClientObserver,
   webrtc::PeerConnectionInterface::RTCConfiguration rtc_configuration_;
   IceConfig ice_config_;  // 当前 ICE 配置（mode 可变，server 固定）
   webrtc::scoped_refptr<CreateSdpObserver> sdp_observer_;
+
+  // 视频（第一阶段）
+  bool video_enabled_ = false;
+  webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> video_source_;
+  webrtc::scoped_refptr<webrtc::VideoTrackInterface> video_track_;
+  webrtc::scoped_refptr<webrtc::RtpSenderInterface> video_sender_;
+  std::unique_ptr<webrtc::VideoSinkInterface<webrtc::VideoFrame>> remote_video_sink_;
 
   bool signed_in_ = false;
   int my_id_ = -1;
