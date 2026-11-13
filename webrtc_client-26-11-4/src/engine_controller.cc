@@ -33,6 +33,10 @@ const char* const kCommands[] = {
     "video_on",                     "video_off",
     "set_bitrate <kbps>",           "set_framerate <fps>",
     "set_degradation <mode>",       "get_video_status",
+    "get_video_devices",            "set_video_device <id>",
+    "get_video_device_capabilities <id>",
+    "set_video_profile <w> <h> <fps>",
+    "set_video_stats <on|off> [interval_ms]", "request_keyframe",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -391,15 +395,151 @@ void EngineController::OnVideoSwitched(bool enabled, bool success) {
   Send(SerializeJson(v));
 }
 
-void EngineController::OnVideoStatus(int width, int height, int fps,
-                                     int bitrate_kbps,
-                                     const std::string& degradation) {
+void EngineController::OnVideoState(const VideoState& state) {
   Json::Value v = Event("video_params");
+  // 开关 / 通话状态
+  v["enabled"] = state.enabled;
+  v["in_call"] = state.in_call;
+  // 当前设备
+  v["device_id"] = state.device_id;
+  v["device_name"] = state.device_name;
+  v["device_synthetic"] = state.device_synthetic;
+  // 采集档位 + 实际生效格式
+  v["capture_width"] = state.capture_width;
+  v["capture_height"] = state.capture_height;
+  v["capture_fps"] = state.capture_fps;
+  v["capture_format"] = state.capture_format;
+  // 编码参数
+  v["width"] = state.encode_width;
+  v["height"] = state.encode_height;
+  v["fps"] = state.encode_fps;
+  v["bitrate_kbps"] = state.encode_bitrate_kbps;
+  v["degradation"] = state.encode_degradation;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoStats(const VideoStats& stats) {
+  Json::Value v = Event("video_stats");
+  v["width"] = stats.width;
+  v["height"] = stats.height;
+  v["fps"] = stats.fps;
+  v["target_bitrate"] = stats.target_bitrate;
+  v["bytes_sent"] = static_cast<Json::UInt64>(stats.bytes_sent);
+  v["packets_sent"] = static_cast<Json::UInt>(stats.packets_sent);
+  v["packets_lost"] = stats.packets_lost;
+  v["jitter_ms"] = stats.jitter_ms;
+  v["rtt_ms"] = stats.rtt_ms;
+  v["available_outgoing_bitrate"] = stats.available_outgoing_bitrate;
+  v["quality_limitation"] = stats.quality_limitation;
+  v["frames_encoded"] = static_cast<Json::UInt>(stats.frames_encoded);
+  v["key_frames_encoded"] = static_cast<Json::UInt>(stats.key_frames_encoded);
+  v["pli_count"] = static_cast<Json::UInt>(stats.pli_count);
+  v["nack_count"] = static_cast<Json::UInt>(stats.nack_count);
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnKeyFrameRequested(bool success) {
+  Json::Value v = Event("keyframe_requested");
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoDevices(
+    const std::vector<webrtc_media::VideoDeviceInfo>& devices,
+    const std::string& current_id) {
+  Json::Value v = Event("video_devices");
+  v["current"] = current_id;
+  Json::Value arr(Json::arrayValue);
+  for (const auto& d : devices) {
+    Json::Value e;
+    e["id"] = d.id;
+    e["name"] = d.name;
+    e["synthetic"] = d.is_synthetic;
+    e["width"] = d.width;
+    e["height"] = d.height;
+    e["fps"] = d.fps;
+    arr.append(e);
+  }
+  v["devices"] = arr;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoDeviceChanged(const std::string& id,
+                                            const std::string& name,
+                                            bool success) {
+  Json::Value v = Event("video_device");
+  v["id"] = id;
+  v["name"] = name;
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoDeviceCapabilities(
+    const std::string& id,
+    const std::vector<webrtc_media::VideoFormatCapability>& formats) {
+  Json::Value v = Event("video_device_capabilities");
+  v["id"] = id;
+  Json::Value arr(Json::arrayValue);
+  for (const auto& fmt : formats) {
+    Json::Value f;
+    f["pixel_format"] = fmt.pixel_format;
+    Json::Value sizes(Json::arrayValue);
+    for (const auto& size : fmt.sizes) {
+      Json::Value s;
+      s["width"] = size.width;
+      s["height"] = size.height;
+      Json::Value fps(Json::arrayValue);
+      for (int f2 : size.fps) {
+        fps.append(f2);
+      }
+      s["fps"] = fps;
+      // 只有「该尺寸实际会用的格式」才可选（与 set_video_profile 的校验一致）。
+      s["selectable"] =
+          (fmt.pixel_format == webrtc_media::EffectivePixelFormat(
+                                    formats, size.width, size.height));
+      sizes.append(s);
+    }
+    f["sizes"] = sizes;
+    arr.append(f);
+  }
+  v["formats"] = arr;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoProfile(int width, int height, int fps,
+                                      bool success) {
+  Json::Value v = Event("video_profile");
   v["width"] = width;
   v["height"] = height;
   v["fps"] = fps;
-  v["bitrate_kbps"] = bitrate_kbps;
-  v["degradation"] = degradation;
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoDevicesChanged(
+    const std::vector<webrtc_media::VideoDeviceInfo>& devices,
+    const std::string& current_id, const std::string& reason) {
+  Json::Value v = Event("video_devices_changed");
+  v["current"] = current_id;
+  v["reason"] = reason;
+  Json::Value arr(Json::arrayValue);
+  for (const auto& d : devices) {
+    Json::Value e;
+    e["id"] = d.id;
+    e["name"] = d.name;
+    e["synthetic"] = d.is_synthetic;
+    e["width"] = d.width;
+    e["height"] = d.height;
+    e["fps"] = d.fps;
+    arr.append(e);
+  }
+  v["devices"] = arr;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnVideoDeviceLost(const std::string& id) {
+  Json::Value v = Event("video_device_lost");
+  v["id"] = id;
   Send(SerializeJson(v));
 }
 
@@ -625,6 +765,56 @@ void EngineController::HandleCommand(const std::string& line) {
     engine_->SetDegradation(mode);
   } else if (cmd == "get_video_status") {
     engine_->GetVideoStatus();
+  } else if (cmd == "get_video_devices") {
+    engine_->GetVideoDevices();
+  } else if (cmd == "set_video_device") {
+    std::string id;
+    ss >> id;
+    if (id.empty()) {
+      SendError("usage", "usage: set_video_device <id>");
+      return;
+    }
+    if (!engine_->SetVideoDevice(id)) {
+      SendError("device_not_found", "video device not found: " + id);
+    }
+  } else if (cmd == "get_video_device_capabilities") {
+    std::string id;
+    ss >> id;
+    if (id.empty()) {
+      SendError("usage", "usage: get_video_device_capabilities <id>");
+      return;
+    }
+    if (!engine_->GetVideoDeviceCapabilities(id)) {
+      SendError("device_not_found", "video device not found: " + id);
+    }
+  } else if (cmd == "set_video_profile") {
+    int w = 0, h = 0, fps = 0;
+    ss >> w >> h >> fps;
+    if (w <= 0 || h <= 0 || fps <= 0) {
+      SendError("usage", "usage: set_video_profile <w> <h> <fps>");
+      return;
+    }
+    if (!engine_->SetVideoProfile(w, h, fps)) {
+      SendError("unsupported_profile",
+                "video device does not support " + std::to_string(w) + "x" +
+                    std::to_string(h) + "@" + std::to_string(fps));
+    }
+  } else if (cmd == "set_video_stats") {
+    std::string mode;
+    ss >> mode;
+    if (mode != "on" && mode != "off") {
+      SendError("usage", "usage: set_video_stats <on|off> [interval_ms]");
+      return;
+    }
+    int interval_ms = 0;
+    ss >> interval_ms;
+    engine_->SetVideoStats(mode == "on", interval_ms);
+  } else if (cmd == "request_keyframe") {
+    if (!engine_->is_connected() && engine_->peer_id() <= 0) {
+      SendError("not_in_call", "not in a call");
+      return;
+    }
+    engine_->RequestKeyFrame();
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

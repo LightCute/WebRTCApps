@@ -1,5 +1,6 @@
 #include "webrtc_engine.h"
 
+#include <algorithm>
 #include <map>
 
 #include "api/audio/audio_device.h"
@@ -10,7 +11,10 @@
 #include "api/field_trials.h"
 #include "api/rtp_parameters.h"
 #include "api/stats/rtcstats_objects.h"
-#include "media_source.h"
+#include "media/video_codec.h"
+#include "media/video_device.h"
+#include "media/video_device_monitor.h"
+#include "media/video_source.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
 
@@ -66,11 +70,38 @@ bool webrtc_engine::Start() {
     Stop();
     return false;
   }
+
+  // 设备基线（热插拔对比用），必须在启动监听前建立，否则首次变化会被误判为“新增”。
+  known_device_ids_.clear();
+  for (const auto& dev : webrtc_media::EnumerateVideoDevices()) {
+    known_device_ids_.push_back(dev.id);
+  }
+
+  // 视频设备热插拔监听（netlink uevent）。回调 marshal 到 signaling 线程。
+  device_monitor_ = std::make_unique<webrtc_media::VideoDeviceMonitor>();
+  if (!device_monitor_->Start(
+          [this](const std::vector<webrtc_media::VideoDeviceInfo>& devices) {
+            if (!signaling_thread_) {
+              return;
+            }
+            signaling_thread_->PostTask(
+                [this, devices] { OnVideoDevicesChangedImpl(devices); });
+          })) {
+    RTC_LOG(LS_WARNING) << "VideoDeviceMonitor start failed";
+    device_monitor_.reset();
+  }
   return true;
 }
 
 void webrtc_engine::Stop() {
-  // 先清理 WebRTC 对象（PC/DC/factory 必须在 signaling 线程销毁），再停线程。
+  // 先停周期性统计（避免线程销毁后还有延时任务回调）。
+  video_stats_enabled_ = false;
+  // 再停热插拔监听（避免拆卸过程中再回调）。
+  if (device_monitor_) {
+    device_monitor_->Stop();
+    device_monitor_.reset();
+  }
+  // 再清理 WebRTC 对象（PC/DC/factory 必须在 signaling 线程销毁），最后停线程。
   if (signaling_thread_) {
     signaling_thread_->BlockingCall([this] { ClosePeerConnection(); });
   } else {
@@ -323,11 +354,37 @@ void webrtc_engine::CreateVideoTrack() {
       RTC_LOG(LS_ERROR) << "CreateVideoTrack: environment not ready";
       return;
     }
-    video_source_ = webrtc_media::CreateSyntheticVideoSource(environment_->task_queue_factory());
+    // 选设备：指定的 > 第一个真实设备 > 第一个合成设备。
+    webrtc_media::VideoDeviceInfo dev;
+    if (pending_device_id_.empty() ||
+        !webrtc_media::FindVideoDevice(pending_device_id_, &dev)) {
+      auto devices = webrtc_media::EnumerateVideoDevices();
+      if (devices.empty()) {
+        RTC_LOG(LS_ERROR) << "CreateVideoTrack: no video device available";
+        return;
+      }
+      dev = devices.front();
+    }
+    // 采集档位：用户显式设置过就沿用，否则跟随设备默认值。
+    if (!capture_profile_explicit_) {
+      capture_width_ = dev.width;
+      capture_height_ = dev.height;
+      capture_fps_ = dev.fps;
+    } else {
+      dev.width = capture_width_;
+      dev.height = capture_height_;
+      dev.fps = capture_fps_;
+    }
+    video_source_ =
+        webrtc_media::CreateVideoSource(dev, environment_->task_queue_factory());
     if (!video_source_) {
-      RTC_LOG(LS_ERROR) << "CreateVideoTrack: failed to create source";
+      RTC_LOG(LS_ERROR) << "CreateVideoTrack: failed to create source for "
+                        << dev.id;
       return;
     }
+    current_device_id_ = dev.id;
+    pending_device_id_ = dev.id;
+    RTC_LOG(LS_INFO) << "Video source created with device: " << dev.id;
   }
   if (!peer_connection_factory_) {
     RTC_LOG(LS_WARNING) << "CreateVideoTrack: factory not created";
@@ -393,6 +450,354 @@ void webrtc_engine::GetVideoStatus() {
   signaling_thread_->BlockingCall([&] { GetVideoStatusImpl(); });
 }
 
+// ============================================================================
+//  视频设备：枚举 / 选择 / 通话中切换
+// ============================================================================
+
+void webrtc_engine::GetVideoDevices() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { GetVideoDevicesImpl(); return; }
+  signaling_thread_->BlockingCall([&] { GetVideoDevicesImpl(); });
+}
+
+bool webrtc_engine::SetVideoDevice(const std::string& id) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return SetVideoDeviceImpl(id);
+  bool ok = false;
+  signaling_thread_->BlockingCall([&] { ok = SetVideoDeviceImpl(id); });
+  return ok;
+}
+
+void webrtc_engine::GetVideoDevicesImpl() {
+  auto devices = webrtc_media::EnumerateVideoDevices();
+  // 还没建源时，回显「默认会选的设备」（第一个真实设备，没有则合成设备）。
+  std::string current = current_device_id_;
+  if (current.empty() && !devices.empty()) {
+    current = devices.front().id;
+  }
+  if (engine_observer_) {
+    engine_observer_->OnVideoDevices(devices, current);
+  }
+}
+
+bool webrtc_engine::SetVideoDeviceImpl(const std::string& id) {
+  webrtc_media::VideoDeviceInfo dev;
+  if (!webrtc_media::FindVideoDevice(id, &dev)) {
+    RTC_LOG(LS_WARNING) << "SetVideoDevice: not found: " << id;
+    return false;
+  }
+  if (!video_source_) {
+    // 空闲：记住，下次建源生效。
+    pending_device_id_ = id;
+    current_device_id_ = id;
+    capture_width_ = dev.width;
+    capture_height_ = dev.height;
+    capture_fps_ = dev.fps;
+    capture_profile_explicit_ = false;
+    RTC_LOG(LS_INFO) << "SetVideoDevice (idle): " << id;
+    if (engine_observer_) {
+      engine_observer_->OnVideoDeviceChanged(id, dev.name, true);
+    }
+    GetVideoStatusImpl();  // 回显当前设备/档位
+    return true;
+  }
+  // 通话中（或已建源）：在本线程切换 capturer（不重协商）。
+  // 注意：必须在**创建 capturer 的同一线程**销毁旧 capturer ——
+  // VideoCaptureModuleV4L2 的 StopCapture() 有 RTC_DCHECK_RUN_ON(api_checker_)，
+  // 换线程会直接 abort。capturer 都在 signaling 线程创建，故此处不能用
+  // worker_thread_->BlockingCall。
+  bool ok = webrtc_media::SwitchVideoSourceDevice(video_source_.get(), dev);
+  if (ok) {
+    pending_device_id_ = id;
+    current_device_id_ = id;
+    // 换设备后采集档位跟随新设备默认值。
+    capture_width_ = dev.width;
+    capture_height_ = dev.height;
+    capture_fps_ = dev.fps;
+    capture_profile_explicit_ = false;
+  }
+  RTC_LOG(LS_INFO) << "SetVideoDevice: " << id << " ok=" << ok;
+  if (engine_observer_) {
+    engine_observer_->OnVideoDeviceChanged(
+        ok ? id : current_device_id_, dev.name, ok);
+  }
+  GetVideoStatusImpl();  // 回显当前设备/档位
+  return true;
+}
+
+bool webrtc_engine::GetVideoDeviceCapabilities(const std::string& id) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return GetVideoDeviceCapabilitiesImpl(id);
+  bool ok = false;
+  signaling_thread_->BlockingCall(
+      [&] { ok = GetVideoDeviceCapabilitiesImpl(id); });
+  return ok;
+}
+
+bool webrtc_engine::GetVideoDeviceCapabilitiesImpl(const std::string& id) {
+  webrtc_media::VideoDeviceInfo dev;
+  if (!webrtc_media::FindVideoDevice(id, &dev)) {
+    RTC_LOG(LS_WARNING) << "GetVideoDeviceCapabilities: not found: " << id;
+    return false;
+  }
+  auto caps = webrtc_media::GetVideoDeviceCapabilities(dev);
+  if (engine_observer_) {
+    engine_observer_->OnVideoDeviceCapabilities(id, caps);
+  }
+  return true;
+}
+
+bool webrtc_engine::SetVideoProfile(int width, int height, int fps) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return SetVideoProfileImpl(width, height, fps);
+  bool ok = false;
+  signaling_thread_->BlockingCall(
+      [&] { ok = SetVideoProfileImpl(width, height, fps); });
+  return ok;
+}
+
+bool webrtc_engine::SetVideoProfileImpl(int width, int height, int fps) {
+  // 目标设备：当前设备 > pending > 默认第一个设备。
+  webrtc_media::VideoDeviceInfo dev;
+  const std::string id =
+      !current_device_id_.empty() ? current_device_id_ : pending_device_id_;
+  if (id.empty() || !webrtc_media::FindVideoDevice(id, &dev)) {
+    auto devices = webrtc_media::EnumerateVideoDevices();
+    if (devices.empty()) {
+      return false;
+    }
+    dev = devices.front();
+  }
+  // 校验：该设备的采集能力必须覆盖 尺寸+帧率。
+  auto caps = webrtc_media::GetVideoDeviceCapabilities(dev);
+  if (!webrtc_media::IsProfileSupported(caps, width, height, fps)) {
+    RTC_LOG(LS_WARNING) << "SetVideoProfile: unsupported " << width << "x"
+                        << height << "@" << fps << " on " << dev.id;
+    return false;
+  }
+
+  if (!video_source_) {
+    // 空闲：记住，下次建源生效。
+    capture_width_ = width;
+    capture_height_ = height;
+    capture_fps_ = fps;
+    capture_profile_explicit_ = true;
+    RTC_LOG(LS_INFO) << "SetVideoProfile (idle): " << width << "x" << height
+                     << "@" << fps;
+    if (engine_observer_) {
+      engine_observer_->OnVideoProfile(width, height, fps, true);
+    }
+    return true;
+  }
+
+  webrtc_media::VideoDeviceInfo target = dev;
+  target.width = width;
+  target.height = height;
+  target.fps = fps;
+  const bool ok =
+      webrtc_media::SwitchVideoSourceDevice(video_source_.get(), target);
+  if (ok) {
+    capture_width_ = width;
+    capture_height_ = height;
+    capture_fps_ = fps;
+    capture_profile_explicit_ = true;
+  }
+  RTC_LOG(LS_INFO) << "SetVideoProfile: " << width << "x" << height << "@" << fps
+                   << " ok=" << ok;
+  if (engine_observer_) {
+    engine_observer_->OnVideoProfile(width, height, fps, ok);
+  }
+  return true;
+}
+
+// ============================================================================
+//  周期性视频统计
+// ============================================================================
+
+void webrtc_engine::SetVideoStats(bool enabled, int interval_ms) {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { SetVideoStatsImpl(enabled, interval_ms); return; }
+  signaling_thread_->BlockingCall([&] { SetVideoStatsImpl(enabled, interval_ms); });
+}
+
+void webrtc_engine::SetVideoStatsImpl(bool enabled, int interval_ms) {
+  video_stats_enabled_ = enabled;
+  if (interval_ms > 0) {
+    video_stats_interval_ms_ = std::clamp(interval_ms, 500, 10000);
+  }
+  RTC_LOG(LS_INFO) << "SetVideoStats enabled=" << enabled
+                   << " interval_ms=" << video_stats_interval_ms_;
+  if (enabled) {
+    ScheduleVideoStats();
+  }
+  GetVideoStatusImpl();
+}
+
+void webrtc_engine::ScheduleVideoStats() {
+  if (!video_stats_enabled_ || !signaling_thread_) {
+    return;
+  }
+  signaling_thread_->PostDelayedTask(
+      [this] { CollectVideoStats(); },
+      webrtc::TimeDelta::Millis(video_stats_interval_ms_));
+}
+
+void webrtc_engine::CollectVideoStats() {
+  if (!video_stats_enabled_) {
+    return;  // 已关闭，停止自续期
+  }
+  if (!peer_connection_ || !video_enabled_) {
+    ScheduleVideoStats();  // 不在通话/视频关：稍后再试
+    return;
+  }
+  peer_connection_->GetStats(make_ref_counted<VideoStatsCollector>(this).get());
+}
+
+void webrtc_engine::VideoStatsCollector::OnStatsDelivered(
+    const scoped_refptr<const RTCStatsReport>& report) {
+  VideoStats stats;
+  if (report) {
+    for (const auto* s : report->GetStatsOfType<RTCOutboundRtpStreamStats>()) {
+      if (s->kind && *s->kind == "video") {
+        if (s->frame_width) stats.width = static_cast<int>(*s->frame_width);
+        if (s->frame_height) stats.height = static_cast<int>(*s->frame_height);
+        if (s->frames_per_second) stats.fps = *s->frames_per_second;
+        if (s->target_bitrate) stats.target_bitrate = *s->target_bitrate;
+        if (s->bytes_sent) stats.bytes_sent = *s->bytes_sent;
+        if (s->packets_sent) stats.packets_sent = *s->packets_sent;
+        if (s->frames_encoded) stats.frames_encoded = *s->frames_encoded;
+        if (s->key_frames_encoded) stats.key_frames_encoded = *s->key_frames_encoded;
+        if (s->quality_limitation_reason)
+          stats.quality_limitation = *s->quality_limitation_reason;
+        if (s->pli_count) stats.pli_count = *s->pli_count;
+        if (s->nack_count) stats.nack_count = *s->nack_count;
+        break;
+      }
+    }
+    for (const auto* s : report->GetStatsOfType<RTCRemoteInboundRtpStreamStats>()) {
+      if (s->kind && *s->kind == "video") {
+        if (s->packets_lost) stats.packets_lost = *s->packets_lost;
+        if (s->jitter) stats.jitter_ms = *s->jitter * 1000.0;
+        break;
+      }
+    }
+    // 活跃候选对（与 StatsCollector 同口径）。
+    const RTCIceCandidatePairStats* active = nullptr;
+    for (const auto* p : report->GetStatsOfType<RTCIceCandidatePairStats>()) {
+      if (!active && p->writable && *p->writable) {
+        active = p;
+      }
+      if (p->nominated && *p->nominated && p->writable && *p->writable) {
+        active = p;
+        break;
+      }
+    }
+    if (active) {
+      if (active->current_round_trip_time) {
+        stats.rtt_ms = *active->current_round_trip_time * 1000.0;
+      }
+      if (active->available_outgoing_bitrate) {
+        stats.available_outgoing_bitrate = *active->available_outgoing_bitrate;
+      }
+    }
+  }
+  if (engine_ && engine_->engine_observer_) {
+    engine_->engine_observer_->OnVideoStats(stats);
+  }
+  if (engine_) {
+    engine_->ScheduleVideoStats();  // 预约下一次
+  }
+}
+
+// ============================================================================
+//  强制关键帧
+// ============================================================================
+
+bool webrtc_engine::RequestKeyFrame() {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return RequestKeyFrameImpl();
+  bool ok = false;
+  signaling_thread_->BlockingCall([&] { ok = RequestKeyFrameImpl(); });
+  return ok;
+}
+
+bool webrtc_engine::RequestKeyFrameImpl() {
+  if (!video_sender_) {
+    RTC_LOG(LS_WARNING) << "RequestKeyFrame: no video sender";
+    if (engine_observer_) engine_observer_->OnKeyFrameRequested(false);
+    return false;
+  }
+  const RTCError err = video_sender_->GenerateKeyFrame({});
+  const bool ok = err.ok();
+  RTC_LOG(LS_INFO) << "RequestKeyFrame ok=" << ok;
+  if (engine_observer_) engine_observer_->OnKeyFrameRequested(ok);
+  return ok;
+}
+
+// 热插拔：设备集合变化（在 signaling 线程执行）。
+void webrtc_engine::OnVideoDevicesChangedImpl(
+    const std::vector<webrtc_media::VideoDeviceInfo>& devices) {
+  std::vector<std::string> ids;
+  ids.reserve(devices.size());
+  for (const auto& dev : devices) {
+    ids.push_back(dev.id);
+  }
+  if (ids == known_device_ids_) {
+    return;  // 无变化
+  }
+
+  // 判断是新增还是移除（双向比较；两者都有时以移除优先，因为它影响正在使用的设备）。
+  bool device_added = false;
+  bool device_removed = false;
+  for (const auto& id : ids) {
+    if (std::find(known_device_ids_.begin(), known_device_ids_.end(), id) ==
+        known_device_ids_.end()) {
+      device_added = true;
+      break;
+    }
+  }
+  for (const auto& id : known_device_ids_) {
+    if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
+      device_removed = true;
+      break;
+    }
+  }
+
+  // 当前正在使用的设备是否被拔出。
+  const std::string previous_current = current_device_id_;
+  const bool current_gone =
+      !previous_current.empty() &&
+      std::find(ids.begin(), ids.end(), previous_current) == ids.end();
+
+  known_device_ids_ = ids;
+  const std::string reason =
+      device_removed ? "device_removed"
+                     : (device_added ? "device_added" : "device_changed");
+
+  if (current_gone) {
+    RTC_LOG(LS_WARNING) << "Current video device removed: " << previous_current;
+    // 关闭视频通道：移除视频轨并重新协商（对端会收到 remote_video.stopped）。
+    if (peer_connection_ && video_enabled_) {
+      VideoOffImpl();
+    }
+    // 采集源跟着设备一起失效，释放掉，下次 video_on 时按新设备重建。
+    video_source_ = nullptr;
+    video_track_ = nullptr;
+    video_sender_ = nullptr;
+    current_device_id_.clear();
+    pending_device_id_.clear();
+    capture_profile_explicit_ = false;
+    if (engine_observer_) {
+      engine_observer_->OnVideoDeviceLost(previous_current);
+    }
+    GetVideoStatusImpl();  // 回显：设备已清空、视频已关
+  }
+
+  if (engine_observer_) {
+    engine_observer_->OnVideoDevicesChanged(devices, current_device_id_, reason);
+  }
+}
+
 void webrtc_engine::SetBitrateImpl(int max_kbps) {
   video_bitrate_kbps_ = max_kbps;
   bool ok = ApplyRtpParameters();
@@ -415,10 +820,35 @@ void webrtc_engine::SetDegradationImpl(const std::string& mode) {
 }
 
 void webrtc_engine::GetVideoStatusImpl() {
-  if (engine_observer_) {
-    engine_observer_->OnVideoStatus(video_width_, video_height_, video_fps_,
-                                    video_bitrate_kbps_, video_degradation_);
+  if (!engine_observer_) {
+    return;
   }
+  VideoState state;
+  state.enabled = video_enabled_;
+  state.in_call = (peer_connection_ != nullptr);
+  state.device_id =
+      !current_device_id_.empty() ? current_device_id_ : pending_device_id_;
+  state.capture_width = capture_width_;
+  state.capture_height = capture_height_;
+  state.capture_fps = capture_fps_;
+  state.encode_width = video_width_;
+  state.encode_height = video_height_;
+  state.encode_fps = video_fps_;
+  state.encode_bitrate_kbps = video_bitrate_kbps_;
+  state.encode_degradation = video_degradation_;
+
+  if (!state.device_id.empty()) {
+    webrtc_media::VideoDeviceInfo dev;
+    if (webrtc_media::FindVideoDevice(state.device_id, &dev)) {
+      state.device_name = dev.name;
+      state.device_synthetic = dev.is_synthetic;
+      // 实际生效的像素格式（按 WebRTC 的格式偏好 + 当前档位推出来）。
+      auto caps = webrtc_media::GetVideoDeviceCapabilities(dev);
+      state.capture_format = webrtc_media::EffectivePixelFormat(
+          caps, state.capture_width, state.capture_height);
+    }
+  }
+  engine_observer_->OnVideoState(state);
 }
 
 // 用当前 video_* 参数调 video_sender_->SetParameters（码率/帧率/降质）。

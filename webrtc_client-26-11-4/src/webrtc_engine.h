@@ -27,6 +27,10 @@
 #include "rtc_base/thread.h"
 #include "signaling/ws_signaling_client.h"
 
+namespace webrtc_media {
+class VideoDeviceMonitor;
+}  // namespace webrtc_media
+
 // WebRTC 客户端核心类：
 // 三线程 + 信令客户端 + PeerConnectionFactory/PeerConnection/DataChannel +
 // offer/answer 流程。自身实现三个长生命周期观察者接口，避免全局变量。
@@ -75,6 +79,18 @@ class webrtc_engine : public SignalingClientObserver,
   void SetDegradation(const std::string& mode);
   // 回读当前视频参数（供前端回显）。
   void GetVideoStatus();
+  // 视频设备：枚举 / 选择（空闲记住、通话中立即切换，不重协商）。
+  void GetVideoDevices();
+  bool SetVideoDevice(const std::string& id);  // false = 设备不存在
+  // 采集能力查询（格式 → 尺寸 → 帧率）；false = 设备不存在。
+  bool GetVideoDeviceCapabilities(const std::string& id);
+  // 设置采集档位（分辨率 + 帧率）；空闲记住、通话中立即切换。
+  // false = 该设备不支持此档位（不做任何更改）。
+  bool SetVideoProfile(int width, int height, int fps);
+  // 周期性视频统计上报开关（interval_ms 默认 2000，clamp 到 [500,10000]）。
+  void SetVideoStats(bool enabled, int interval_ms);
+  // 强制请求一个关键帧（I 帧）；false = 当前没有视频发送者。
+  bool RequestKeyFrame();
   bool video_enabled() const { return video_enabled_; }
   // 当前 ICE 配置（供前端回显）。
   const IceConfig& ice_config() const { return ice_config_; }
@@ -189,6 +205,18 @@ class webrtc_engine : public SignalingClientObserver,
     bool is_offer_;
   };
 
+  // 周期性视频统计回调：只挑视频相关字段，上报后预约下一次采集。
+  class VideoStatsCollector : public webrtc::RTCStatsCollectorCallback {
+   public:
+    explicit VideoStatsCollector(webrtc_engine* engine) : engine_(engine) {}
+    void OnStatsDelivered(
+        const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+        override;
+
+   private:
+    webrtc_engine* engine_;
+  };
+
   // GetStats 回调：携带已采集的 DataChannel 快照，收到 RTCStatsReport 后补齐
   // transport/candidate-pair/pc 信息并上抛。
   class StatsCollector : public webrtc::RTCStatsCollectorCallback {
@@ -231,6 +259,17 @@ class webrtc_engine : public SignalingClientObserver,
   void SetFramerateImpl(int fps);
   void SetDegradationImpl(const std::string& mode);
   void GetVideoStatusImpl();
+  void GetVideoDevicesImpl();
+  bool SetVideoDeviceImpl(const std::string& id);
+  void SetVideoStatsImpl(bool enabled, int interval_ms);
+  void ScheduleVideoStats();
+  void CollectVideoStats();
+  bool RequestKeyFrameImpl();
+  bool GetVideoDeviceCapabilitiesImpl(const std::string& id);
+  bool SetVideoProfileImpl(int width, int height, int fps);
+  // 热插拔：设备集合变化（监听线程 marshal 到 signaling 线程）。
+  void OnVideoDevicesChangedImpl(
+      const std::vector<webrtc_media::VideoDeviceInfo>& devices);
   void TriggerRenegotiation();      // 命令方直接 CreateOffer（对称重协商）
   void CreateVideoTrack();          // 懒创建合成源 + VideoTrack
   bool AddVideoTrackToPc();         // AddTrack 到当前 PC（返回成败）
@@ -266,6 +305,20 @@ class webrtc_engine : public SignalingClientObserver,
   int video_fps_ = 30;
   int video_bitrate_kbps_ = 0;   // 0 = 不设上限
   std::string video_degradation_ = "balanced";
+  // 视频设备：pending 用于下次建源，current 反映当前实际设备
+  std::string pending_device_id_;
+  std::string current_device_id_;
+  // 采集档位（与上面的编码参数分开）
+  int capture_width_ = 640;
+  int capture_height_ = 480;
+  int capture_fps_ = 30;
+  bool capture_profile_explicit_ = false;  // 用户显式设置过档位（建源时不再用设备默认值覆盖）
+  // 热插拔监听 + 上次已知设备 id 集合
+  std::unique_ptr<webrtc_media::VideoDeviceMonitor> device_monitor_;
+  std::vector<std::string> known_device_ids_;
+  // 周期性视频统计
+  bool video_stats_enabled_ = false;
+  int video_stats_interval_ms_ = 2000;
 
   bool signed_in_ = false;
   int my_id_ = -1;

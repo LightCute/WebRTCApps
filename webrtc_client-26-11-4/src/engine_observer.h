@@ -7,6 +7,7 @@
 
 #include "api/data_channel_interface.h"
 #include "api/peer_connection_interface.h"
+#include "media/video_device.h"
 #include "signaling/ws_signaling_client.h"
 
 // 引擎采集的运行时状态快照：DataChannel 同步信息 + PeerConnection GetStats。
@@ -120,6 +121,44 @@ struct EngineStats {
   uint32_t data_channels_closed = 0;   // 累计关闭过的 DataChannel 数量
 };
 
+// 视频实时统计（set_video_stats 开启后周期上报）。
+struct VideoStats {
+  int width = 0;                        // 实际发送分辨率
+  int height = 0;
+  double fps = 0.0;                     // 实际编码帧率
+  double target_bitrate = 0.0;          // 目标码率（bps）
+  uint64_t bytes_sent = 0;              // 已发字节
+  uint32_t packets_sent = 0;            // 已发包数
+  int32_t packets_lost = 0;             // 对端报告回来的丢包数
+  double jitter_ms = 0.0;               // 对端报告的抖动
+  double rtt_ms = 0.0;                  // 当前候选对 RTT
+  double available_outgoing_bitrate = 0.0;  // 带宽估计
+  std::string quality_limitation;       // none / cpu / bandwidth / other
+  uint32_t frames_encoded = 0;          // 已编码帧数
+  uint32_t key_frames_encoded = 0;      // 已编码关键帧数
+  uint32_t pli_count = 0;               // 对端请求关键帧次数（PLI）
+  uint32_t nack_count = 0;              // 对端 NACK 次数
+};
+
+// 视频完整状态快照（get_video_status / 设备或档位变化后回显）。
+struct VideoState {
+  bool enabled = false;              // 本端视频轨是否开启
+  std::string device_id;             // 当前设备 id（空 = 未选择）
+  std::string device_name;           // 设备名
+  bool device_synthetic = false;     // 是否合成设备
+  int capture_width = 0;             // 采集档位（请求值）
+  int capture_height = 0;
+  int capture_fps = 0;
+  std::string capture_format;        // 实际生效的像素格式（MJPG/YUYV/I420）
+  bool in_call = false;              // 是否在通话中（有 PC）
+  // 编码参数（SetParameters 动态设置）
+  int encode_width = 0;
+  int encode_height = 0;
+  int encode_fps = 0;
+  int encode_bitrate_kbps = 0;       // 0 = 不设上限
+  std::string encode_degradation;    // maintain_resolution / maintain_framerate / balanced
+};
+
 // 引擎对外事件接口：上层（IPC/UI）实现，接收信令、SDP/ICE、PeerConnection、
 // DataChannel 的状态与消息。所有回调在引擎的 signaling 线程同步触发。
 struct EngineObserver {
@@ -174,9 +213,31 @@ struct EngineObserver {
   virtual void OnVideoStateChanged(bool enabled) {}
   // 视频操作完成/失败（video_on/off 及参数设置的 result：success/failed；enabled=当前视频轨状态）。
   virtual void OnVideoSwitched(bool enabled, bool success) {}
-  // 回读当前视频参数（get_video_status / 参数设置后回显）。
-  virtual void OnVideoStatus(int width, int height, int fps, int bitrate_kbps,
-                             const std::string& degradation) {}
+  // 完整视频状态（当前设备 + 采集档位 + 生效格式 + 开关状态 + 编码参数）。
+  virtual void OnVideoState(const VideoState& state) {}
+  // 周期性视频统计（set_video_stats on 后按 interval 推送）。
+  virtual void OnVideoStats(const VideoStats& stats) {}
+  // 强制关键帧结果（request_keyframe 触发）。
+  virtual void OnKeyFrameRequested(bool success) {}
+  // 设备列表（get_video_devices 触发）。
+  virtual void OnVideoDevices(
+      const std::vector<webrtc_media::VideoDeviceInfo>& devices,
+      const std::string& current_id) {}
+  // 设备切换结果（set_video_device 触发；failed 时仍保留原设备）。
+  virtual void OnVideoDeviceChanged(const std::string& id,
+                                    const std::string& name, bool success) {}
+  // 设备采集能力（get_video_device_capabilities 触发）。
+  virtual void OnVideoDeviceCapabilities(
+      const std::string& id,
+      const std::vector<webrtc_media::VideoFormatCapability>& formats) {}
+  // 采集档位设置结果（set_video_profile 触发）。
+  virtual void OnVideoProfile(int width, int height, int fps, bool success) {}
+  // 热插拔：设备集合变化（reason: device_added / device_removed）。
+  virtual void OnVideoDevicesChanged(
+      const std::vector<webrtc_media::VideoDeviceInfo>& devices,
+      const std::string& current_id, const std::string& reason) {}
+  // 当前正在使用的设备被拔出（视频通道已被关闭）。
+  virtual void OnVideoDeviceLost(const std::string& id) {}
   // 收到远端视频轨（远端开始发视频）。
   virtual void OnRemoteVideoStarted() {}
   // 远端视频轨移除（远端停止发视频）。

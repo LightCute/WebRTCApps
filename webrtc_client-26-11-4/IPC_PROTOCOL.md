@@ -72,6 +72,24 @@
 | `ice_switched` | `result`（`success`/`failed`） | 模式切换完成：重建后是否重新连通 |
 | `reconnected` | `result`（`success`/`failed`） | ICE 重连完成：复用旧候选重新协商是否完成 |
 
+### 2.7 视频（开关 / 参数 / 设备）
+
+| 事件 | 字段 | 含义 |
+|---|---|---|
+| `video.state` | `enabled`（bool） | 本端视频期望状态（`start_video`/`stop_video`/`video_on`/`video_off` 受理即发） |
+| `video_switched` | `enabled`,`result` | 视频操作完成/失败（`video_on`/`video_off` 重协商完成，或参数设置结果） |
+| `video_params` | `enabled`,`in_call`,`device_id`,`device_name`,`device_synthetic`,`capture_width`,`capture_height`,`capture_fps`,`capture_format`,`width`,`height`,`fps`,`bitrate_kbps`,`degradation` | 完整视频状态回显（`get_video_status`，以及设置档位/切设备/参数变化后自动推送）。`device_*` 当前设备；`capture_*` 采集档位 + 实际生效像素格式；`width/height/fps/bitrate_kbps/degradation` 是**编码**参数 |
+| `remote_video.started` | —— | 收到远端视频轨（对端开始发视频） |
+| `remote_video.stopped` | —— | 远端视频轨移除（对端停止发视频） |
+| `video_devices` | `current`,`devices[]` | 设备列表（`id`/`name`/`synthetic`/`width`/`height`/`fps`）+ 当前设备 |
+| `video_device` | `id`,`name`,`result` | 设备切换结果（`failed` 时保留原设备继续传） |
+| `video_device_capabilities` | `id`,`formats[]` | 设备采集能力：`formats[].pixel_format` + `formats[].sizes[]{width,height,fps[],selectable}`（含 MJPG / YUYV）。`selectable=true` 表示请求该尺寸时实际会用这个格式（WebRTC 规则：>640x480 优先 MJPG，否则 YUYV），前端应只允许 `selectable=true` 的组合 |
+| `video_profile` | `width`,`height`,`fps`,`result` | 采集档位设置结果（`failed` 时保留原档位） |
+| `video_devices_changed` | `devices[]`,`current`,`reason` | **热插拔**：设备集合变化（`reason`：`device_added` / `device_removed`）。仅通知，不自动切换 |
+| `video_device_lost` | `id` | **当前正在使用的摄像头被拔出**；视频通道已自动关闭（随后会有 `video_switched`=`enabled:false`，对端收 `remote_video.stopped`） |
+| `video_stats` | `width`,`height`,`fps`,`target_bitrate`,`bytes_sent`,`packets_sent`,`packets_lost`,`jitter_ms`,`rtt_ms`,`available_outgoing_bitrate`,`quality_limitation`,`frames_encoded`,`key_frames_encoded`,`pli_count`,`nack_count` | **周期性视频统计**（`set_video_stats on` 后按 interval 推送；仅通话中且视频开启时） |
+| `keyframe_requested` | `result` | `request_keyframe` 的结果（视频未开启/无发送者时 `failed`） |
+
 ## 3. 错误码词汇表
 
 ### 3.1 `ipc.error` —— 受理拒绝
@@ -82,6 +100,8 @@
 | `not_signed_in` | 未登录信令服务器 | `call` / `get_roster` / `leave` / `signal_disconnect` |
 | `already_in_call` | 已在通话中 | `call` / `set_ice_transports` |
 | `not_in_call` | 不在通话中 | `leave` / `switch_ice` / `reconnect` |
+| `device_not_found` | 视频设备 id 不存在 | `set_video_device` / `get_video_device_capabilities` |
+| `unsupported_profile` | 该设备不支持此采集档位 | `set_video_profile` |
 | `data_channel_not_open` | 数据通道未打开（未通话） | `data_channel_msg` |
 | `signal_send_failed` | 信令消息发送失败（未连服务器） | `signal_msg` |
 | `self_call` | 呼叫自己的 id | `call` |
@@ -125,6 +145,16 @@
 | `switch_ice <mode>` | `usage` / `not_in_call` | `ice_config` → 重建后 `ice_switched`（success/failed）；对端收 `signal_client.switch_ice` | `ice_switched`=failed |
 | `reconnect` | `not_in_call` | 协商后 `reconnected`（success/failed）；对端收 `signal_client.reconnect` | `reconnected`=failed |
 | `get_ice_config` | 无（纯查询） | `ice_config` | 无（总返回） |
+| `start_video` / `stop_video` | `already_in_call` | `video.state` | 无（只设下次 call 的开关） |
+| `video_on` / `video_off` | `not_in_call` | `video.state` → 重协商后 `video_switched` | `video_switched`=failed |
+| `set_bitrate <kbps>` / `set_framerate <fps>` / `set_degradation <mode>` | `usage` / `not_in_call` | `video_switched` + `video_params` | `video_switched`=failed |
+| `get_video_status` | 无（纯查询） | `video_params` | 无（总返回） |
+| `get_video_devices` | 无（纯查询） | `video_devices` | 无（总返回；无摄像头时只有合成设备） |
+| `set_video_device <id>` | `usage` / `device_not_found` | `video_device`（空闲记住 / 通话中立即切换，不重协商） | `video_device`=failed（保留原设备） |
+| `get_video_device_capabilities <id>` | `usage` / `device_not_found` | `video_device_capabilities` | 无（总返回） |
+| `set_video_profile <w> <h> <fps>` | `usage` / `unsupported_profile` | `video_profile`（空闲记住 / 通话中立即切换，不重协商） | `video_profile`=failed（保留原档位） |
+| `set_video_stats <on\|off> [interval_ms]` | `usage` | `video_stats`（周期推送，interval 默认 2000，clamp [500,10000]） | 无 |
+| `request_keyframe` | `not_in_call` | `keyframe_requested`（success/failed） | `keyframe_requested`=failed |
 | `quit` | 无（总执行） | 无事件（unix socket 关闭即退出） | 无（总执行） |
 
 ## 5. 说明

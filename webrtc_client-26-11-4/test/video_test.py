@@ -104,6 +104,11 @@ def main():
         if not answerer.wait("signal_client.signed_in", timeout=10):
             fail("answerer not signed in")
         time.sleep(0.5)
+        # 显式用合成设备：两个本地 daemon 不能同时打开同一个摄像头。
+        offerer.send("set_video_device synthetic")
+        offerer.wait("video_device", timeout=5)
+        answerer.send("set_video_device synthetic")
+        answerer.wait("video_device", timeout=5)
 
         # T1: start_video 事件
         offerer.send("start_video")

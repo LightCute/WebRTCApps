@@ -41,13 +41,26 @@ rtc_static_library("signaling_client") {
   libs = [ "pthread" ]
 }
 
-# 媒体源/编解码：单独编译单元（无 RTTI），因为 VideoTrackSource/VideoEncoderFactory
-# 等 WebRTC 内部类是 -fno-rtti 编的，派生它们的代码开 RTTI 会引 typeinfo 未定义。
-rtc_static_library("media_source") {
+# 媒体层自己的 include 根（让 "media/video_*.h" 可用）。
+config("media_include_config") {
+  include_dirs = [ "src" ]
+}
+
+# 媒体层：编解码配置 + 设备枚举 + 视频源（含 VideoBroadcaster 路由）。
+# 单独编译单元（无 RTTI），因为 VideoTrackSource/VideoEncoderFactory 等
+# WebRTC 内部类是 -fno-rtti 编的，派生它们的代码开 RTTI 会引 typeinfo 未定义。
+rtc_static_library("media_video") {
   testonly = true
+  configs += [ ":media_include_config" ]
   sources = [
-    "src/media_source.cc",
-    "src/media_source.h",
+    "src/media/video_codec.cc",
+    "src/media/video_codec.h",
+    "src/media/video_device.cc",
+    "src/media/video_device.h",
+    "src/media/video_device_monitor.cc",
+    "src/media/video_device_monitor.h",
+    "src/media/video_source.cc",
+    "src/media/video_source.h",
   ]
   deps = [
     "../../api:create_frame_generator",
@@ -58,16 +71,22 @@ rtc_static_library("media_source") {
     "../../api/audio_codecs:builtin_audio_encoder_factory",
     "../../api:peer_connection_interface",
     "../../api:scoped_refptr",
+    "../../api/task_queue",
     "../../api/video:video_frame",
     "../../api/video_codecs:video_codecs_api",
     "../../api/video_codecs:video_decoder_factory_template",
     "../../api/video_codecs:video_decoder_factory_template_libvpx_vp8_adapter",
     "../../api/video_codecs:video_encoder_factory_template",
     "../../api/video_codecs:video_encoder_factory_template_libvpx_vp8_adapter",
+    "../../media:video_broadcaster",
+    "../../modules/video_capture:video_capture_module",
+    "../../modules/video_capture:video_capture_internal_impl",
     "../../pc:video_track_source",
     "../../rtc_base:logging",
     "../../system_wrappers",
     "../../test:frame_generator_capturer",
+    "../../test:platform_video_capturer",
+    "../../test:test_video_capturer",
   ]
 }
 
@@ -101,7 +120,7 @@ rtc_static_library("webrtc_engine") {
     "../../rtc_base:ssl_adapter",
     "../../rtc_base:threading",
     "../../system_wrappers",
-    ":media_source",
+    ":media_video",
     ":signaling_client",
   ]
 }

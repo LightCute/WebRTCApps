@@ -51,11 +51,12 @@ def ssh_cmd(*args):
 class Daemon:
     """一个 webrtc_engine_main 进程 + 其 unix socket 连接（本地直接连 / 云端 ssh+nc 桥）。"""
 
-    def __init__(self, role, location):
+    def __init__(self, role, location, sock=None, log_dir=None):
         self.role = role
         self.location = location
-        self.sock = LOCAL_SOCK if location == "local" else CLOUD_SOCK
-        self.log_dir = "/tmp/wc_stress_local" if location == "local" else "/tmp/wc_stress_cloud"
+        self.sock = sock or (LOCAL_SOCK if location == "local" else CLOUD_SOCK)
+        self.log_dir = log_dir or (
+            "/tmp/wc_stress_local" if location == "local" else "/tmp/wc_stress_cloud")
         self.server = SIGNAL_SERVER if location == "local" else "127.0.0.1"
         self.env_file = LOCAL_ENV if location == "local" else CLOUD_ENV
         self.pid = None
@@ -63,6 +64,7 @@ class Daemon:
         self.rfile = None
         self.wfile = None
         self.q = queue.Queue()
+        self.pending = []   # 未匹配的事件（供后续 wait_event 复用，避免被吞）
         self.reader = None
 
     def start(self):
@@ -138,6 +140,10 @@ class Daemon:
             pass
 
     def wait_event(self, event, predicate=None, timeout=5.0):
+        # 先在已缓存事件里找（未匹配的事件不丢弃）。
+        for i, ev in enumerate(self.pending):
+            if ev.get("event") == event and (predicate is None or predicate(ev)):
+                return self.pending.pop(i)
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -146,7 +152,18 @@ class Daemon:
                 continue
             if ev.get("event") == event and (predicate is None or predicate(ev)):
                 return ev
+            self.pending.append(ev)
         return None
+
+    def drain(self, event):
+        """丢弃指定类型的缓存事件（含队列中尚未取出的一并过滤）。"""
+        while True:
+            try:
+                ev = self.q.get_nowait()
+            except queue.Empty:
+                break
+            self.pending.append(ev)
+        self.pending = [e for e in self.pending if e.get("event") != event]
 
     def stop(self):
         try:
@@ -194,6 +211,15 @@ def peer_id_of(d, name, timeout=5.0):
             if p.get("name") == name:
                 return p.get("id", 0)
     return 0
+
+
+def clear_stale(*daemons,
+                events=("peer_connection.state", "signal_client.call_ended",
+                        "ice_switched", "reconnected", "video_switched")):
+    """清理上一阶段残留的事件，避免 wait_* 命中陈旧事件。"""
+    for d in daemons:
+        for e in events:
+            d.drain(e)
 
 
 def wait_connected(o, a, timeout=CONNECT_TIMEOUT):
@@ -307,7 +333,7 @@ class Checker:
 
 # ===================== 接口覆盖（方向 A：本地 offerer + 云端 answerer） =====================
 
-def interface_coverage(offerer, answerer):
+def interface_coverage(offerer, answerer, spare=None):
     print(f"\n===== 接口覆盖（offerer=local, answerer=cloud） =====", flush=True)
     c = Checker("interface")
 
@@ -326,6 +352,31 @@ def interface_coverage(offerer, answerer):
     c.expect_error(offerer, "signal_msg 0 hi", "usage")
     c.expect_error(offerer, "set_ice_transports", "usage")
     c.expect_error(offerer, "switch_ice", "usage")
+    c.expect_error(offerer, "set_bitrate 0", "usage")
+    c.expect_error(offerer, "set_framerate 0", "usage")
+    c.expect_error(offerer, "set_degradation", "usage")
+    c.expect_error(offerer, "set_video_profile 0 0 0", "usage")
+    c.expect_error(offerer, "set_video_stats bogus", "usage")
+    c.expect_error(offerer, "set_video_device", "usage")
+    c.expect_error(offerer, "get_video_device_capabilities", "usage")
+
+    # ---- 设备错误（空闲） ----
+    print("-- 设备错误 --", flush=True)
+    c.expect_error(offerer, "set_video_device nonsense", "device_not_found")
+    c.expect_error(offerer, "get_video_device_capabilities nonsense",
+                   "device_not_found")
+    # 合成设备只支持自身档位（640x480@30），1000fps 必然不支持
+    c.expect_error(offerer, "set_video_profile 640 480 1000",
+                   "unsupported_profile")
+
+    # ---- 视频类命令在空闲/未通话时的错误 ----
+    print("-- 视频命令 not_in_call --", flush=True)
+    c.expect_error(offerer, "video_on", "not_in_call")
+    c.expect_error(offerer, "video_off", "not_in_call")
+    c.expect_error(offerer, "request_keyframe", "not_in_call")
+    c.expect_error(offerer, "set_bitrate 500", "not_in_call")
+    c.expect_error(offerer, "set_framerate 15", "not_in_call")
+    c.expect_error(offerer, "set_degradation balanced", "not_in_call")
 
     # ---- 注册 ----
     print("-- 注册 --", flush=True)
@@ -337,6 +388,18 @@ def interface_coverage(offerer, answerer):
     aev = answerer.wait_event("signal_client.signed_in", timeout=10)
     c.check("answerer signed_in", aev is not None and aev.get("id", 0) > 0)
     time.sleep(0.5)  # 等 roster 刷新
+
+    # ---- 重名注册（需要备用 daemon） ----
+    if spare is not None:
+        print("-- 重名注册 --", flush=True)
+        spare.send(f"register {offerer.role} {spare.server} {SIGNAL_PORT}")
+        ev = spare.wait_event("signal_client.error",
+                              lambda e: e.get("code") == "name_taken", timeout=10)
+        c.check("register 重名 -> name_taken", ev is not None)
+        # 换个名字注册，供后面 peer_busy 使用
+        spare.send(f"register spare {spare.server} {SIGNAL_PORT}")
+        ev = spare.wait_event("signal_client.signed_in", timeout=10)
+        c.check("spare signed_in", ev is not None)
 
     # ---- 查询类 happy ----
     print("-- 查询类 happy --", flush=True)
@@ -350,6 +413,39 @@ def interface_coverage(offerer, answerer):
     ev = offerer.wait_event("ice_config", timeout=5)
     c.check("get_ice_config", ev is not None and ev.get("mode") in
             ("host", "srflx", "relay", "auto"))
+
+    # ---- 视频设备 / 档位 / 开关（空闲 happy） ----
+    print("-- 视频设备（空闲 happy） --", flush=True)
+    offerer.send("get_video_devices")
+    ev = offerer.wait_event("video_devices", timeout=8)
+    ids = [d["id"] for d in ev.get("devices", [])] if ev else []
+    c.check("get_video_devices",
+            ev is not None and "synthetic" in ids and "synthetic_hd" in ids,
+            f"ids={ids}")
+    offerer.send("get_video_device_capabilities synthetic")
+    ev = offerer.wait_event("video_device_capabilities", timeout=8)
+    c.check("get_video_device_capabilities synthetic",
+            ev is not None and len(ev.get("formats", [])) > 0)
+    offerer.send("set_video_device synthetic")
+    ev = offerer.wait_event("video_device", timeout=5)
+    c.check("set_video_device synthetic",
+            ev is not None and ev.get("result") == "success")
+    offerer.send("set_video_profile 640 480 30")
+    ev = offerer.wait_event("video_profile", timeout=5)
+    c.check("set_video_profile 640x480@30",
+            ev is not None and ev.get("result") == "success")
+    offerer.send("get_video_status")
+    ev = offerer.wait_event("video_params", timeout=5)
+    c.check("get_video_status",
+            ev is not None and ev.get("device_id") == "synthetic" and
+            ev.get("capture_width") == 640 and ev.get("enabled") is False,
+            str(ev)[:160])
+    offerer.send("start_video")
+    ev = offerer.wait_event("video.state", timeout=5)
+    c.check("start_video", ev is not None and ev.get("enabled") is True)
+    offerer.send("stop_video")
+    ev = offerer.wait_event("video.state", timeout=5)
+    c.check("stop_video", ev is not None and ev.get("enabled") is False)
 
     # ---- 呼叫错误（已登录、空闲态） ----
     print("-- 呼叫错误 --", flush=True)
@@ -371,6 +467,7 @@ def interface_coverage(offerer, answerer):
     print("-- 建立通话 --", flush=True)
     aid = peer_id_of(offerer, "answerer")
     c.check("answerer in roster", aid > 0)
+    clear_stale(offerer, answerer)
     offerer.send(f"call {aid}")
     if not wait_connected(offerer, answerer):
         c.check("call connected", False, "not connected")
@@ -381,6 +478,17 @@ def interface_coverage(offerer, answerer):
     print("-- 通话中错误 --", flush=True)
     c.expect_error(offerer, f"call {aid}", "already_in_call")
     c.expect_error(offerer, "set_ice_transports host", "already_in_call")
+
+    # ---- 忙线呼叫（备用 daemon 呼叫正在通话的 answerer） ----
+    if spare is not None:
+        print("-- 忙线呼叫 --", flush=True)
+        time.sleep(0.8)  # 等 roster 刷出 busy
+        target = peer_id_of(spare, answerer.role)
+        c.check("spare 看到 answerer", target > 0)
+        spare.send(f"call {target}")
+        ev = spare.wait_event("ipc.error",
+                              lambda e: e.get("code") == "peer_busy", timeout=8)
+        c.check("呼叫忙线 -> peer_busy", ev is not None)
 
     # ---- 消息 happy（数据通道 + 信令） ----
     print("-- 消息 happy --", flush=True)
@@ -393,6 +501,110 @@ def interface_coverage(offerer, answerer):
     offerer.send(f"signal_msg {aid} ping-sig")
     c.check("signal_msg 对端收到",
             answerer.wait_event("signal_client.message", lambda e: e.get("text") == "ping-sig", 5) is not None)
+
+    # ---- 视频开关 happy（默认关 → video_on） ----
+    print("-- 视频开关 happy --", flush=True)
+    offerer.send("video_on")
+    sw = offerer.wait_event("video_switched", timeout=20)
+    c.check("video_on video_switched",
+            sw is not None and sw.get("result") == "success", str(sw))
+    c.check("answerer remote_video.started",
+            answerer.wait_event("remote_video.started", timeout=20) is not None)
+    # 通话中 start/stop_video 应被拒
+    c.expect_error(offerer, "start_video", "already_in_call")
+    c.expect_error(offerer, "stop_video", "already_in_call")
+
+    # ---- 视频统计 ----
+    print("-- 视频统计 happy --", flush=True)
+    offerer.send("set_video_stats on 1000")
+    s1 = offerer.wait_event("video_stats", timeout=12)
+    s2 = offerer.wait_event("video_stats", timeout=12)
+    c.check("video_stats 周期推送",
+            s1 is not None and s2 is not None and
+            s2.get("bytes_sent", 0) > s1.get("bytes_sent", 0),
+            f"{s1 and s1.get('bytes_sent')} -> {s2 and s2.get('bytes_sent')}")
+    c.check("video_stats fps>0", bool(s1) and s1.get("fps", 0) > 0,
+            f"fps={s1 and s1.get('fps')}")
+
+    # ---- 强制关键帧 ----
+    base_key = s2.get("key_frames_encoded", 0) if s2 else 0
+    offerer.send("request_keyframe")
+    ev = offerer.wait_event("keyframe_requested", timeout=5)
+    c.check("request_keyframe", ev is not None and ev.get("result") == "success")
+    grew = False
+    for _ in range(4):
+        st = offerer.wait_event("video_stats", timeout=10)
+        if st and st.get("key_frames_encoded", 0) > base_key:
+            grew = True
+            break
+    c.check("key_frames_encoded 增长", grew, f"base={base_key}")
+
+    # ---- 编码参数 ----
+    print("-- 编码参数 happy --", flush=True)
+    offerer.send("set_bitrate 500")
+    ev = offerer.wait_event("video_switched", timeout=5)
+    c.check("set_bitrate 500", ev is not None)
+    offerer.drain("video_stats")   # 丢弃改参数前的旧样本
+    time.sleep(2)
+    limited = False
+    for _ in range(6):
+        st = offerer.wait_event("video_stats", timeout=10)
+        if st and st.get("target_bitrate", 0) <= 600000:
+            limited = True
+            break
+    c.check("target_bitrate 受限", limited)
+    offerer.send("set_framerate 10")
+    ev = offerer.wait_event("video_switched", timeout=5)
+    c.check("set_framerate 10", ev is not None)
+    offerer.drain("video_stats")
+    time.sleep(2)
+    fps_limited = False
+    for _ in range(6):
+        st = offerer.wait_event("video_stats", timeout=10)
+        if st and 0 < st.get("fps", 99) <= 14:
+            fps_limited = True
+            break
+    c.check("fps 受限", fps_limited)
+    offerer.send("set_degradation balanced")
+    ev = offerer.wait_event("video_switched", timeout=5)
+    c.check("set_degradation", ev is not None)
+
+    # ---- 通话中切设备（不重协商，画面继续） ----
+    print("-- 通话中切设备 --", flush=True)
+    before_bytes = None
+    for _ in range(3):
+        st = offerer.wait_event("video_stats", timeout=10)
+        if st:
+            before_bytes = st.get("bytes_sent", 0)
+            break
+    offerer.send("set_video_device synthetic_hd")
+    ev = offerer.wait_event("video_device", timeout=15)
+    c.check("in-call set_video_device synthetic_hd",
+            ev is not None and ev.get("result") == "success", str(ev))
+    time.sleep(2)
+    st = offerer.wait_event("video_stats", timeout=15)
+    c.check("切设备后画面继续",
+            st is not None and before_bytes is not None and
+            st.get("bytes_sent", 0) > before_bytes)
+    offerer.send("set_video_device synthetic")
+    ev = offerer.wait_event("video_device", timeout=15)
+    c.check("in-call set_video_device synthetic",
+            ev is not None and ev.get("result") == "success", str(ev))
+    offerer.send("get_video_status")
+    ev = offerer.wait_event("video_params", timeout=5)
+    c.check("切换后 video_params 回显",
+            ev is not None and ev.get("device_id") == "synthetic")
+
+    # ---- 关视频 + 关统计 ----
+    print("-- 视频关闭 --", flush=True)
+    offerer.send("set_video_stats off")
+    offerer.send("video_off")
+    ev = offerer.wait_event("video_switched", timeout=20)
+    c.check("video_off video_switched",
+            ev is not None and ev.get("result") == "success" and
+            ev.get("enabled") is False, str(ev))
+    c.check("answerer remote_video.stopped",
+            answerer.wait_event("remote_video.stopped", timeout=15) is not None)
 
     # ---- switch_ice happy（offerer relay -> srflx） ----
     print("-- switch_ice happy --", flush=True)
@@ -432,11 +644,14 @@ def interface_coverage(offerer, answerer):
 def stress_call_leave(offerer, answerer, cycles):
     print(f"  -- call/leave × {cycles} --", flush=True)
     c = Checker("call/leave")
+    clear_stale(offerer, answerer)
     aid = peer_id_of(offerer, "answerer")
     if aid <= 0:
         c.check("answerer in roster", False, "not found")
         return c
     for i in range(cycles):
+        offerer.drain("peer_connection.state")
+        answerer.drain("peer_connection.state")
         offerer.send(f"call {aid}")
         if not wait_connected(offerer, answerer):
             c.check(f"cycle{i} connected", False, "not connected")
@@ -455,6 +670,7 @@ def stress_call_leave(offerer, answerer, cycles):
 def stress_switch(offerer, answerer, cycles):
     print(f"  -- switch_ice × {cycles}（answerer=auto，offerer relay↔srflx） --", flush=True)
     c = Checker("switch_ice")
+    clear_stale(offerer, answerer)
     answerer.send("set_ice_transports auto")
     answerer.wait_event("ice_config", timeout=5)
     offerer.send("set_ice_transports relay")
@@ -466,6 +682,8 @@ def stress_switch(offerer, answerer, cycles):
         return c
     modes = ["srflx", "relay"] * ((cycles + 1) // 2)
     for i, m in enumerate(modes[:cycles]):
+        offerer.drain("ice_switched")
+        answerer.drain("ice_switched")
         offerer.send(f"switch_ice {m}")
         ok = wait_ice_switched(offerer, answerer)
         c.check(f"switch{i} -> {m}", ok)
@@ -484,6 +702,7 @@ def stress_switch(offerer, answerer, cycles):
 def stress_reconnect(offerer, answerer, cycles):
     print(f"  -- reconnect × {cycles}（relay） --", flush=True)
     c = Checker("reconnect")
+    clear_stale(offerer, answerer)
     offerer.send("set_ice_transports relay")
     offerer.wait_event("ice_config", timeout=5)
     answerer.send("set_ice_transports auto")
@@ -494,6 +713,7 @@ def stress_reconnect(offerer, answerer, cycles):
         c.check("initial connected", False, "not connected")
         return c
     for i in range(cycles):
+        offerer.drain("reconnected")
         offerer.send("reconnect")
         ok = wait_reconnected(offerer)
         c.check(f"reconnect{i}", ok)
@@ -541,16 +761,22 @@ def main():
     if not args.stress_only:
         kill_all_daemons()
         o, a = make_daemons("A")
+        # 第三个 daemon：测 name_taken / peer_busy（本地，独立 socket）
+        spare = Daemon("spare", "local",
+                       sock="/tmp/wc_stress_spare.sock",
+                       log_dir="/tmp/wc_stress_spare")
         try:
-            o.start(); a.start()
-            o.connect(); a.connect()
-            c = interface_coverage(o, a)
+            o.start(); a.start(); spare.start()
+            o.connect(); a.connect(); spare.connect()
+            c = interface_coverage(o, a, spare)
             all_fails += [f"接口/{f}" for f in c.fails]
             # 进程存活检查
             c.check("本地进程存活", o.alive())
             c.check("云端进程存活", a.alive())
+            c.check("备用进程存活", spare.alive())
         finally:
-            o.stop(); a.stop(); o.kill9(); a.kill9()
+            o.stop(); a.stop(); spare.stop()
+            o.kill9(); a.kill9(); spare.kill9()
             time.sleep(0.5)
 
     # ===== 反复抗压（双向） =====
