@@ -261,6 +261,9 @@ class webrtc_engine : public SignalingClientObserver,
   void GetVideoStatusImpl();
   void GetVideoDevicesImpl();
   bool SetVideoDeviceImpl(const std::string& id);
+  // 在 [ice_config_.min_port, max_port] 内轮换端口窗口（每次建 PC 换一组），
+  // 避免 TURN 分配在上一通失败后仍占用同一本地 5-tuple 导致重呼 437。
+  void ApplyIcePortWindow();
   void SetVideoStatsImpl(bool enabled, int interval_ms);
   void ScheduleVideoStats();
   void CollectVideoStats();
@@ -308,6 +311,8 @@ class webrtc_engine : public SignalingClientObserver,
   // 视频设备：pending 用于下次建源，current 反映当前实际设备
   std::string pending_device_id_;
   std::string current_device_id_;
+  int ice_port_window_index_ = 0;      // 端口窗口轮换序号
+  bool ice_port_window_seeded_ = false;  // 是否已随机初始化起点
   // 采集档位（与上面的编码参数分开）
   int capture_width_ = 640;
   int capture_height_ = 480;

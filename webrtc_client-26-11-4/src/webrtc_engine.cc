@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <random>
 
 #include "api/audio/audio_device.h"
 #include "api/audio/create_audio_device_module.h"
@@ -650,6 +651,9 @@ void webrtc_engine::CollectVideoStats() {
     ScheduleVideoStats();  // 不在通话/视频关：稍后再试
     return;
   }
+  // 续期放在发起侧：PC 重建时 GetStats 回调可能丢失（旧 PC 被销毁），
+  // 若在回调里续期，定时链会断掉。
+  ScheduleVideoStats();
   peer_connection_->GetStats(make_ref_counted<VideoStatsCollector>(this).get());
 }
 
@@ -704,9 +708,7 @@ void webrtc_engine::VideoStatsCollector::OnStatsDelivered(
   if (engine_ && engine_->engine_observer_) {
     engine_->engine_observer_->OnVideoStats(stats);
   }
-  if (engine_) {
-    engine_->ScheduleVideoStats();  // 预约下一次
-  }
+  // 下一次采集已在 CollectVideoStats 里预约，此处不再续期。
 }
 
 // ============================================================================
@@ -993,10 +995,40 @@ bool webrtc_engine::InitializePeerConnectionFactoryImpl() {
   return true;
 }
 
+// 端口窗口轮换：WebRTC 的 BindSocket 每次都从 min_port 开始试绑，固定 min_port
+// 会让每次呼叫都复用同一个本地端口；上一通失败时 TURN 释放包丢失，服务端旧分配
+// 还占着这个 5-tuple，重呼就会一直 437。这里在配置范围内把端口切成若干组，每次
+// 建 PC 换一组，连续呼叫就不会撞同一个 5-tuple。
+void webrtc_engine::ApplyIcePortWindow() {
+  const int base_min = ice_config_.min_port;
+  const int base_max = ice_config_.max_port;
+  if (base_min <= 0 || base_max <= base_min) {
+    return;  // 未限制范围：沿用系统分配
+  }
+  const int total = base_max - base_min + 1;
+  const int window = std::min(64, total);          // 每组 64 个端口（一通电话通常用 2~8 个）
+  const int groups = std::max(1, total / window);  // 16384/64 = 256 组
+  if (!ice_port_window_seeded_) {
+    // 随机起点：避免进程重启后又从第 0 组开始，撞上上个进程残留的 TURN 分配。
+    ice_port_window_index_ = static_cast<int>(std::random_device{}() % groups);
+    ice_port_window_seeded_ = true;
+  }
+  const int index = ice_port_window_index_ % groups;
+  const int start = base_min + index * window;
+  const int end = std::min(start + window - 1, base_max);
+  rtc_configuration_.set_min_port(start);
+  rtc_configuration_.set_max_port(end);
+  ice_port_window_index_ = (index + 1) % groups;
+  RTC_LOG(LS_INFO) << "ICE port window: [" << start << "," << end << "] group "
+                   << index << "/" << groups;
+}
+
 bool webrtc_engine::CreatePeerConnectionImpl() {
   if (peer_connection_) {
     return true;
   }
+  // 每次新建 PC 换一组端口（连续呼叫不复用同一 5-tuple）。
+  ApplyIcePortWindow();
   if (!peer_connection_factory_) {
     RTC_LOG(LS_WARNING) << "CreatePeerConnection: factory not created";
     if (engine_observer_) engine_observer_->OnEngineError("peer_connection_failed", "factory not created");

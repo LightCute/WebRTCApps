@@ -76,7 +76,6 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   UnixSocketServer* server_;
   std::string signal_server_;
   int signal_port_;
-  int client_id_ = -1;
   std::vector<PeerInfo> peers_;
 };
 

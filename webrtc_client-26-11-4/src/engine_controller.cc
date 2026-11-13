@@ -70,18 +70,18 @@ const char* ModeToString(IceTransportsMode m) {
 // ===== UnixSocketObserver（io 线程，快速返回）=====
 
 void EngineController::OnClientConnected(int client_id) {
-  client_id_ = client_id;
+  // 握手只发给新连接的客户端；其余事件统一广播（见 Send）。
   Json::Value v = Event("ipc.connected");
   Json::Value cmds(Json::arrayValue);
   for (const char* c : kCommands) {
     cmds.append(c);
   }
   v["commands"] = cmds;
-  Send(SerializeJson(v));
+  server_->SendToClient(client_id, SerializeJson(v));
 }
 
 void EngineController::OnLineReceived(int client_id, const std::string& line) {
-  client_id_ = client_id;
+  // 任意客户端都可发命令；回复统一广播给所有客户端。
   webrtc::Thread* st = engine_->signaling_thread();
   if (st) {
     // 命令在 io 线程，投递到 signaling 线程执行，避免阻塞 io 线程。
@@ -91,7 +91,7 @@ void EngineController::OnLineReceived(int client_id, const std::string& line) {
 }
 
 void EngineController::OnClientDisconnected(int client_id) {
-  client_id_ = -1;
+  // 无需维护单客户端状态：事件走广播。
 }
 
 // ===== EngineObserver（signaling 线程）=====
@@ -845,7 +845,6 @@ void EngineController::SendIceConfig() {
 }
 
 void EngineController::Send(const std::string& msg) {
-  if (client_id_ >= 0) {
-    server_->SendToClient(client_id_, msg);
-  }
+  // 多客户端：所有事件广播给全部已连接客户端。
+  server_->Broadcast(msg);
 }
