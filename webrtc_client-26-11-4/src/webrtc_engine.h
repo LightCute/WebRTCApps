@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+#include "api/audio/audio_device.h"
+#include "api/audio/audio_processing.h"
+#include "api/audio_options.h"
 #include "api/data_channel_interface.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
@@ -24,6 +27,8 @@
 #include "api/video/video_source_interface.h"
 #include "engine_observer.h"
 #include "ice_config.h"
+#include "media/audio_device.h"
+#include "media/audio_processing.h"
 #include "rtc_base/thread.h"
 #include "signaling/ws_signaling_client.h"
 
@@ -89,6 +94,16 @@ class webrtc_engine : public SignalingClientObserver,
   bool SetVideoProfile(int width, int height, int fps);
   // 周期性视频统计上报开关（interval_ms 默认 2000，clamp 到 [500,10000]）。
   void SetVideoStats(bool enabled, int interval_ms);
+  // 音频：设备枚举 / 选择（空闲记住，下次开音频生效）。
+  void GetAudioDevices();
+  bool SetAudioDevice(const std::string& name);  // false = 设备不存在
+  // 通话中开/关本端音频轨（AddTrack/RemoveTrack + 重新 offer/answer）。
+  void AudioOn();
+  void AudioOff();
+  // 回读音频状态（设备 / 开关 / AEC-NS-AGC）。
+  void GetAudioStatus();
+  // 运行时切换音频处理开关（flag = aec / ns / agc），不重协商。
+  bool SetAudioProcessing(const std::string& flag, bool on);
   // 强制请求一个关键帧（I 帧）；false = 当前没有视频发送者。
   bool RequestKeyFrame();
   bool video_enabled() const { return video_enabled_; }
@@ -278,6 +293,20 @@ class webrtc_engine : public SignalingClientObserver,
   bool AddVideoTrackToPc();         // AddTrack 到当前 PC（返回成败）
   bool RemoveVideoTrackFromPc();    // RemoveTrack + 释放 track/sender（返回成败）
   bool ApplyRtpParameters();        // 用当前 video_params_ 调 video_sender_->SetParameters
+  // 音频（第一期：采集上行 + 设备选择 + 音频处理开关）
+  // 设备查询/选择可能发生在首次通话之前：按需初始化 factory（含 ADM）。
+  bool EnsureAudioReady();
+  void GetAudioDevicesImpl();
+  bool SetAudioDeviceImpl(const std::string& name);
+  void AudioOnImpl();
+  void AudioOffImpl();
+  void GetAudioStatusImpl();
+  bool SetAudioProcessingImpl(const std::string& flag, bool on);
+  void CreateAudioTrack();          // 用当前 AudioOptions 建 source + track
+  bool AddAudioTrackToPc();         // 应用录音设备 + AddTrack
+  bool RemoveAudioTrackFromPc();
+  void ApplySelectedAudioDevice();  // worker 线程按名字设置录音设备
+  void ReapplyAudioProcessing();    // worker 线程重新应用 AEC/NS/AGC（音轨重建后）
 
   std::unique_ptr<webrtc::Thread> signaling_thread_;
   std::unique_ptr<webrtc::Thread> worker_thread_;
@@ -324,6 +353,17 @@ class webrtc_engine : public SignalingClientObserver,
   // 周期性视频统计
   bool video_stats_enabled_ = false;
   int video_stats_interval_ms_ = 2000;
+
+  // 音频（第一期）
+  webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
+  webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
+  bool audio_enabled_ = false;
+  bool audio_switch_in_progress_ = false;
+  webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source_;
+  webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track_;
+  webrtc::scoped_refptr<webrtc::RtpSenderInterface> audio_sender_;
+  std::string audio_device_name_;                     // 选中的录音设备名（空=系统默认）
+  webrtc_media::AudioProcessingState audio_processing_;  // 当前 AEC/NS/AGC 开关
 
   bool signed_in_ = false;
   int my_id_ = -1;

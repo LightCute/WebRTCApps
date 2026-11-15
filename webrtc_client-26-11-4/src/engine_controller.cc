@@ -37,6 +37,9 @@ const char* const kCommands[] = {
     "get_video_device_capabilities <id>",
     "set_video_profile <w> <h> <fps>",
     "set_video_stats <on|off> [interval_ms]", "request_keyframe",
+    "get_audio_devices",            "set_audio_device <id>",
+    "audio_on",                     "audio_off",
+    "get_audio_status",             "set_audio_processing <aec|ns|agc> <on|off>",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -392,6 +395,68 @@ void EngineController::OnVideoSwitched(bool enabled, bool success) {
   Json::Value v = Event("video_switched");
   v["enabled"] = enabled;
   v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioStateChanged(bool enabled) {
+  Json::Value v = Event("audio.state");
+  v["enabled"] = enabled;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioSwitched(bool enabled, bool success) {
+  Json::Value v = Event("audio_switched");
+  v["enabled"] = enabled;
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioStatus(const AudioStateSnapshot& state) {
+  Json::Value v = Event("audio_status");
+  v["enabled"] = state.enabled;
+  v["device_id"] = state.device_id;
+  v["device_name"] = state.device_name;
+  v["in_call"] = state.in_call;
+  v["aec"] = state.aec;
+  v["ns"] = state.ns;
+  v["agc"] = state.agc;
+  v["has_device_module"] = state.has_device_module;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioDevices(
+    const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+    const std::string& current) {
+  Json::Value v = Event("audio_devices");
+  v["current"] = current;
+  Json::Value arr(Json::arrayValue);
+  for (const auto& d : devices) {
+    Json::Value e;
+    e["index"] = d.index;
+    e["name"] = d.name;
+    e["id"] = d.name;  // Pulse source 名作为稳定 id
+    arr.append(e);
+  }
+  v["devices"] = arr;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioDeviceChanged(const std::string& id,
+                                            const std::string& name,
+                                            bool success) {
+  Json::Value v = Event("audio_device");
+  v["id"] = id;
+  v["name"] = name;
+  v["result"] = success ? "success" : "failed";
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioProcessingChanged(
+    const webrtc_media::AudioProcessingState& state) {
+  Json::Value v = Event("audio_processing");
+  v["aec"] = state.aec;
+  v["ns"] = state.ns;
+  v["agc"] = state.agc;
   Send(SerializeJson(v));
 }
 
@@ -815,6 +880,47 @@ void EngineController::HandleCommand(const std::string& line) {
       return;
     }
     engine_->RequestKeyFrame();
+  } else if (cmd == "get_audio_devices") {
+    engine_->GetAudioDevices();
+  } else if (cmd == "set_audio_device") {
+    // PulseAudio 设备名含空格（如 "USB MIC Mono"），取整行剩余部分。
+    std::string id;
+    std::getline(ss, id);
+    const size_t first = id.find_first_not_of(' ');
+    if (first == std::string::npos) {
+      SendError("usage", "usage: set_audio_device <id>");
+      return;
+    }
+    id = id.substr(first);
+    const size_t last = id.find_last_not_of(' ');
+    if (last != std::string::npos) {
+      id = id.substr(0, last + 1);
+    }
+    if (engine_->is_connected() || engine_->peer_id() > 0) {
+      SendError("unsupported_in_call",
+                "switching audio device during a call is not supported yet");
+      return;
+    }
+    if (!engine_->SetAudioDevice(id)) {
+      SendError("device_not_found", "audio device not found: " + id);
+    }
+  } else if (cmd == "audio_on") {
+    engine_->AudioOn();
+  } else if (cmd == "audio_off") {
+    engine_->AudioOff();
+  } else if (cmd == "get_audio_status") {
+    engine_->GetAudioStatus();
+  } else if (cmd == "set_audio_processing") {
+    std::string flag;
+    std::string value;
+    ss >> flag >> value;
+    if ((flag != "aec" && flag != "ns" && flag != "agc") ||
+        (value != "on" && value != "off")) {
+      SendError("usage",
+                "usage: set_audio_processing <aec|ns|agc> <on|off>");
+      return;
+    }
+    engine_->SetAudioProcessing(flag, value == "on");
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

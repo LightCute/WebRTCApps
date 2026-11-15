@@ -13,7 +13,7 @@ DEFAULT_GN_ARGS='is_debug=true
 rtc_build_examples=false
 rtc_build_tools=false
 rtc_include_tests=false
-rtc_include_pulse_audio=false
+rtc_include_pulse_audio=true
 use_clang_modules=false
 use_sysroot=true'
 

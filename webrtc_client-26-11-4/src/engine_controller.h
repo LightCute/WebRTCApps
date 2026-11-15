@@ -65,6 +65,16 @@ class EngineController : public UnixSocketObserver, public EngineObserver {
   void OnVideoDeviceLost(const std::string& id) override;
   void OnRemoteVideoStarted() override;
   void OnRemoteVideoStopped() override;
+  void OnAudioStateChanged(bool enabled) override;
+  void OnAudioSwitched(bool enabled, bool success) override;
+  void OnAudioStatus(const AudioStateSnapshot& state) override;
+  void OnAudioDevices(
+      const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+      const std::string& current) override;
+  void OnAudioDeviceChanged(const std::string& id, const std::string& name,
+                            bool success) override;
+  void OnAudioProcessingChanged(
+      const webrtc_media::AudioProcessingState& state) override;
 
  private:
   void HandleCommand(const std::string& line);  // signaling 线程执行

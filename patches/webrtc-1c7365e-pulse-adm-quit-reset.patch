@@ -1,0 +1,22 @@
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index f1121c1a9a..6d45fc21c9 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -156,6 +156,17 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
+     return InitStatus::OK;
+   }
+ 
++  // A previous Terminate() leaves quit_ = true. The ADM instance can be
++  // re-Init'ed (the media engine terminates the device module when the last
++  // PeerConnection is released and re-initializes it when a new one is
++  // created). Without this reset the recording/playout threads spawned below
++  // see quit_ and exit on the first start request, so StartRecording/
++  // StartPlayout time out after 10 s and audio never resumes.
++  {
++    MutexLock lock(&mutex_);
++    quit_ = false;
++  }
++
+   // Initialize PulseAudio
+   if (InitPulseAudio() < 0) {
+     RTC_LOG(LS_ERROR) << "failed to initialize PulseAudio";

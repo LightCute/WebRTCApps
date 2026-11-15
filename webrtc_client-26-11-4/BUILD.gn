@@ -90,6 +90,30 @@ rtc_static_library("media_video") {
   ]
 }
 
+# 音频媒体层：平台 ADM（PulseAudio）+ 录音设备枚举 + 运行时 APM 配置。
+# 同样是独立无 RTTI 编译单元（AudioProcessingBuilderInterface 是 -fno-rtti 编的）。
+rtc_static_library("media_audio") {
+  testonly = true
+  configs += [ ":media_include_config" ]
+  sources = [
+    "src/media/audio_device.cc",
+    "src/media/audio_device.h",
+    "src/media/audio_processing.cc",
+    "src/media/audio_processing.h",
+  ]
+  deps = [
+    "../../api:audio_options_api",
+    "../../api:peer_connection_interface",
+    "../../api:scoped_refptr",
+    "../../api/audio:audio_device",
+    "../../api/audio:audio_processing",
+    "../../api/audio:builtin_audio_processing_builder",
+    "../../api/audio:create_audio_device_module",
+    "../../api/environment",
+    "../../rtc_base:logging",
+  ]
+}
+
 # 核心：WebRTC API 调度（三线程 + PC/DC + SDP + GetStats）。
 rtc_static_library("webrtc_engine") {
   testonly = true
@@ -99,12 +123,14 @@ rtc_static_library("webrtc_engine") {
   ]
   configs += [ ":signaling_deps_config" ]
   deps = [
+    "../../api:audio_options_api",
     "../../api:create_modular_peer_connection_factory",
     "../../api:data_channel_interface",
     "../../api:field_trials",
     "../../api:jsep",
     "../../api:media_stream_interface",
     "../../api/audio:audio_device",
+    "../../api/audio:audio_processing",
     "../../api/audio:create_audio_device_module",
     "../../api:peer_connection_interface",
     "../../api:rtc_error",
@@ -120,6 +146,7 @@ rtc_static_library("webrtc_engine") {
     "../../rtc_base:ssl_adapter",
     "../../rtc_base:threading",
     "../../system_wrappers",
+    ":media_audio",
     ":media_video",
     ":signaling_client",
   ]

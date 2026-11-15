@@ -424,6 +424,259 @@ bool webrtc_engine::RemoveVideoTrackFromPc() {
 }
 
 // ============================================================================
+//  音频（第一期：采集上行 + 设备选择 + 音频处理开关）
+// ============================================================================
+
+void webrtc_engine::GetAudioDevices() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { GetAudioDevicesImpl(); return; }
+  signaling_thread_->BlockingCall([&] { GetAudioDevicesImpl(); });
+}
+
+bool webrtc_engine::SetAudioDevice(const std::string& name) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return SetAudioDeviceImpl(name);
+  bool ok = false;
+  signaling_thread_->BlockingCall([&] { ok = SetAudioDeviceImpl(name); });
+  return ok;
+}
+
+void webrtc_engine::AudioOn() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { AudioOnImpl(); return; }
+  signaling_thread_->BlockingCall([&] { AudioOnImpl(); });
+}
+
+void webrtc_engine::AudioOff() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { AudioOffImpl(); return; }
+  signaling_thread_->BlockingCall([&] { AudioOffImpl(); });
+}
+
+void webrtc_engine::GetAudioStatus() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { GetAudioStatusImpl(); return; }
+  signaling_thread_->BlockingCall([&] { GetAudioStatusImpl(); });
+}
+
+bool webrtc_engine::SetAudioProcessing(const std::string& flag, bool on) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) return SetAudioProcessingImpl(flag, on);
+  bool ok = false;
+  signaling_thread_->BlockingCall([&] { ok = SetAudioProcessingImpl(flag, on); });
+  return ok;
+}
+
+bool webrtc_engine::EnsureAudioReady() {
+  if (adm_) {
+    return true;
+  }
+  return InitializePeerConnectionFactoryImpl();
+}
+
+void webrtc_engine::GetAudioDevicesImpl() {
+  if (!EnsureAudioReady()) {
+    RTC_LOG(LS_ERROR) << "GetAudioDevices: audio not ready";
+  }
+  std::vector<webrtc_media::AudioDeviceInfo> devices;
+  if (adm_) {
+    // Pulse ADM 有线程约束，枚举放 worker 线程。
+    devices = worker_thread_->BlockingCall([this] {
+      return webrtc_media::EnumerateRecordingDevices(adm_.get());
+    });
+  }
+  // 未显式选择时回显空串 = 使用系统默认设备（ADM 不暴露当前索引的 getter）。
+  const std::string current = audio_device_name_;
+  if (engine_observer_) {
+    engine_observer_->OnAudioDevices(devices, current);
+  }
+}
+
+bool webrtc_engine::SetAudioDeviceImpl(const std::string& name) {
+  if (!EnsureAudioReady() || !adm_) return false;
+  const auto devices = worker_thread_->BlockingCall([this] {
+    return webrtc_media::EnumerateRecordingDevices(adm_.get());
+  });
+  bool found = false;
+  for (const auto& dev : devices) {
+    if (dev.name == name) { found = true; break; }
+  }
+  if (!found) {
+    RTC_LOG(LS_WARNING) << "SetAudioDevice: not found: " << name;
+    return false;
+  }
+  audio_device_name_ = name;
+  RTC_LOG(LS_INFO) << "SetAudioDevice: " << name;
+  if (engine_observer_) {
+    engine_observer_->OnAudioDeviceChanged(name, name, true);
+  }
+  return true;
+}
+
+// 音频开关：空闲时只记标志（下次 offer/answer 随轨道带上），通话中走重协商。
+void webrtc_engine::AudioOnImpl() {
+  if (audio_enabled_) {
+    // 幂等：重复开启只回显，不重复加轨/重协商。
+    if (engine_observer_) {
+      engine_observer_->OnAudioStateChanged(true);
+      engine_observer_->OnAudioSwitched(true, true);
+    }
+    return;
+  }
+  audio_enabled_ = true;
+  if (!peer_connection_) {
+    RTC_LOG(LS_INFO) << "AudioOn (pending until next call)";
+    if (engine_observer_) {
+      engine_observer_->OnAudioStateChanged(true);
+      engine_observer_->OnAudioSwitched(true, true);
+    }
+    return;
+  }
+  audio_switch_in_progress_ = true;
+  if (!AddAudioTrackToPc()) {
+    audio_switch_in_progress_ = false;
+    audio_enabled_ = false;
+    RTC_LOG(LS_ERROR) << "AudioOn: AddAudioTrack failed";
+    if (engine_observer_) engine_observer_->OnAudioSwitched(true, false);
+    return;
+  }
+  TriggerRenegotiation();
+  RTC_LOG(LS_INFO) << "AudioOn";
+  if (engine_observer_) engine_observer_->OnAudioStateChanged(true);
+}
+
+void webrtc_engine::AudioOffImpl() {
+  if (!audio_enabled_) {
+    if (engine_observer_) {
+      engine_observer_->OnAudioStateChanged(false);
+      engine_observer_->OnAudioSwitched(false, true);
+    }
+    return;
+  }
+  audio_enabled_ = false;
+  if (!peer_connection_ || !audio_sender_) {
+    RTC_LOG(LS_INFO) << "AudioOff (pending / no track)";
+    if (engine_observer_) {
+      engine_observer_->OnAudioStateChanged(false);
+      engine_observer_->OnAudioSwitched(false, true);
+    }
+    return;
+  }
+  audio_switch_in_progress_ = true;
+  if (!RemoveAudioTrackFromPc()) {
+    audio_switch_in_progress_ = false;
+    RTC_LOG(LS_ERROR) << "AudioOff: RemoveAudioTrack failed";
+    if (engine_observer_) engine_observer_->OnAudioSwitched(false, false);
+    return;
+  }
+  TriggerRenegotiation();
+  RTC_LOG(LS_INFO) << "AudioOff";
+  if (engine_observer_) engine_observer_->OnAudioStateChanged(false);
+}
+
+void webrtc_engine::GetAudioStatusImpl() {
+  if (!engine_observer_) return;
+  EnsureAudioReady();  // 首次查询时也让 has_device_module 准确
+  AudioStateSnapshot state;
+  state.enabled = audio_enabled_;
+  state.device_id = audio_device_name_;
+  state.device_name = audio_device_name_;
+  state.in_call = (peer_connection_ != nullptr);
+  state.aec = audio_processing_.aec;
+  state.ns = audio_processing_.ns;
+  state.agc = audio_processing_.agc;
+  state.has_device_module = (adm_ != nullptr);
+  engine_observer_->OnAudioStatus(state);
+}
+
+bool webrtc_engine::SetAudioProcessingImpl(const std::string& flag, bool on) {
+  if (flag == "aec") {
+    audio_processing_.aec = on;
+  } else if (flag == "ns") {
+    audio_processing_.ns = on;
+  } else if (flag == "agc") {
+    audio_processing_.agc = on;
+  } else {
+    RTC_LOG(LS_WARNING) << "SetAudioProcessing: unknown flag " << flag;
+    return false;
+  }
+  ReapplyAudioProcessing();
+  if (engine_observer_) {
+    engine_observer_->OnAudioProcessingChanged(audio_processing_);
+  }
+  return true;
+}
+
+void webrtc_engine::CreateAudioTrack() {
+  if (audio_track_) return;
+  if (!peer_connection_factory_) {
+    RTC_LOG(LS_WARNING) << "CreateAudioTrack: factory not created";
+    return;
+  }
+  AudioOptions options;
+  options.echo_cancellation = audio_processing_.aec;
+  options.noise_suppression = audio_processing_.ns;
+  options.auto_gain_control = audio_processing_.agc;
+  // 只采集也要开始录音（WebRTC 默认 true，这里显式声明）。
+  options.init_recording_on_send = true;
+  audio_source_ = peer_connection_factory_->CreateAudioSource(options);
+  if (!audio_source_) {
+    RTC_LOG(LS_ERROR) << "CreateAudioTrack: CreateAudioSource failed";
+    return;
+  }
+  audio_track_ =
+      peer_connection_factory_->CreateAudioTrack("audio", audio_source_.get());
+  RTC_LOG(LS_INFO) << "AudioTrack created";
+}
+
+bool webrtc_engine::AddAudioTrackToPc() {
+  CreateAudioTrack();
+  if (!peer_connection_ || !audio_track_) return false;
+  ApplySelectedAudioDevice();  // 必须在 InitRecording 之前
+  auto result = peer_connection_->AddTrack(audio_track_, {"stream"});
+  if (result.ok()) {
+    audio_sender_ = result.value();
+    // 音轨创建会触发 WebRtcVoiceSendChannel::SetOptions，可能覆盖 APM 配置，
+    // 这里按当前开关重新应用一次。
+    ReapplyAudioProcessing();
+    RTC_LOG(LS_INFO) << "Audio track added to PC";
+    return true;
+  }
+  RTC_LOG(LS_ERROR) << "AddTrack(audio) failed: " << result.error().message();
+  return false;
+}
+
+bool webrtc_engine::RemoveAudioTrackFromPc() {
+  if (peer_connection_ && audio_sender_) {
+    RTCError err = peer_connection_->RemoveTrackOrError(audio_sender_);
+    if (!err.ok()) {
+      RTC_LOG(LS_ERROR) << "RemoveTrack(audio) failed: " << err.message();
+      return false;
+    }
+  }
+  audio_sender_ = nullptr;
+  audio_track_ = nullptr;
+  return true;
+}
+
+void webrtc_engine::ApplySelectedAudioDevice() {
+  if (!adm_ || audio_device_name_.empty()) {
+    return;  // 用系统默认设备
+  }
+  const std::string name = audio_device_name_;
+  worker_thread_->BlockingCall([this, name] {
+    webrtc_media::SetRecordingDeviceByName(adm_.get(), name);
+  });
+}
+
+void webrtc_engine::ReapplyAudioProcessing() {
+  if (!apm_) return;
+  const webrtc_media::AudioProcessingState state = audio_processing_;
+  worker_thread_->BlockingCall(
+      [this, state] { webrtc_media::ApplyAudioProcessing(apm_.get(), state); });
+}
+
+// ============================================================================
 //  视频参数控制（SetParameters 动态改，不重协商）
 // ============================================================================
 
@@ -972,16 +1225,22 @@ bool webrtc_engine::InitializePeerConnectionFactoryImpl() {
   deps.network_thread = network_thread_.get();
   deps.worker_thread = worker_thread_.get();
   deps.env = *environment_;
-  // dummy ADM（视频-only，headless 无音频设备，避免 ALSA 阻塞），须在 worker 线程创建。
-  deps.adm = worker_thread_->BlockingCall(
+  // 真实平台 ADM（PulseAudio 后端），必须在 worker 线程创建并 Init；
+  // 失败（没有音频服务）时回退 dummy，保证视频功能可用。
+  adm_ = worker_thread_->BlockingCall(
       [this]() -> scoped_refptr<AudioDeviceModule> {
-        auto adm = CreateAudioDeviceModule(*environment_,
-                                           AudioDeviceModule::kDummyAudio);
-        if (adm) {
-          adm->Init();
+        auto adm = webrtc_media::CreatePlatformAudioDeviceModule(*environment_);
+        if (!adm) {
+          RTC_LOG(LS_WARNING) << "Platform ADM unavailable, fallback to dummy";
+          adm = CreateAudioDeviceModule(*environment_,
+                                        AudioDeviceModule::kDummyAudio);
+          if (adm) adm->Init();
         }
         return adm;
       });
+  deps.adm = adm_;
+  // 注入「可捕获 APM 实例」的 builder，供运行时 AEC/NS/AGC 开关使用。
+  webrtc_media::ConfigureAudioProcessing(deps, &apm_);
   webrtc_media::ConfigureVideoCodecs(deps);
   peer_connection_factory_ =
       CreateModularPeerConnectionFactory(std::move(deps));
@@ -1089,6 +1348,9 @@ void webrtc_engine::StartCallImpl(int peer_id) {
   if (video_enabled_) {
     AddVideoTrackToPc();  // 建 offer 前加视频轨，offer 才含视频 m-line
   }
+  if (audio_enabled_) {
+    AddAudioTrackToPc();  // 同上：offer 才含音频 m-line
+  }
   CreateOffer();
 }
 
@@ -1183,6 +1445,8 @@ void webrtc_engine::ReleasePeerConnection() {
   }
   video_track_ = nullptr;   // track 随 PC 走，重建后重加（source 复用）
   video_sender_ = nullptr;
+  audio_track_ = nullptr;   // 同上：音频轨也随 PC 走，source 复用
+  audio_sender_ = nullptr;
   remote_video_sink_.reset();
   is_connected_ = false;
   data_channel_open_ = false;
@@ -1204,6 +1468,9 @@ void webrtc_engine::RebuildAndOffer() {
   }
   if (video_enabled_) {
     AddVideoTrackToPc();  // 重建后补回视频轨
+  }
+  if (audio_enabled_) {
+    AddAudioTrackToPc();  // 重建后补回音频轨
   }
   CreateOffer();
 }
@@ -1289,6 +1556,9 @@ void webrtc_engine::OnSignalCall(int from, const std::string& sdp) {
   }
   if (video_enabled_) {
     AddVideoTrackToPc();  // 建 answer 前加视频轨
+  }
+  if (audio_enabled_) {
+    AddAudioTrackToPc();  // 建 answer 前加音频轨
   }
   SetRemoteOffer(sdp);
 }
@@ -1378,6 +1648,9 @@ void webrtc_engine::OnSignalReoffer(int from, const std::string& sdp) {
   }
   if (video_enabled_ && !video_track_) {
     AddVideoTrackToPc();  // 重建后补回视频轨（answer 前）
+  }
+  if (audio_enabled_ && !audio_track_) {
+    AddAudioTrackToPc();  // 重建后补回音频轨（answer 前）
   }
   if (engine_observer_) {
     engine_observer_->OnRemoteSdp("offer", sdp);
@@ -1543,6 +1816,11 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
       engine_->video_switch_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, true);
     }
+    // 音频与视频独立判断：同一次重协商可能同时完成两者。
+    if (engine_->audio_switch_in_progress_) {
+      engine_->audio_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, true);
+    }
   }
 }
 
@@ -1555,6 +1833,10 @@ void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
   } else if (engine_->video_switch_in_progress_) {
     engine_->video_switch_in_progress_ = false;
     if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, false);
+  }
+  if (engine_->audio_switch_in_progress_) {
+    engine_->audio_switch_in_progress_ = false;
+    if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, false);
   }
 }
 
@@ -1592,6 +1874,11 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
       engine_->video_switch_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, true);
     }
+    if (engine_->audio_switch_in_progress_) {
+      // 收的是 answer（音频开关重协商完成）
+      engine_->audio_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, true);
+    }
   } else {
     RTC_LOG(LS_ERROR) << "SetRemoteDescription failed: " << error.message();
     if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("set_remote_desc_failed", error.message());
@@ -1601,6 +1888,10 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
     } else if (engine_->video_switch_in_progress_) {
       engine_->video_switch_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnVideoSwitched(engine_->video_enabled_, false);
+    }
+    if (engine_->audio_switch_in_progress_) {
+      engine_->audio_switch_in_progress_ = false;
+      if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, false);
     }
   }
 }

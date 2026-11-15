@@ -7,6 +7,8 @@
 
 #include "api/data_channel_interface.h"
 #include "api/peer_connection_interface.h"
+#include "media/audio_device.h"
+#include "media/audio_processing.h"
 #include "media/video_device.h"
 #include "signaling/ws_signaling_client.h"
 
@@ -159,6 +161,18 @@ struct VideoState {
   std::string encode_degradation;    // maintain_resolution / maintain_framerate / balanced
 };
 
+// 音频完整状态快照（get_audio_status 回显 / 开关后推送）。
+struct AudioStateSnapshot {
+  bool enabled = false;       // 本端音频轨是否开启
+  std::string device_id;      // 选中的录音设备名（空 = 系统默认）
+  std::string device_name;    // 同 device_id（Pulse source 名）
+  bool in_call = false;       // 是否在通话中（有 PC）
+  bool aec = false;           // 回声消除
+  bool ns = true;             // 降噪
+  bool agc = true;            // 自动增益
+  bool has_device_module = false;  // false = 平台 ADM 不可用，已回退 dummy
+};
+
 // 引擎对外事件接口：上层（IPC/UI）实现，接收信令、SDP/ICE、PeerConnection、
 // DataChannel 的状态与消息。所有回调在引擎的 signaling 线程同步触发。
 struct EngineObserver {
@@ -242,6 +256,24 @@ struct EngineObserver {
   virtual void OnRemoteVideoStarted() {}
   // 远端视频轨移除（远端停止发视频）。
   virtual void OnRemoteVideoStopped() {}
+
+  // 音频（第一期：采集上行 + 设备选择 + 音频处理开关）
+  // 本端音频开关状态变化（true=已开，false=已关）。
+  virtual void OnAudioStateChanged(bool enabled) {}
+  // 音频操作完成/失败（audio_on/off 的 result）。
+  virtual void OnAudioSwitched(bool enabled, bool success) {}
+  // 完整音频状态（get_audio_status 触发）。
+  virtual void OnAudioStatus(const AudioStateSnapshot& state) {}
+  // 录音设备列表（get_audio_devices 触发）。
+  virtual void OnAudioDevices(
+      const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+      const std::string& current) {}
+  // 录音设备切换结果（set_audio_device 触发）。
+  virtual void OnAudioDeviceChanged(const std::string& id,
+                                    const std::string& name, bool success) {}
+  // 音频处理开关变化（set_audio_processing 触发）。
+  virtual void OnAudioProcessingChanged(
+      const webrtc_media::AudioProcessingState& state) {}
 };
 
 #endif  // APPS_PEERCONNECTION_WEBRTC_CLIENT_ENGINE_OBSERVER_H_
