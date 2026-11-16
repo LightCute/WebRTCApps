@@ -207,6 +207,18 @@ def assert_frames_continue(d, label):
         fail(f"{label}: 画面停止（{before}->{st2 and st2.get('bytes_sent')}）")
 
 
+def assert_audio_continue(d, label):
+    d.drain("audio_stats")
+    st1 = d.wait("audio_stats", timeout=10)
+    if not st1:
+        fail(f"{label}: 没有 audio_stats")
+    st2 = d.wait("audio_stats", timeout=10)
+    if not st2 or st2.get("recv", {}).get("packets_received", 0) <= \
+            st1.get("recv", {}).get("packets_received", 0):
+        fail(f"{label}: 音频停止（{st1.get('recv')} -> "
+             f"{st2 and st2.get('recv')}）")
+
+
 def sudo_shell(script):
     password = os.environ.get("SUDO_PASS", "")
     if password:
@@ -286,6 +298,11 @@ def main():
         answerer.wait("ice_config", timeout=5)
         offerer.send("set_ice_transports relay")
         offerer.wait("ice_config", timeout=5)
+        for d in (offerer, answerer):
+            d.send("audio_on")
+            if not d.wait("audio_switched",
+                          lambda e: e.get("result") == "success", 5):
+                fail("audio_on 失败")
         answerer.send("set_video_device synthetic")
         answerer.wait("video_device", timeout=5)
         offerer.send("get_video_devices")
@@ -313,23 +330,31 @@ def main():
             fail("answerer not in roster")
 
         def call_and_video():
-            offerer.drain("peer_connection.state")
-            answerer.drain("peer_connection.state")
-            offerer.send(f"call {aid}")
-            if not offerer.wait("peer_connection.state",
-                                lambda e: e.get("state") == "connected", 20):
-                fail("通话未连通")
-            if not answerer.wait("peer_connection.state",
-                                 lambda e: e.get("state") == "connected", 20):
-                fail("对端未连通")
+            # leave 后立即重呼可能撞本地 roster 缓存的 peer_busy，重试几次。
+            for _ in range(3):
+                offerer.drain("peer_connection.state")
+                answerer.drain("peer_connection.state")
+                offerer.send(f"call {aid}")
+                err = offerer.wait("ipc.error", timeout=2)
+                if err is not None:
+                    time.sleep(1)
+                    continue
+                if offerer.wait("peer_connection.state",
+                                lambda e: e.get("state") == "connected", 20) and \
+                        answerer.wait("peer_connection.state",
+                                      lambda e: e.get("state") == "connected", 20):
+                    return
+                time.sleep(1)
+            fail("通话未连通")
 
         call_and_video()
         offerer.send("video_on")
         if not answerer.wait("remote_video.started", timeout=20):
             fail("对端未收到视频")
         offerer.send("set_video_stats on 1000")
+        offerer.send("set_audio_stats on 1000")
         time.sleep(1)
-        print("准备完成：通话 + 视频 + 统计")
+        print("准备完成：通话 + 视频 + 音频 + 统计")
 
         # ================= A. 组合 =================
         print("-- A1 视频中 switch_ice --")
@@ -344,7 +369,8 @@ def main():
                                  lambda e: e.get("result") == "success", 30):
                 fail(f"A1 对端 switch_ice {mode} 未成功")
             assert_frames_continue(offerer, f"A1 {mode} 后")
-            print(f"  [PASS] switch_ice {mode} 后画面继续")
+            assert_audio_continue(offerer, f"A1 {mode} 后")
+            print(f"  [PASS] switch_ice {mode} 后画面/音频继续")
 
         print("-- A2 视频中 reconnect ×3 --")
         for i in range(3):
@@ -354,7 +380,8 @@ def main():
                                 lambda e: e.get("result") == "success", 30):
                 fail(f"A2 第{i}次 reconnect 未成功")
         assert_frames_continue(offerer, "A2 后")
-        print("  [PASS] reconnect ×3 后画面继续")
+        assert_audio_continue(offerer, "A2 后")
+        print("  [PASS] reconnect ×3 后画面/音频继续")
 
         if len(cams) >= 2:
             print("-- A3 切设备后立刻切档位 --")
@@ -409,9 +436,11 @@ def main():
         if not offerer.wait("signal_client.call_ended", timeout=10):
             fail("A5 leave 未结束")
         answerer.wait("signal_client.call_ended", timeout=10)
+        time.sleep(1.0)  # 等信令服务器把对端状态刷成 idle
         call_and_video()
         assert_frames_continue(offerer, "A5 重呼后")
-        print("  [PASS] leave → call 重连，画面正常")
+        assert_audio_continue(offerer, "A5 重呼后")
+        print("  [PASS] leave → call 重连，画面/音频正常")
 
         # ================= B. 风暴 =================
         print("-- B2 video_on + switch_ice 连发（两个都触发重协商）--")
@@ -460,6 +489,42 @@ def main():
             fail("B4 进程崩溃")
         print("  [PASS] 20 条刷屏后回显为最后值 690")
 
+        print("-- B7 audio_on/off 抖动 --")
+        for line in ("audio_off", "audio_on", "audio_off", "audio_on"):
+            offerer.send(line)
+        # 多次重协商可能乱序，最终状态以 get_audio_status 为准。
+        ok = False
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            offerer.send("get_audio_status")
+            ev = offerer.wait("audio_status", timeout=3)
+            if ev and ev.get("enabled") is True:
+                ok = True
+                break
+            time.sleep(0.5)
+        if not ok:
+            fail("B7 audio 抖动后未恢复 enabled=true")
+        if not offerer.alive():
+            fail("B7 进程崩溃")
+        assert_audio_continue(offerer, "B7 后")
+        print("  [PASS] audio 抖动后 enabled=true、音频继续、进程存活")
+
+        print("-- B8 set_audio_config 刷屏 ×20 --")
+        for i in range(20):
+            level = "high" if i % 2 == 0 else "moderate"
+            offerer.send(f"set_audio_config noise_suppression.level {level}")
+        time.sleep(1)
+        # 20 次设置各自都有 audio_config 回显，先丢掉旧回显再查最终值。
+        offerer.drain("audio_config")
+        offerer.send("get_audio_config")
+        ev = offerer.wait("audio_config", timeout=8)
+        if not ev or (ev.get("processing", {}).get("noise_suppression", {})
+                      .get("level")) != "moderate":
+            fail(f"B8 最终 ns_level 应为 moderate: {ev}")
+        if not offerer.alive():
+            fail("B8 进程崩溃")
+        print("  [PASS] 20 条配置刷屏后回显最后值 moderate、进程存活")
+
         print("-- B1 switch_ice 连发 ×3 --")
         for _ in range(3):
             offerer.send("switch_ice host")
@@ -487,6 +552,12 @@ def main():
             second.send("get_video_status")
             if not offerer.wait("video_params", timeout=8):
                 fail("B6 B 的命令回执未广播给 A")
+            offerer.drain("audio_config")
+            second.send("get_audio_config")
+            if not offerer.wait("audio_config", timeout=8):
+                fail("B6 audio_config 未广播给 A")
+            if not second.wait("audio_config", timeout=8):
+                fail("B6 第二个客户端未收到 audio_config")
             offerer.drain("video_device")
             second.send("set_video_device synthetic")
             ev = second.wait("video_device", timeout=10)
@@ -511,12 +582,14 @@ def main():
         offerer.wait("signal_client.call_ended", timeout=10)
         answerer.wait("signal_client.call_ended", timeout=10)
         for i in range(100):
-            if i % 3 == 0:
+            if i % 4 == 0:
                 offerer.send("call 0")
-            elif i % 3 == 1:
+            elif i % 4 == 1:
                 offerer.send("switch_ice")
+            elif i % 4 == 2:
+                offerer.send("set_audio_config no.such.key 1")
             else:
-                offerer.send("set_video_device x")
+                offerer.send("set_audio_device nonsense")
         time.sleep(3)
         offerer.drain("ipc.error")
         offerer.send("call 0")

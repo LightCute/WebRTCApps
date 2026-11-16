@@ -40,6 +40,8 @@ const char* const kCommands[] = {
     "get_audio_devices",            "set_audio_device <id>",
     "audio_on",                     "audio_off",
     "get_audio_status",             "set_audio_processing <aec|ns|agc> <on|off>",
+    "get_audio_config",             "set_audio_config <key> <value>",
+    "set_audio_stats <on|off> [interval_ms]",
 };
 
 // 单行紧凑 JSON（indentation 置空），保证不破坏 unix socket 的行分帧。
@@ -56,6 +58,140 @@ Json::Value Event(const std::string& name) {
   Json::Value v;
   v["event"] = name;
   return v;
+}
+
+const char* NsLevelToString(
+    webrtc::AudioProcessing::Config::NoiseSuppression::Level level) {
+  using Level = webrtc::AudioProcessing::Config::NoiseSuppression::Level;
+  switch (level) {
+    case Level::kLow: return "low";
+    case Level::kModerate: return "moderate";
+    case Level::kHigh: return "high";
+    case Level::kVeryHigh: return "very_high";
+  }
+  return "moderate";
+}
+
+const char* AgcModeToString(
+    webrtc::AudioProcessing::Config::GainController1::Mode mode) {
+  using Mode = webrtc::AudioProcessing::Config::GainController1::Mode;
+  switch (mode) {
+    case Mode::kAdaptiveAnalog: return "adaptive_analog";
+    case Mode::kAdaptiveDigital: return "adaptive_digital";
+    case Mode::kFixedDigital: return "fixed_digital";
+  }
+  return "adaptive_analog";
+}
+
+const char* ClippingModeToString(
+    webrtc::AudioProcessing::Config::GainController1::AnalogGainController::
+        ClippingPredictor::Mode mode) {
+  using Mode = webrtc::AudioProcessing::Config::GainController1::
+      AnalogGainController::ClippingPredictor::Mode;
+  switch (mode) {
+    case Mode::kClippingEventPrediction: return "clipping_event_prediction";
+    case Mode::kAdaptiveStepClippingPeakPrediction:
+      return "adaptive_step_clipping_peak_prediction";
+    case Mode::kFixedStepClippingPeakPrediction:
+      return "fixed_step_clipping_peak_prediction";
+  }
+  return "clipping_event_prediction";
+}
+
+Json::Value ProcessingConfigToJson(
+    const webrtc::AudioProcessing::Config& c) {
+  Json::Value p;
+  Json::Value ec;
+  ec["enabled"] = c.echo_canceller.enabled;
+  ec["enforce_high_pass_filtering"] =
+      c.echo_canceller.enforce_high_pass_filtering;
+  ec["export_linear_aec_output"] = c.echo_canceller.export_linear_aec_output;
+  p["echo_canceller"] = ec;
+
+  Json::Value ns;
+  ns["enabled"] = c.noise_suppression.enabled;
+  ns["level"] = NsLevelToString(c.noise_suppression.level);
+  ns["analyze_linear_aec_output_when_available"] =
+      c.noise_suppression.analyze_linear_aec_output_when_available;
+  p["noise_suppression"] = ns;
+
+  Json::Value ts;
+  ts["enabled"] = c.transient_suppression.enabled;
+  p["transient_suppression"] = ts;
+
+  Json::Value hpf;
+  hpf["enabled"] = c.high_pass_filter.enabled;
+  hpf["apply_in_full_band"] = c.high_pass_filter.apply_in_full_band;
+  p["high_pass_filter"] = hpf;
+
+  const auto& g1 = c.gain_controller1;
+  Json::Value agc1;
+  agc1["enabled"] = g1.enabled;
+  agc1["mode"] = AgcModeToString(g1.mode);
+  agc1["target_level_dbfs"] = g1.target_level_dbfs;
+  agc1["compression_gain_db"] = g1.compression_gain_db;
+  agc1["enable_limiter"] = g1.enable_limiter;
+  Json::Value agc;
+  agc["enabled"] = g1.analog_gain_controller.enabled;
+  agc["startup_min_volume"] = g1.analog_gain_controller.startup_min_volume;
+  agc["clipped_level_min"] = g1.analog_gain_controller.clipped_level_min;
+  agc["enable_digital_adaptive"] =
+      g1.analog_gain_controller.enable_digital_adaptive;
+  agc["clipped_level_step"] = g1.analog_gain_controller.clipped_level_step;
+  agc["clipped_ratio_threshold"] =
+      g1.analog_gain_controller.clipped_ratio_threshold;
+  agc["clipped_wait_frames"] = g1.analog_gain_controller.clipped_wait_frames;
+  const auto& cp = g1.analog_gain_controller.clipping_predictor;
+  Json::Value cpj;
+  cpj["enabled"] = cp.enabled;
+  cpj["mode"] = ClippingModeToString(cp.mode);
+  cpj["window_length"] = cp.window_length;
+  cpj["reference_window_length"] = cp.reference_window_length;
+  cpj["reference_window_delay"] = cp.reference_window_delay;
+  cpj["clipping_threshold"] = cp.clipping_threshold;
+  cpj["crest_factor_margin"] = cp.crest_factor_margin;
+  cpj["use_predicted_step"] = cp.use_predicted_step;
+  agc["clipping_predictor"] = cpj;
+  agc1["analog_gain_controller"] = agc;
+  p["gain_controller1"] = agc1;
+
+  const auto& g2 = c.gain_controller2;
+  Json::Value agc2;
+  agc2["enabled"] = g2.enabled;
+  Json::Value ivc;
+  ivc["enabled"] = g2.input_volume_controller.enabled;
+  agc2["input_volume_controller"] = ivc;
+  Json::Value ad;
+  ad["enabled"] = g2.adaptive_digital.enabled;
+  ad["headroom_db"] = g2.adaptive_digital.headroom_db;
+  ad["max_gain_db"] = g2.adaptive_digital.max_gain_db;
+  ad["initial_gain_db"] = g2.adaptive_digital.initial_gain_db;
+  ad["max_gain_change_db_per_second"] =
+      g2.adaptive_digital.max_gain_change_db_per_second;
+  ad["max_output_noise_level_dbfs"] =
+      g2.adaptive_digital.max_output_noise_level_dbfs;
+  agc2["adaptive_digital"] = ad;
+  Json::Value fd;
+  fd["gain_db"] = g2.fixed_digital.gain_db;
+  agc2["fixed_digital"] = fd;
+  p["gain_controller2"] = agc2;
+
+  Json::Value pre;
+  pre["enabled"] = c.pre_amplifier.enabled;
+  pre["fixed_gain_factor"] = c.pre_amplifier.fixed_gain_factor;
+  p["pre_amplifier"] = pre;
+
+  const auto& cla = c.capture_level_adjustment;
+  Json::Value claj;
+  claj["enabled"] = cla.enabled;
+  claj["pre_gain_factor"] = cla.pre_gain_factor;
+  claj["post_gain_factor"] = cla.post_gain_factor;
+  Json::Value emu;
+  emu["enabled"] = cla.analog_mic_gain_emulation.enabled;
+  emu["initial_level"] = cla.analog_mic_gain_emulation.initial_level;
+  claj["analog_mic_gain_emulation"] = emu;
+  p["capture_level_adjustment"] = claj;
+  return p;
 }
 
 const char* ModeToString(IceTransportsMode m) {
@@ -424,21 +560,87 @@ void EngineController::OnAudioStatus(const AudioStateSnapshot& state) {
   Send(SerializeJson(v));
 }
 
-void EngineController::OnAudioDevices(
-    const std::vector<webrtc_media::AudioDeviceInfo>& devices,
-    const std::string& current) {
-  Json::Value v = Event("audio_devices");
-  v["current"] = current;
+Json::Value AudioDevicesToJson(
+    const std::vector<webrtc_media::AudioDeviceInfo>& devices) {
   Json::Value arr(Json::arrayValue);
   for (const auto& d : devices) {
     Json::Value e;
     e["index"] = d.index;
     e["name"] = d.name;
-    e["id"] = d.name;  // Pulse source 名作为稳定 id
+    e["id"] = d.id.empty() ? d.name : d.id;  // 稳定 Pulse source name / "default"
+    e["available"] = d.available;
+    e["hardware_sample_rate"] = d.hardware_sample_rate;
+    e["hardware_channels"] = d.hardware_channels;
     arr.append(e);
   }
-  v["devices"] = arr;
+  return arr;
+}
+
+void EngineController::OnAudioDevices(
+    const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+    const std::string& current) {
+  Json::Value v = Event("audio_devices");
+  v["current"] = current;
+  v["devices"] = AudioDevicesToJson(devices);
   Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioDevicesChanged(
+    const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+    const std::string& current, const std::string& reason) {
+  Json::Value v = Event("audio_devices_changed");
+  v["current"] = current;
+  v["reason"] = reason;
+  v["devices"] = AudioDevicesToJson(devices);
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioDeviceLost(const std::string& id) {
+  Json::Value v = Event("audio_device_lost");
+  v["id"] = id;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioStats(const AudioStats& s) {
+  Json::Value v = Event("audio_stats");
+  v["enabled"] = s.enabled;
+  v["in_call"] = s.in_call;
+
+  Json::Value recv;
+  recv["codec"] = s.recv_codec;
+  recv["packets_received"] = static_cast<Json::UInt>(s.packets_received);
+  recv["bytes_received"] = static_cast<Json::UInt64>(s.bytes_received);
+  recv["packets_lost"] = s.packets_lost;
+  recv["jitter_ms"] = s.jitter_ms;
+  recv["audio_level"] = s.audio_level;
+  v["recv"] = recv;
+
+  Json::Value send;
+  send["codec"] = s.send_codec;
+  send["packets_sent"] = static_cast<Json::UInt>(s.packets_sent);
+  send["bytes_sent"] = static_cast<Json::UInt64>(s.bytes_sent);
+  send["target_bitrate"] = s.target_bitrate;
+  v["send"] = send;
+
+  Json::Value remote;
+  remote["rtt_ms"] = s.rtt_ms;
+  remote["fraction_lost"] = s.fraction_lost;
+  v["remote"] = remote;
+
+  Json::Value apm;
+  apm["residual_echo_likelihood"] = s.residual_echo_likelihood;
+  apm["echo_return_loss"] = s.echo_return_loss;
+  apm["delay_median_ms"] = s.delay_median_ms;
+  v["apm"] = apm;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnRemoteAudioStarted() {
+  Send(SerializeJson(Event("remote_audio.started")));
+}
+
+void EngineController::OnRemoteAudioStopped() {
+  Send(SerializeJson(Event("remote_audio.stopped")));
 }
 
 void EngineController::OnAudioDeviceChanged(const std::string& id,
@@ -457,6 +659,42 @@ void EngineController::OnAudioProcessingChanged(
   v["aec"] = state.aec;
   v["ns"] = state.ns;
   v["agc"] = state.agc;
+  Send(SerializeJson(v));
+}
+
+void EngineController::OnAudioConfig(const AudioConfigSnapshot& config) {
+  Json::Value v = Event("audio_config");
+  v["processing"] = ProcessingConfigToJson(config.processing);
+
+  Json::Value src;
+  src["stereo_swapping"] = config.source.stereo_swapping;
+  src["jitter_max_packets"] = config.source.jitter_max_packets;
+  src["jitter_fast_accelerate"] = config.source.jitter_fast_accelerate;
+  src["jitter_min_delay_ms"] = config.source.jitter_min_delay_ms;
+  src["init_recording_on_send"] = config.source.init_recording_on_send;
+  v["source"] = src;
+
+  Json::Value pending(Json::arrayValue);
+  for (const auto& key : config.pending_source) {
+    pending.append(key);
+  }
+  v["pending_source"] = pending;
+
+  Json::Value dev;
+  dev["device_id"] = config.device_id;
+  dev["device_name"] = config.device_name;
+  dev["in_call"] = config.in_call;
+  dev["has_device_module"] = config.has_device_module;
+  dev["mic_muted"] = config.mic_muted;
+  dev["speaker_volume_available"] = config.speaker_volume_available;
+  dev["speaker_volume"] = config.speaker_volume;
+  dev["speaker_mute_available"] = config.speaker_mute_available;
+  dev["speaker_muted"] = config.speaker_muted;
+  dev["recording_sample_rate"] = config.recording_sample_rate;
+  dev["playout_sample_rate"] = config.playout_sample_rate;
+  dev["stereo_recording"] = config.stereo_recording;
+  dev["stereo_playout"] = config.stereo_playout;
+  v["device"] = dev;
   Send(SerializeJson(v));
 }
 
@@ -896,11 +1134,6 @@ void EngineController::HandleCommand(const std::string& line) {
     if (last != std::string::npos) {
       id = id.substr(0, last + 1);
     }
-    if (engine_->is_connected() || engine_->peer_id() > 0) {
-      SendError("unsupported_in_call",
-                "switching audio device during a call is not supported yet");
-      return;
-    }
     if (!engine_->SetAudioDevice(id)) {
       SendError("device_not_found", "audio device not found: " + id);
     }
@@ -921,6 +1154,30 @@ void EngineController::HandleCommand(const std::string& line) {
       return;
     }
     engine_->SetAudioProcessing(flag, value == "on");
+  } else if (cmd == "set_audio_stats") {
+    std::string mode;
+    ss >> mode;
+    if (mode != "on" && mode != "off") {
+      SendError("usage", "usage: set_audio_stats <on|off> [interval_ms]");
+      return;
+    }
+    int interval_ms = 0;
+    ss >> interval_ms;
+    engine_->SetAudioStats(mode == "on", interval_ms);
+  } else if (cmd == "get_audio_config") {
+    engine_->GetAudioConfig();
+  } else if (cmd == "set_audio_config") {
+    std::string key;
+    std::string value;
+    ss >> key >> value;
+    if (key.empty() || value.empty()) {
+      SendError("usage", "usage: set_audio_config <key> <value>");
+      return;
+    }
+    std::string error;
+    if (!engine_->SetAudioConfig(key, value, &error)) {
+      SendError("usage", error);
+    }
   } else if (cmd == "get_ice_config") {
     SendIceConfig();
   } else if (cmd == "quit") {

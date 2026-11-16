@@ -80,6 +80,18 @@ git clone <你的 apps 仓库地址> apps          # 目录名任意：apps 或 
 
 > 只要保证 `src/<任意目录>/webrtc_client-26-11-4/` 存在即可；`signal_server_26_11_3` 与它同级，共享 `third_party/`。
 
+### 5.1 应用 WebRTC 源码补丁（必需）
+
+本仓库的音频功能依赖一个针对锁定 commit 的 WebRTC 补丁（修复音频开启时 PC 重建后 Pulse 设备无法重新激活）：
+
+```bash
+cd src
+git apply --check apps/patches/webrtc-1c7365e-pulse-adm-quit-reset.patch
+git apply         apps/patches/webrtc-1c7365e-pulse-adm-quit-reset.patch
+```
+
+补丁说明、回退方式与换版本时的移植方法见 [patches/README.md](patches/README.md)。
+
 ---
 
 ## 6. 编译 webrtc_client（WebRTC 客户端 + 测试）
@@ -98,10 +110,13 @@ bash build_x64.sh
    rtc_build_examples=false
    rtc_build_tools=false
    rtc_include_tests=false
-   rtc_include_pulse_audio=false
+   rtc_include_pulse_audio=true
    use_clang_modules=false
    use_sysroot=true
    ```
+
+> 音频使用 **PulseAudio** 后端（`rtc_include_pulse_audio=true`，x64/arm64 一致）。
+> 运行环境没有音频服务时，引擎会回退 dummy ADM（静音），视频功能不受影响。
 
 2. `ninja -C out/webrtc_client_x64 webrtc_client` 编译。
 
@@ -148,6 +163,15 @@ python3 test/ipc_signaling_test.py
 python3 test/ipc_disconnect_test.py
 python3 test/ipc_multicall_test.py
 python3 test/ipc_failure_test.py     # 命令失败返回（ipc.error）
+
+# 音频（需要本机 PulseAudio/PipeWire 与可用麦克风）
+python3 test/audio_test.py             # 设备枚举/选择、空闲+通话中开关、重建补轨、错误路径
+python3 test/audio_processing_test.py  # AEC/NS/AGC 运行时切换（不重协商）
+python3 test/audio_config_test.py      # 全量 APM 配置、源参数 pending、设备可用性/采样率
+python3 test/audio_mute_volume_test.py # 软件静音 + 扬声器音量/静音
+python3 test/audio_device_switch_test.py  # 空闲/通话中切录音设备
+SUDO_PASS=<密码> python3 test/audio_hotplug_test.py  # 热插拔（USB unbind/bind）
+python3 test/audio_stats_test.py       # 周期性音频统计 + 远端音频事件
 ```
 
 全部通过即可确认编译产物可用。测试明细见 [webrtc_client-26-11-4/TEST.md](webrtc_client-26-11-4/TEST.md)。
@@ -162,8 +186,9 @@ python3 test/ipc_failure_test.py     # 命令失败返回（ipc.error）
 | chromium_revision（DEPS 锁定） | `35639b034f` |
 | 构建系统 | depot_tools 的 gn + ninja |
 | 构建目录 | `src/out/webrtc_client_x64` |
-| 关键 GN 参数 | `is_debug=true`、`use_clang_modules=false`、`use_sysroot=true` |
+| 关键 GN 参数 | `is_debug=true`、`rtc_include_pulse_audio=true`、`use_clang_modules=false`、`use_sysroot=true` |
 | 客户端依赖（已 vendor） | websocketpp、standalone Asio 头文件（`third_party/`） |
+| WebRTC 源码补丁 | `patches/webrtc-1c7365e-pulse-adm-quit-reset.patch`（音频 PC 重建修复，**必须应用**） |
 
 > **为什么必须锁 commit**：本仓库代码依赖该 WebRTC 版本的特定 API（`namespace webrtc`、`GetStats(RTCStatsCollectorCallback*)`、`make_ref_counted` 等）。换 commit 会导致 API 不匹配、编译失败。
 

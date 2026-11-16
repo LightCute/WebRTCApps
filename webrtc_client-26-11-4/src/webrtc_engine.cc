@@ -1,6 +1,8 @@
 #include "webrtc_engine.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <map>
 #include <random>
 
@@ -12,6 +14,8 @@
 #include "api/field_trials.h"
 #include "api/rtp_parameters.h"
 #include "api/stats/rtcstats_objects.h"
+#include "media/audio_mute.h"
+#include "modules/audio_device/audio_device_impl.h"
 #include "media/video_codec.h"
 #include "media/video_device.h"
 #include "media/video_device_monitor.h"
@@ -31,6 +35,24 @@ DegradationPreference StringToDegradation(const std::string& mode) {
   return DegradationPreference::BALANCED;
 }
 
+bool ParseOnOff(const std::string& value, bool* out) {
+  if (value == "on" || value == "true" || value == "1") {
+    *out = true;
+    return true;
+  }
+  if (value == "off" || value == "false" || value == "0") {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
+// ADM 的 index 0 是 "default: <当前默认源>" 别名，名字会随默认设备变化，
+// 不能参与热插拔的集合比较（否则会误报 removed/added）。
+bool IsDefaultAudioAlias(const std::string& name) {
+  return name.rfind("default:", 0) == 0;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -40,6 +62,7 @@ DegradationPreference StringToDegradation(const std::string& mode) {
 webrtc_engine::webrtc_engine() {
   rtc_configuration_.sdp_semantics = SdpSemantics::kUnifiedPlan;
   sdp_observer_ = make_ref_counted<CreateSdpObserver>(this);
+  audio_processing_config_ = webrtc_media::DefaultAudioProcessingConfig();
 }
 
 webrtc_engine::~webrtc_engine() {
@@ -91,16 +114,35 @@ bool webrtc_engine::Start() {
     RTC_LOG(LS_WARNING) << "VideoDeviceMonitor start failed";
     device_monitor_.reset();
   }
+
+  // 音频设备热插拔监听。基线在 ADM 首次创建时建立（可能晚于 Start）。
+  audio_devices_baseline_initialized_ = false;
+  known_audio_device_ids_.clear();
+  audio_device_monitor_ = std::make_unique<webrtc_media::AudioDeviceMonitor>();
+  if (!audio_device_monitor_->Start([this] {
+        if (!signaling_thread_) {
+          return;
+        }
+        signaling_thread_->PostTask([this] { HandleAudioDevicesChanged(); });
+      })) {
+    RTC_LOG(LS_WARNING) << "AudioDeviceMonitor start failed";
+    audio_device_monitor_.reset();
+  }
   return true;
 }
 
 void webrtc_engine::Stop() {
   // 先停周期性统计（避免线程销毁后还有延时任务回调）。
   video_stats_enabled_ = false;
+  audio_stats_enabled_ = false;
   // 再停热插拔监听（避免拆卸过程中再回调）。
   if (device_monitor_) {
     device_monitor_->Stop();
     device_monitor_.reset();
+  }
+  if (audio_device_monitor_) {
+    audio_device_monitor_->Stop();
+    audio_device_monitor_.reset();
   }
   // 再清理 WebRTC 对象（PC/DC/factory 必须在 signaling 线程销毁），最后停线程。
   if (signaling_thread_) {
@@ -215,6 +257,15 @@ void webrtc_engine::SetIceTransports(const std::string& mode) {
 
 // 通话中切换本端 ICE 模式 + 重建 PC 重新连接（须在 signaling 线程调用）。
 void webrtc_engine::SwitchIce(const std::string& mode) {
+  // 已有重协商在途（video_on/off、audio_on/off、reconnect、上一次 switch）：
+  // 直接重建 PC 会让在途 offer/answer 落到已销毁的 PC 上。延迟到本轮完成。
+  if (video_switch_in_progress_ || audio_switch_in_progress_ ||
+      reconnect_in_progress_ || ice_switch_in_progress_) {
+    pending_switch_mode_ = mode;
+    RTC_LOG(LS_INFO) << "SwitchIce deferred until renegotiation completes: "
+                     << mode;
+    return;
+  }
   SetIceTransports(mode);  // 只改本端 mode
   RTC_LOG(LS_INFO) << "SwitchIce mode=" << mode
                    << " type=" << static_cast<int>(rtc_configuration_.type)
@@ -234,6 +285,25 @@ void webrtc_engine::Reconnect() {
     return;
   }
   signaling_thread_->BlockingCall([&] { ReconnectImpl(); });
+}
+
+void webrtc_engine::MaybeRunPendingSwitch() {
+  if (!pending_switch_mode_.has_value()) {
+    return;
+  }
+  if (video_switch_in_progress_ || audio_switch_in_progress_ ||
+      reconnect_in_progress_ || ice_switch_in_progress_) {
+    return;  // 还有协商在途
+  }
+  const std::string mode = *pending_switch_mode_;
+  pending_switch_mode_.reset();
+  RTC_LOG(LS_INFO) << "Running deferred SwitchIce: " << mode;
+  // 可能在 PC 观察者回调里被调用（OnConnectionChange），延后一个任务再重建。
+  if (signaling_thread_) {
+    signaling_thread_->PostTask([this, mode] { SwitchIce(mode); });
+  } else {
+    SwitchIce(mode);
+  }
 }
 
 void webrtc_engine::ReconnectImpl() {
@@ -467,11 +537,98 @@ bool webrtc_engine::SetAudioProcessing(const std::string& flag, bool on) {
   return ok;
 }
 
+void webrtc_engine::GetAudioConfig() {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) { GetAudioConfigImpl(); return; }
+  signaling_thread_->BlockingCall([&] { GetAudioConfigImpl(); });
+}
+
+bool webrtc_engine::SetAudioConfig(const std::string& key,
+                                   const std::string& value,
+                                   std::string* error) {
+  if (!signaling_thread_) return false;
+  if (signaling_thread_->IsCurrent()) {
+    return SetAudioConfigImpl(key, value, error);
+  }
+  bool ok = false;
+  signaling_thread_->BlockingCall(
+      [&] { ok = SetAudioConfigImpl(key, value, error); });
+  return ok;
+}
+
+void webrtc_engine::SetAudioStats(bool enabled, int interval_ms) {
+  if (!signaling_thread_) return;
+  if (signaling_thread_->IsCurrent()) {
+    SetAudioStatsImpl(enabled, interval_ms);
+    return;
+  }
+  signaling_thread_->BlockingCall(
+      [&] { SetAudioStatsImpl(enabled, interval_ms); });
+}
+
 bool webrtc_engine::EnsureAudioReady() {
   if (adm_) {
     return true;
   }
   return InitializePeerConnectionFactoryImpl();
+}
+
+void webrtc_engine::HandleAudioDevicesChanged() {
+  if (!adm_) {
+    return;  // ADM 尚未创建：首次建 factory 时会建立基线
+  }
+  const auto devices = worker_thread_->BlockingCall([this] {
+    return webrtc_media::EnumerateRecordingDevices(adm_.get());
+  });
+  std::set<std::string> ids;
+  for (const auto& device : devices) {
+    if (!IsDefaultAudioAlias(device.name)) {
+      ids.insert(device.id.empty() ? device.name : device.id);
+    }
+  }
+  if (!audio_devices_baseline_initialized_) {
+    known_audio_device_ids_ = ids;
+    audio_devices_baseline_initialized_ = true;
+    return;
+  }
+  bool added = false;
+  bool removed = false;
+  for (const auto& id : ids) {
+    if (known_audio_device_ids_.find(id) == known_audio_device_ids_.end()) {
+      added = true;
+    }
+  }
+  for (const auto& id : known_audio_device_ids_) {
+    if (ids.find(id) == ids.end()) {
+      removed = true;
+    }
+  }
+  if (!added && !removed) {
+    return;
+  }
+  known_audio_device_ids_ = ids;
+  const std::string reason = removed ? "device_removed" : "device_added";
+  RTC_LOG(LS_INFO) << "Audio devices changed: reason=" << reason
+                   << " count=" << devices.size();
+  if (engine_observer_) {
+    engine_observer_->OnAudioDevicesChanged(devices, audio_device_id_, reason);
+  }
+
+  // 策略 A：当前选中的设备被拔出 → 关音频轨（与视频一致），插回只通知。
+  const bool current_lost =
+      !audio_device_id_.empty() && ids.find(audio_device_id_) == ids.end();
+  if (!current_lost) {
+    return;
+  }
+  const std::string lost = audio_device_id_;
+  audio_device_id_.clear();
+  audio_device_name_.clear();
+  if (engine_observer_) {
+    engine_observer_->OnAudioDeviceLost(lost);
+  }
+  if (audio_enabled_ && peer_connection_ && audio_sender_) {
+    AudioOffImpl();
+  }
 }
 
 void webrtc_engine::GetAudioDevicesImpl() {
@@ -486,7 +643,7 @@ void webrtc_engine::GetAudioDevicesImpl() {
     });
   }
   // 未显式选择时回显空串 = 使用系统默认设备（ADM 不暴露当前索引的 getter）。
-  const std::string current = audio_device_name_;
+  const std::string current = audio_device_id_;
   if (engine_observer_) {
     engine_observer_->OnAudioDevices(devices, current);
   }
@@ -497,18 +654,94 @@ bool webrtc_engine::SetAudioDeviceImpl(const std::string& name) {
   const auto devices = worker_thread_->BlockingCall([this] {
     return webrtc_media::EnumerateRecordingDevices(adm_.get());
   });
-  bool found = false;
-  for (const auto& dev : devices) {
-    if (dev.name == name) { found = true; break; }
+  int target_index = -1;
+  int old_index = -1;
+  std::string target_id;
+  std::string target_name;
+  for (size_t i = 0; i < devices.size(); ++i) {
+    const auto& device = devices[i];
+    // id（Pulse source name）优先，兼容按描述名选择。
+    if (device.id == name || device.name == name) {
+      target_index = static_cast<int>(i);
+      target_id = device.id;
+      target_name = device.name;
+    }
+    if ((!audio_device_id_.empty() && device.id == audio_device_id_) ||
+        (audio_device_id_.empty() && !audio_device_name_.empty() &&
+         device.name == audio_device_name_)) {
+      old_index = static_cast<int>(i);
+    }
   }
-  if (!found) {
+  if (target_index < 0) {
     RTC_LOG(LS_WARNING) << "SetAudioDevice: not found: " << name;
     return false;
   }
-  audio_device_name_ = name;
-  RTC_LOG(LS_INFO) << "SetAudioDevice: " << name;
+
+  // 空闲 / 尚未开始录音：只记住，下次开音频生效。
+  const bool should_switch_now =
+      (peer_connection_ != nullptr) && audio_enabled_ && audio_sender_;
+  if (!should_switch_now) {
+    audio_device_id_ = target_id;
+    audio_device_name_ = target_name;
+    RTC_LOG(LS_INFO) << "SetAudioDevice (pending): " << target_id;
+    if (engine_observer_) {
+      engine_observer_->OnAudioDeviceChanged(target_id, target_name, true);
+    }
+    return true;
+  }
+
+  // 通话中：worker 线程执行 Stop → SetRecordingDevice → Init/Start。
+  // 失败回滚到原设备并恢复录音状态。
+  const int rollback_index = old_index >= 0 ? old_index : 0;
+  const bool ok = worker_thread_->BlockingCall([this, target_index,
+                                                rollback_index]() {
+    const bool was_recording = adm_->Recording();
+    auto restore = [&]() {
+      adm_->StopRecording();
+      if (adm_->SetRecordingDevice(
+              static_cast<uint16_t>(rollback_index)) == 0 &&
+          was_recording) {
+        if (adm_->InitRecording() == 0) {
+          adm_->StartRecording();
+        }
+      }
+    };
+    if (was_recording && adm_->StopRecording() != 0) {
+      RTC_LOG(LS_WARNING) << "SetAudioDevice: StopRecording failed";
+      return false;
+    }
+    if (adm_->SetRecordingDevice(static_cast<uint16_t>(target_index)) != 0) {
+      RTC_LOG(LS_WARNING) << "SetAudioDevice: SetRecordingDevice failed";
+      restore();
+      return false;
+    }
+    if (was_recording) {
+      if (adm_->InitRecording() != 0) {
+        RTC_LOG(LS_WARNING) << "SetAudioDevice: InitRecording failed";
+        restore();
+        return false;
+      }
+      if (adm_->StartRecording() != 0) {
+        RTC_LOG(LS_WARNING) << "SetAudioDevice: StartRecording failed";
+        restore();
+        return false;
+      }
+    }
+    return true;
+  });
+  if (!ok) {
+    RTC_LOG(LS_ERROR) << "SetAudioDevice (in call) failed: " << name;
+    if (engine_observer_) {
+      engine_observer_->OnAudioDeviceChanged(target_id, target_name, false);
+    }
+    return false;
+  }
+
+  audio_device_id_ = target_id;
+  audio_device_name_ = target_name;
+  RTC_LOG(LS_INFO) << "SetAudioDevice (in call): " << target_id;
   if (engine_observer_) {
-    engine_observer_->OnAudioDeviceChanged(name, name, true);
+    engine_observer_->OnAudioDeviceChanged(target_id, target_name, true);
   }
   return true;
 }
@@ -579,30 +812,261 @@ void webrtc_engine::GetAudioStatusImpl() {
   EnsureAudioReady();  // 首次查询时也让 has_device_module 准确
   AudioStateSnapshot state;
   state.enabled = audio_enabled_;
-  state.device_id = audio_device_name_;
+  state.device_id = audio_device_id_;
   state.device_name = audio_device_name_;
   state.in_call = (peer_connection_ != nullptr);
-  state.aec = audio_processing_.aec;
-  state.ns = audio_processing_.ns;
-  state.agc = audio_processing_.agc;
+  const webrtc_media::AudioProcessingState flags =
+      webrtc_media::StateFromConfig(audio_processing_config_);
+  state.aec = flags.aec;
+  state.ns = flags.ns;
+  state.agc = flags.agc;
   state.has_device_module = (adm_ != nullptr);
   engine_observer_->OnAudioStatus(state);
 }
 
-bool webrtc_engine::SetAudioProcessingImpl(const std::string& flag, bool on) {
-  if (flag == "aec") {
-    audio_processing_.aec = on;
-  } else if (flag == "ns") {
-    audio_processing_.ns = on;
-  } else if (flag == "agc") {
-    audio_processing_.agc = on;
-  } else {
-    RTC_LOG(LS_WARNING) << "SetAudioProcessing: unknown flag " << flag;
+AudioConfigSnapshot webrtc_engine::BuildAudioConfigSnapshot() const {
+  AudioConfigSnapshot snapshot;
+  snapshot.processing = audio_processing_config_;
+  snapshot.source = audio_source_options_;
+  snapshot.pending_source = pending_source_options_;
+  snapshot.device_id = audio_device_id_;
+  snapshot.device_name = audio_device_name_;
+  snapshot.in_call = (peer_connection_ != nullptr);
+  snapshot.has_device_module = (adm_ != nullptr);
+  snapshot.mic_muted = mic_muted_;
+  snapshot.speaker_volume_available = speaker_volume_available_;
+  snapshot.speaker_volume = speaker_volume_;
+  snapshot.speaker_mute_available = speaker_mute_available_;
+  snapshot.speaker_muted = speaker_muted_;
+  snapshot.recording_sample_rate = recording_sample_rate_;
+  snapshot.playout_sample_rate = playout_sample_rate_;
+  snapshot.stereo_recording = stereo_recording_;
+  snapshot.stereo_playout = stereo_playout_;
+  return snapshot;
+}
+
+void webrtc_engine::GetAudioConfigImpl() {
+  EnsureAudioReady();  // 首次查询时也让 device 字段准确
+  RefreshSpeakerState();
+  RefreshDeviceState();
+  if (engine_observer_) {
+    engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+  }
+}
+
+bool webrtc_engine::SetAudioConfigImpl(const std::string& key,
+                                       const std::string& value,
+                                       std::string* error) {
+  // 软件静音：只改本进程的采集帧（不清 Pulse source）。
+  if (key == "mic_muted") {
+    bool muted = false;
+    if (!ParseOnOff(value, &muted)) {
+      if (error != nullptr) *error = "invalid value for mic_muted: " + value;
+      return false;
+    }
+    mic_muted_ = muted;
+    if (mic_muted_flag_) {
+      mic_muted_flag_->store(muted, std::memory_order_relaxed);
+    }
+    if (engine_observer_) {
+      engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+    }
+    return true;
+  }
+
+  // 扬声器音量（0..100，映射到 ADM 的 min/max）。
+  if (key == "speaker_volume") {
+    errno = 0;
+    char* end = nullptr;
+    const long percent = std::strtol(value.c_str(), &end, 10);
+    if (errno != 0 || end == value.c_str() || *end != '\0' || percent < 0 ||
+        percent > 100) {
+      if (error != nullptr) {
+        *error = "invalid value for speaker_volume: " + value;
+      }
+      return false;
+    }
+    SetSpeakerVolumePercent(static_cast<int>(percent));
+    if (engine_observer_) {
+      engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+    }
+    return true;
+  }
+
+  if (key == "speaker_muted") {
+    bool muted = false;
+    if (!ParseOnOff(value, &muted)) {
+      if (error != nullptr) *error = "invalid value for speaker_muted: " + value;
+      return false;
+    }
+    SetSpeakerMuted(muted);
+    if (engine_observer_) {
+      engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+    }
+    return true;
+  }
+
+  // 源参数（AudioOptions）：只存 pending，下次建音轨时生效。
+  if (key.rfind("source.", 0) == 0) {
+    std::string err;
+    if (!webrtc_media::SetAudioSourceOption(&audio_source_options_, key, value,
+                                            &err)) {
+      if (error != nullptr) {
+        *error = err;
+      }
+      return false;
+    }
+    if (std::find(pending_source_options_.begin(),
+                  pending_source_options_.end(),
+                  key) == pending_source_options_.end()) {
+      pending_source_options_.push_back(key);
+    }
+    if (engine_observer_) {
+      engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+    }
+    return true;
+  }
+
+  std::string err;
+  if (!webrtc_media::SetAudioProcessingKey(&audio_processing_config_, key, value,
+                                           &err)) {
+    if (error != nullptr) {
+      *error = err;
+    }
     return false;
   }
   ReapplyAudioProcessing();
   if (engine_observer_) {
-    engine_observer_->OnAudioProcessingChanged(audio_processing_);
+    engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
+  }
+  return true;
+}
+
+void webrtc_engine::SetAudioStatsImpl(bool enabled, int interval_ms) {
+  const bool was_enabled = audio_stats_enabled_;
+  audio_stats_enabled_ = enabled;
+  if (!enabled) {
+    return;
+  }
+  audio_stats_interval_ms_ =
+      interval_ms <= 0 ? 2000 : std::clamp(interval_ms, 500, 10000);
+  if (!was_enabled) {
+    CollectAudioStats();
+  }
+}
+
+void webrtc_engine::CollectAudioStats() {
+  if (!audio_stats_enabled_) {
+    return;  // 已关闭，停止自续期
+  }
+  // 续期放在发起侧：PC 重建时旧 PC 的 GetStats 回调可能丢失。
+  ScheduleAudioStats();
+  if (!peer_connection_) {
+    return;
+  }
+  peer_connection_->GetStats(make_ref_counted<AudioStatsCollector>(this).get());
+}
+
+void webrtc_engine::ScheduleAudioStats() {
+  if (!audio_stats_enabled_ || !signaling_thread_) {
+    return;
+  }
+  signaling_thread_->PostDelayedTask(
+      [this] { CollectAudioStats(); },
+      TimeDelta::Millis(audio_stats_interval_ms_));
+}
+
+void webrtc_engine::AudioStatsCollector::OnStatsDelivered(
+    const scoped_refptr<const RTCStatsReport>& report) {
+  if (engine_ == nullptr) {
+    return;
+  }
+  AudioStats stats;
+  stats.enabled = engine_->audio_stats_enabled_;
+  stats.in_call = engine_->peer_connection_ != nullptr;
+  if (report) {
+    std::map<std::string, std::string> codec_names;
+    for (const auto* c : report->GetStatsOfType<RTCCodecStats>()) {
+      if (c->mime_type) codec_names[c->id()] = *c->mime_type;
+    }
+    for (const auto* s : report->GetStatsOfType<RTCInboundRtpStreamStats>()) {
+      if (!s->kind || *s->kind != "audio") {
+        continue;
+      }
+      if (s->codec_id) {
+        auto it = codec_names.find(*s->codec_id);
+        if (it != codec_names.end()) stats.recv_codec = it->second;
+      }
+      if (s->packets_received) stats.packets_received = *s->packets_received;
+      if (s->bytes_received) stats.bytes_received = *s->bytes_received;
+      if (s->packets_lost) stats.packets_lost = *s->packets_lost;
+      if (s->jitter) stats.jitter_ms = *s->jitter * 1000.0;
+      if (s->audio_level) stats.audio_level = *s->audio_level;
+      break;  // 音频只有一路
+    }
+    for (const auto* s : report->GetStatsOfType<RTCOutboundRtpStreamStats>()) {
+      if (!s->kind || *s->kind != "audio") {
+        continue;
+      }
+      if (s->codec_id) {
+        auto it = codec_names.find(*s->codec_id);
+        if (it != codec_names.end()) stats.send_codec = it->second;
+      }
+      if (s->packets_sent) stats.packets_sent = *s->packets_sent;
+      if (s->bytes_sent) stats.bytes_sent = *s->bytes_sent;
+      if (s->target_bitrate) stats.target_bitrate = *s->target_bitrate;
+      break;
+    }
+    for (const auto* s :
+         report->GetStatsOfType<RTCRemoteInboundRtpStreamStats>()) {
+      if (!s->kind || *s->kind != "audio") {
+        continue;
+      }
+      if (s->round_trip_time) stats.rtt_ms = *s->round_trip_time * 1000.0;
+      if (s->fraction_lost) stats.fraction_lost = *s->fraction_lost;
+      break;
+    }
+  }
+  if (engine_->apm_) {
+    const AudioProcessingStats apm_stats = engine_->apm_->GetStatistics(true);
+    if (apm_stats.residual_echo_likelihood) {
+      stats.residual_echo_likelihood = *apm_stats.residual_echo_likelihood;
+    }
+    if (apm_stats.echo_return_loss) {
+      stats.echo_return_loss = *apm_stats.echo_return_loss;
+    }
+    if (apm_stats.delay_median_ms) {
+      stats.delay_median_ms = static_cast<double>(*apm_stats.delay_median_ms);
+    }
+  }
+  if (engine_->engine_observer_) {
+    engine_->engine_observer_->OnAudioStats(stats);
+  }
+}
+
+bool webrtc_engine::SetAudioProcessingImpl(const std::string& flag, bool on) {
+  std::string key;
+  if (flag == "aec") {
+    key = "echo_canceller.enabled";
+  } else if (flag == "ns") {
+    key = "noise_suppression.enabled";
+  } else if (flag == "agc") {
+    key = "gain_controller1.enabled";
+  } else {
+    RTC_LOG(LS_WARNING) << "SetAudioProcessing: unknown flag " << flag;
+    return false;
+  }
+  std::string err;
+  if (!webrtc_media::SetAudioProcessingKey(&audio_processing_config_, key,
+                                           on ? "on" : "off", &err)) {
+    RTC_LOG(LS_WARNING) << "SetAudioProcessing: " << err;
+    return false;
+  }
+  ReapplyAudioProcessing();
+  if (engine_observer_) {
+    engine_observer_->OnAudioProcessingChanged(
+        webrtc_media::StateFromConfig(audio_processing_config_));
+    engine_observer_->OnAudioConfig(BuildAudioConfigSnapshot());
   }
   return true;
 }
@@ -613,17 +1077,28 @@ void webrtc_engine::CreateAudioTrack() {
     RTC_LOG(LS_WARNING) << "CreateAudioTrack: factory not created";
     return;
   }
+  const webrtc::AudioProcessing::Config& cfg = audio_processing_config_;
   AudioOptions options;
-  options.echo_cancellation = audio_processing_.aec;
-  options.noise_suppression = audio_processing_.ns;
-  options.auto_gain_control = audio_processing_.agc;
+  options.echo_cancellation = cfg.echo_canceller.enabled;
+  options.noise_suppression = cfg.noise_suppression.enabled;
+  options.auto_gain_control = cfg.gain_controller1.enabled;
+  options.highpass_filter = cfg.high_pass_filter.enabled;
+  options.stereo_swapping = audio_source_options_.stereo_swapping;
+  options.audio_jitter_buffer_max_packets =
+      audio_source_options_.jitter_max_packets;
+  options.audio_jitter_buffer_fast_accelerate =
+      audio_source_options_.jitter_fast_accelerate;
+  options.audio_jitter_buffer_min_delay_ms =
+      audio_source_options_.jitter_min_delay_ms;
   // 只采集也要开始录音（WebRTC 默认 true，这里显式声明）。
-  options.init_recording_on_send = true;
+  options.init_recording_on_send = audio_source_options_.init_recording_on_send;
   audio_source_ = peer_connection_factory_->CreateAudioSource(options);
   if (!audio_source_) {
     RTC_LOG(LS_ERROR) << "CreateAudioTrack: CreateAudioSource failed";
     return;
   }
+  // 源参数已随本次建轨生效。
+  pending_source_options_.clear();
   audio_track_ =
       peer_connection_factory_->CreateAudioTrack("audio", audio_source_.get());
   RTC_LOG(LS_INFO) << "AudioTrack created";
@@ -671,9 +1146,103 @@ void webrtc_engine::ApplySelectedAudioDevice() {
 
 void webrtc_engine::ReapplyAudioProcessing() {
   if (!apm_) return;
-  const webrtc_media::AudioProcessingState state = audio_processing_;
-  worker_thread_->BlockingCall(
-      [this, state] { webrtc_media::ApplyAudioProcessing(apm_.get(), state); });
+  const webrtc::AudioProcessing::Config config = audio_processing_config_;
+  worker_thread_->BlockingCall([this, config] {
+    webrtc_media::ApplyAudioProcessingConfig(apm_.get(), config);
+  });
+}
+
+void webrtc_engine::RefreshSpeakerState() {
+  if (!adm_) return;
+  worker_thread_->BlockingCall([this] {
+    bool volume_available = false;
+    speaker_volume_available_ =
+        adm_->SpeakerVolumeIsAvailable(&volume_available) == 0 &&
+        volume_available;
+    if (speaker_volume_available_) {
+      uint32_t max_volume = 0;
+      uint32_t min_volume = 0;
+      uint32_t volume = 0;
+      if (adm_->MaxSpeakerVolume(&max_volume) == 0 &&
+          adm_->MinSpeakerVolume(&min_volume) == 0 &&
+          adm_->SpeakerVolume(&volume) == 0 && max_volume > min_volume) {
+        speaker_volume_ = static_cast<int>(
+            (volume - min_volume) * 100 / (max_volume - min_volume));
+      }
+    }
+    bool mute_available = false;
+    speaker_mute_available_ =
+        adm_->SpeakerMuteIsAvailable(&mute_available) == 0 && mute_available;
+    if (speaker_mute_available_) {
+      bool muted = false;
+      if (adm_->SpeakerMute(&muted) == 0) {
+        speaker_muted_ = muted;
+      }
+    }
+  });
+}
+
+void webrtc_engine::RefreshDeviceState() {
+  if (!adm_) return;
+  worker_thread_->BlockingCall([this] {
+    auto* impl = static_cast<webrtc::AudioDeviceModuleImpl*>(adm_.get());
+    if (impl != nullptr) {
+      webrtc::AudioDeviceBuffer* buffer = impl->GetAudioDeviceBuffer();
+      if (buffer != nullptr) {
+        recording_sample_rate_ =
+            static_cast<int>(buffer->RecordingSampleRate());
+        playout_sample_rate_ =
+            static_cast<int>(buffer->PlayoutSampleRate());
+      }
+    }
+    bool stereo = false;
+    if (adm_->StereoRecording(&stereo) == 0) {
+      stereo_recording_ = stereo;
+    }
+    if (adm_->StereoPlayout(&stereo) == 0) {
+      stereo_playout_ = stereo;
+    }
+  });
+}
+
+void webrtc_engine::SetSpeakerVolumePercent(int percent) {
+  if (!adm_) return;
+  worker_thread_->BlockingCall([this, percent] {
+    bool volume_available = false;
+    speaker_volume_available_ =
+        adm_->SpeakerVolumeIsAvailable(&volume_available) == 0 &&
+        volume_available;
+    if (!speaker_volume_available_) {
+      return;
+    }
+    uint32_t max_volume = 0;
+    uint32_t min_volume = 0;
+    if (adm_->MaxSpeakerVolume(&max_volume) != 0 ||
+        adm_->MinSpeakerVolume(&min_volume) != 0 ||
+        max_volume <= min_volume) {
+      return;
+    }
+    const uint32_t volume =
+        min_volume + (max_volume - min_volume) * percent / 100;
+    if (adm_->SetSpeakerVolume(volume) == 0) {
+      speaker_volume_ = percent;
+    }
+  });
+}
+
+void webrtc_engine::SetSpeakerMuted(bool muted) {
+  if (!adm_) return;
+  worker_thread_->BlockingCall([this, muted] {
+    bool mute_available = false;
+    speaker_mute_available_ =
+        adm_->SpeakerMuteIsAvailable(&mute_available) == 0 && mute_available;
+    if (!speaker_mute_available_) {
+      return;
+    }
+    if (adm_->SetSpeakerMute(muted) == 0) {
+      speaker_muted_ = muted;
+    }
+  });
 }
 
 // ============================================================================
@@ -1239,8 +1808,26 @@ bool webrtc_engine::InitializePeerConnectionFactoryImpl() {
         return adm;
       });
   deps.adm = adm_;
+  // 音频热插拔基线：ADM 首次就绪时记录当前设备集合。
+  if (!audio_devices_baseline_initialized_ && adm_) {
+    const auto devices = worker_thread_->BlockingCall([this] {
+      return webrtc_media::EnumerateRecordingDevices(adm_.get());
+    });
+    known_audio_device_ids_.clear();
+    for (const auto& device : devices) {
+      if (!IsDefaultAudioAlias(device.name)) {
+        known_audio_device_ids_.insert(device.id.empty() ? device.name
+                                                         : device.id);
+      }
+    }
+    audio_devices_baseline_initialized_ = true;
+  }
   // 注入「可捕获 APM 实例」的 builder，供运行时 AEC/NS/AGC 开关使用。
   webrtc_media::ConfigureAudioProcessing(deps, &apm_);
+  // 软件静音：采集帧进入编码前清零（RTP 继续发静音包）。
+  mic_muted_flag_ = std::make_shared<std::atomic<bool>>(mic_muted_);
+  deps.audio_frame_processor =
+      std::make_unique<webrtc_media::MuteFrameProcessor>(mic_muted_flag_);
   webrtc_media::ConfigureVideoCodecs(deps);
   peer_connection_factory_ =
       CreateModularPeerConnectionFactory(std::move(deps));
@@ -1420,16 +2007,42 @@ void webrtc_engine::AddRemoteCandidate(const std::string& candidate,
 }
 
 void webrtc_engine::ClosePeerConnection() {
+  pending_switch_mode_.reset();
   data_channel_ = nullptr;
   if (peer_connection_) {
     peer_connection_->Close();
     peer_connection_ = nullptr;
   }
-  peer_connection_factory_ = nullptr;
   video_source_ = nullptr;   // 全拆：视频源也释放（frame generator 停）
   video_track_ = nullptr;
   video_sender_ = nullptr;
   remote_video_sink_.reset();
+  // 音频对象都属于旧 factory/media engine；工厂销毁后必须全部释放，
+  // 否则下一次 call 会复用已失效的 source/track/ADM 导致崩溃。
+  audio_track_ = nullptr;
+  audio_sender_ = nullptr;
+  // 先把 ADM/APM 等移到局部，保证它们在 factory 销毁后仍存活。
+  auto adm = std::move(adm_);
+  auto apm = std::move(apm_);
+  auto audio_source = std::move(audio_source_);
+  auto muted_flag = std::move(mic_muted_flag_);
+  // factory 仍在 signaling 线程销毁：factory 析构会等待 signaling 线程上的
+  // 组件，放到 worker 上会和本次 BlockingCall 互相等待（死锁）。
+  peer_connection_factory_ = nullptr;
+  // ADM/APM 有 worker 线程亲和性，最后在 worker 上销毁。
+  auto destroy_audio = [&adm, &apm, &audio_source, &muted_flag] {
+    audio_source = nullptr;
+    apm = nullptr;
+    adm = nullptr;  // ADM 析构（worker）
+    muted_flag = nullptr;
+  };
+  if (worker_thread_) {
+    worker_thread_->BlockingCall(destroy_audio);
+  } else {
+    destroy_audio();
+  }
+  audio_devices_baseline_initialized_ = false;
+  known_audio_device_ids_.clear();
   peer_id_ = -1;
   is_offerer_ = false;
   is_connected_ = false;
@@ -1679,7 +2292,17 @@ void webrtc_engine::OnAddTrack(
     scoped_refptr<RtpReceiverInterface> receiver,
     const std::vector<scoped_refptr<MediaStreamInterface>>& streams) {
   auto track = receiver->track();
-  if (!track || track->kind() != MediaStreamTrackInterface::kVideoKind) {
+  if (!track) {
+    return;
+  }
+  if (track->kind() == MediaStreamTrackInterface::kAudioKind) {
+    RTC_LOG(LS_INFO) << "OnAddTrack: remote audio";
+    if (engine_observer_) {
+      engine_observer_->OnRemoteAudioStarted();
+    }
+    return;
+  }
+  if (track->kind() != MediaStreamTrackInterface::kVideoKind) {
     return;
   }
   RTC_LOG(LS_INFO) << "OnAddTrack: remote video";
@@ -1693,7 +2316,17 @@ void webrtc_engine::OnAddTrack(
 
 void webrtc_engine::OnRemoveTrack(scoped_refptr<RtpReceiverInterface> receiver) {
   auto track = receiver->track();
-  if (track && track->kind() == MediaStreamTrackInterface::kVideoKind) {
+  if (!track) {
+    return;
+  }
+  if (track->kind() == MediaStreamTrackInterface::kAudioKind) {
+    RTC_LOG(LS_INFO) << "OnRemoveTrack: remote audio";
+    if (engine_observer_) {
+      engine_observer_->OnRemoteAudioStopped();
+    }
+    return;
+  }
+  if (track->kind() == MediaStreamTrackInterface::kVideoKind) {
     RTC_LOG(LS_INFO) << "OnRemoveTrack: remote video";
     remote_video_sink_.reset();
     if (engine_observer_) {
@@ -1746,6 +2379,9 @@ void webrtc_engine::OnConnectionChange(
       ice_switch_in_progress_ = false;
       if (engine_observer_) engine_observer_->OnIceSwitched(false);
     }
+  }
+  if (state == PeerConnectionInterface::PeerConnectionState::kConnected) {
+    MaybeRunPendingSwitch();
   }
 
   // ICE/DTLS 彻底失败：主动挂断，让信令服务器清掉 busy 状态、双方清理通话。
@@ -1822,6 +2458,7 @@ void webrtc_engine::CreateSdpObserver::OnSuccess(
       if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, true);
     }
   }
+  engine_->MaybeRunPendingSwitch();
 }
 
 void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
@@ -1838,6 +2475,7 @@ void webrtc_engine::CreateSdpObserver::OnFailure(RTCError error) {
     engine_->audio_switch_in_progress_ = false;
     if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, false);
   }
+  engine_->MaybeRunPendingSwitch();
 }
 
 // ============================================================================
@@ -1879,6 +2517,7 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
       engine_->audio_switch_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, true);
     }
+    engine_->MaybeRunPendingSwitch();
   } else {
     RTC_LOG(LS_ERROR) << "SetRemoteDescription failed: " << error.message();
     if (engine_->engine_observer_) engine_->engine_observer_->OnEngineError("set_remote_desc_failed", error.message());
@@ -1893,6 +2532,7 @@ void webrtc_engine::SetRemoteObserver::OnSetRemoteDescriptionComplete(
       engine_->audio_switch_in_progress_ = false;
       if (engine_->engine_observer_) engine_->engine_observer_->OnAudioSwitched(engine_->audio_enabled_, false);
     }
+    engine_->MaybeRunPendingSwitch();
   }
 }
 

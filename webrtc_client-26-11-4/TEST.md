@@ -413,11 +413,15 @@ python3 test/stress_test.py --cycles 100          # 抗压 100 遍（曾实跑�
 
 | 覆盖内容 | 结果 |
 |---|---|
-| **28 个命令**的成功事件 + 运行事实核对 | 通过 |
+| **37 个命令（含音频）**的成功事件 + 运行事实核对 | 通过 |
 | **11 个 `ipc.error`**：usage / not_signed_in / already_in_call / not_in_call / data_channel_not_open / signal_send_failed / self_call / peer_offline / peer_busy / device_not_found / unsupported_profile | 通过 |
 | 第三个"备用 daemon"覆盖 `name_taken` / `peer_busy` | 通过 |
 | 运行事实：`video_stats` 字节递增、`target_bitrate`/`fps` 真受限、`key_frames_encoded` 增长、切设备后画面继续、旧 relay 候选消失 | 通过 |
-| 双向（本地/云端 offerer）× call/leave、switch_ice、reconnect 各 5 遍，状态复位、进程存活 | 通过 |
+| 音频 idle：`get_audio_devices`（id 唯一/available/硬件采样率）、`get_audio_config`、`set_audio_config`（ns 等级/mic_muted/speaker_volume）、`set_audio_device`、`audio_on`、`get_audio_status` | 通过 |
+| 音频 in-call：本地发送端出包、`set_audio_stats` send 递增 + opus + APM 字段、运行时改 AGC 模式、`mic_muted`、通话中切设备、`audio_off/on` | 通过 |
+| 音频错误：`usage`（未知 key/非法值/非法 stats/缺 device id）、`device_not_found` | 通过 |
+| **云端无音频设备（dummy ADM）**：只断言本地发送端出包 + 云端 `remote_audio.started`；不在云端调用 `get_stats`（dummy ADM 下会卡） | 通过 |
+| 双向（本地/云端 offerer）× call/leave、switch_ice、reconnect 各 5 遍 + `audio on/off + mute` 各 3 遍，音频在 PC 重建后继续，状态复位、进程存活 | 通过 |
 
 输出：`全部通过 ✅（不崩 + 事件正确 + 不卡死）`。曾按 **每项 100 遍**实跑：846 PASS / 0 FAIL。
 
@@ -446,19 +450,138 @@ SUDO_PASS=<密码> python3 test/stress_combo_test.py
 
 | 类别 | 用例 | 结果 |
 |---|---|---|
-| 组合 | A1 视频中 `switch_ice`（host↔relay）画面继续 | 通过 |
-| 组合 | A2 视频中 `reconnect` ×3 画面继续 | 通过 |
+| 组合 | A1 视频中 `switch_ice`（host↔relay）画面/音频继续 | 通过 |
+| 组合 | A2 视频中 `reconnect` ×3 画面/音频继续 | 通过 |
 | 组合 | A3 切设备后立刻切档位 | 通过 |
 | 组合 | A4 视频中热插拔（拔→关视频→插回→再开） | 通过 |
-| 组合 | A5 `leave` 后立刻 `call` | 通过 |
+| 组合 | A5 `leave` 后立刻 `call`，画面/音频继续 | 通过 |
 | 风暴 | B1 `switch_ice` 三连发 → 最终 mode 正确、不崩 | 通过 |
 | 风暴 | B2 `video_on` + `switch_ice` 冲突连发 → 仍 connected | 通过 |
 | 风暴 | B3 `video_on/off` 抖动 → 最终 enabled=true | 通过 |
 | 风暴 | B4 `set_bitrate` ×20 刷屏 → 回显最后值 | 通过 |
-| 风暴 | B5 100 条非法命令 → 之后正常 `call` 仍成功 | 通过 |
-| 风暴 | B6 **双客户端**：任一端可控制、事件双端可见、断开不影响另一端 | 通过 |
+| 风暴 | B5 100 条非法命令（含音频 key/device）→ 之后正常 `call` 仍成功 | 通过 |
+| 风暴 | B6 **双客户端**：任一端可控制、事件双端可见（含 `audio_config` 广播）、断开不影响另一端 | 通过 |
+| 风暴 | B7 `audio_on/off` 抖动 → 最终 enabled=true、音频继续、不崩 | 通过 |
+| 风暴 | B8 `set_audio_config` ×20 刷屏 → 回显最后值 moderate、不崩 | 通过 |
 
 输出：`combo stress ok`。
+
+## 28. 音频第一期 `audio_test.py`
+
+```bash
+python3 test/audio_test.py          # 两个本地 daemon（PulseAudio）+ 云端信令
+```
+
+前置：本机 PulseAudio/PipeWire 可用且有可用麦克风；**已应用 WebRTC 补丁**
+`patches/webrtc-1c7365e-pulse-adm-quit-reset.patch`（否则 A3b 会失败）。
+
+| 覆盖内容 | 结果 |
+|---|---|
+| A5 `get_audio_devices` 枚举真实录音源（monitor 伪设备已过滤） | 通过 |
+| A6 空闲 `set_audio_device` + `get_audio_status` 回显 | 通过 |
+| A8 非法设备 → `device_not_found`；非法处理参数 → `usage` | 通过 |
+| A1 空闲 `audio_on`（双方）+ `call` → 双向 audio/opus 收流且包数增长 | 通过 |
+| A7 通话中 `set_audio_device` → `unsupported_in_call` | 通过 |
+| A2 `audio_off` → 对端停止收流 | 通过 |
+| A3 `audio_on` 恢复（重新加轨产生新 SSRC） | 通过 |
+| A3b 音频开启时 `switch_ice host`/`relay` 重建 PC → 音频自动恢复 | 通过（依赖 WebRTC 补丁） |
+
+输出：`audio test ok`。
+
+## 29. 音频处理开关 `audio_processing_test.py`
+
+```bash
+python3 test/audio_processing_test.py
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 默认 `aec=false, ns=true, agc=true` | 通过 |
+| `set_audio_processing aec on` / `ns off` / `agc off` → `audio_processing` 回显 + `audio_status` 同步 | 通过 |
+| 切换期间无重协商（无新的 `signal_client.local_sdp`） | 通过 |
+| 切换期间音频流不断（入向包数持续增长） | 通过 |
+
+输出：`audio processing test ok`。
+
+## 30. 音频配置 `audio_config_test.py`
+
+```bash
+python3 test/audio_config_test.py
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| `get_audio_config` 默认值（aec=off/ns=high/agc=adaptive_analog/hpf=on/瞬态=off） | 通过 |
+| 逐项 `set_audio_config`（NS 等级、AGC 模式/目标电平、HPF、瞬态、前置增益、AEC 子项） | 通过 |
+| 冲突裁决：开 AGC2 关 AGC1；开 `capture_level_adjustment` 关 `pre_amplifier` | 通过 |
+| 非法 key/值（未知 key、枚举、越界）→ `usage` | 通过 |
+| 旧 `set_audio_processing` 别名 | 通过 |
+| 配置变更无重协商、音频流持续 | 通过 |
+| 源参数 `source.*` pending → `audio_off/on` 后生效并清空 | 通过 |
+| 设备 `available` / `hardware_sample_rate` / ADM `recording_sample_rate` 回显 | 通过 |
+
+输出：`audio config test ok`。
+
+## 31. 软件静音 + 扬声器 `audio_mute_volume_test.py`
+
+```bash
+python3 test/audio_mute_volume_test.py
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| `mic_muted on`：RTP 继续、接收端 `audio_level≈0` | 通过 |
+| `mic_muted off` 恢复 | 通过 |
+| `speaker_volume 30` / `speaker_muted on` 回显（ADM 不支持时 `*_available=false`） | 通过 |
+| 静音/音量操作不触发重协商 | 通过 |
+
+输出：`audio mute volume test ok`。
+
+## 32. 通话中切音频设备 `audio_device_switch_test.py`
+
+```bash
+python3 test/audio_device_switch_test.py
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 空闲 `set_audio_device` 生效并回显 | 通过 |
+| 通话中切到另一设备，对端收流短暂停滞后恢复 | 通过 |
+| 通话中切非法设备 → `device_not_found`，原设备继续收流 | 通过 |
+
+输出：`audio device switch test ok`。
+
+## 33. 音频热插拔 `audio_hotplug_test.py`
+
+```bash
+SUDO_PASS=<密码> python3 test/audio_hotplug_test.py
+```
+
+用 USB 设备级 unbind/bind 模拟真实拔插。
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 当前麦克风被拔：`audio_devices_changed(device_removed)` + `audio_device_lost` + `audio_switched(enabled=false)`，通话仍 connected | 通过 |
+| 插回：只发 `device_added`，不自动开音频 | 通过 |
+| 插回后 `audio_on` 音频恢复 | 通过 |
+
+输出：`audio hotplug test ok`。
+
+## 34. 音频统计 + 远端事件 `audio_stats_test.py`
+
+```bash
+python3 test/audio_stats_test.py
+```
+
+| 覆盖内容 | 结果 |
+|---|---|
+| 双方 `remote_audio.started` | 通过 |
+| `set_audio_stats on 1000`：`audio_stats` 递增、codec=opus、APM 字段存在 | 通过 |
+| 通话中 `switch_ice` 重建 PC 后统计链不断 | 通过 |
+| `audio_off` → 对端 `remote_audio.stopped` | 通过 |
+| `set_audio_stats off` 停止推送；非法参数 → `usage` | 通过 |
+
+输出：`audio stats test ok`。
 
 ## 说明
 
@@ -472,3 +595,8 @@ SUDO_PASS=<密码> python3 test/stress_combo_test.py
 - **需要 sudo 的测试**（`SUDO_PASS=<密码>`）：第 22 节（sysfs 解绑摄像头）、第 23 节（tc netem）、第 24 节（iptables 独立链 `WEBRTC_TEST`）、第 26/27 节的热插拔部分。所有临时系统改动均在 `finally` 中恢复。
 - **视频类测试**注意：同一摄像头不能被两个本地 daemon 同时采集；测试均显式指定设备（合成或分工），避免相互抢占。
 - **known 环境交互**：长时断网后若在 TURN 分配寿命内重呼，可能撞 coturn `437 Mismatched allocation`；引擎采用端口窗口轮换（49152–65535 切 256 组、每次建 PC 换组、进程启动随机起点）规避，第 24 节 N2b 已验证不重启 coturn 也能重呼。
+- **音频测试前置**：本机需 PulseAudio/PipeWire 与可用麦克风；两个本地 daemon 共享同一音频设备（PulseAudio 允许多客户端），日志里的 `Can't query latency` 非致命。第 28 节的 A3b 依赖 WebRTC 补丁 `patches/webrtc-1c7365e-pulse-adm-quit-reset.patch`；未打补丁时音频开启状态下 `switch_ice` 后音频无法恢复。
+- **跨机音频语义（第 25/27 节）**：云端没有音频设备，ADM 回退 dummy，**只能收不能发**。压测只断言本地发送端 `outbound_rtp` 出包 + 云端 `remote_audio.started`，**不在云端调用 `get_stats`**（dummy ADM 下会卡住）。`leave` 后立即重呼可能撞本地 roster 缓存的 `peer_busy`，`stress_test.py` 用 `call_with_retry` 重试。
+- **音频 leave/重呼**：`ClosePeerConnection()` 会释放 `audio_source_/track_/sender_/adm_/apm_`，下次 call 由新 factory 重新创建；否则复用旧对象会崩溃。ADM/APM 的最后一个引用在 **worker 线程**销毁（线程亲和性），factory 仍在 signaling 线程销毁（移到 worker 会死锁）。
+- **重协商串行化**：`switch_ice` 在 `video_on/off`、`audio_on/off`、`reconnect` 或上一次 switch 在途时，会存 `pending_switch_mode_`，等当前协商完成后经 signaling PostTask 再执行；否则重建 PC 会让在途 offer/answer 落到已关闭的 PC（组合测试 B2 覆盖）。
+- **leave 后重呼的 roster 竞态**：本地 roster 缓存可能短暂仍显示 `peer_busy`，`stress_test.py` 用 `call_with_retry`、`stress_combo_test.py` 的 `call_and_video` 也带重试。

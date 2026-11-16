@@ -173,6 +173,51 @@ struct AudioStateSnapshot {
   bool has_device_module = false;  // false = 平台 ADM 不可用，已回退 dummy
 };
 
+// 周期性音频统计（set_audio_stats 开启后上报）。
+struct AudioStats {
+  bool enabled = false;
+  bool in_call = false;
+  // 接收（本端收到的对端音频）
+  std::string recv_codec;
+  uint32_t packets_received = 0;
+  uint64_t bytes_received = 0;
+  int32_t packets_lost = 0;
+  double jitter_ms = 0.0;
+  double audio_level = 0.0;
+  // 发送（本端发出的音频）
+  std::string send_codec;
+  uint32_t packets_sent = 0;
+  uint64_t bytes_sent = 0;
+  double target_bitrate = 0.0;
+  // 对端反馈
+  double rtt_ms = 0.0;
+  double fraction_lost = 0.0;
+  // APM 回声诊断
+  double residual_echo_likelihood = 0.0;
+  double echo_return_loss = 0.0;
+  double delay_median_ms = 0.0;
+};
+
+// 音频完整配置快照（get_audio_config / set_audio_config 回显）。
+struct AudioConfigSnapshot {
+  webrtc::AudioProcessing::Config processing;      // APM 全量配置（pipeline 除外）
+  webrtc_media::AudioSourceOptions source;         // AudioOptions（下次建音轨生效）
+  std::vector<std::string> pending_source;         // 尚未生效的 source key
+  std::string device_id;                           // 选中的录音设备（空=系统默认）
+  std::string device_name;
+  bool in_call = false;
+  bool has_device_module = false;
+  bool mic_muted = false;                          // 软件静音（RTP 继续，采样清零）
+  bool speaker_volume_available = false;
+  int speaker_volume = 0;                          // 0..100
+  bool speaker_mute_available = false;
+  bool speaker_muted = false;
+  int recording_sample_rate = 0;                   // ADM 实际录音采样率
+  int playout_sample_rate = 0;
+  bool stereo_recording = false;
+  bool stereo_playout = false;
+};
+
 // 引擎对外事件接口：上层（IPC/UI）实现，接收信令、SDP/ICE、PeerConnection、
 // DataChannel 的状态与消息。所有回调在引擎的 signaling 线程同步触发。
 struct EngineObserver {
@@ -271,9 +316,22 @@ struct EngineObserver {
   // 录音设备切换结果（set_audio_device 触发）。
   virtual void OnAudioDeviceChanged(const std::string& id,
                                     const std::string& name, bool success) {}
+  // 热插拔：设备集合变化（reason: device_added / device_removed）。
+  virtual void OnAudioDevicesChanged(
+      const std::vector<webrtc_media::AudioDeviceInfo>& devices,
+      const std::string& current, const std::string& reason) {}
+  // 当前正在使用的录音设备被拔出（音频通道已关闭）。
+  virtual void OnAudioDeviceLost(const std::string& id) {}
   // 音频处理开关变化（set_audio_processing 触发）。
   virtual void OnAudioProcessingChanged(
       const webrtc_media::AudioProcessingState& state) {}
+  // 完整音频配置（get_audio_config / set_audio_config 触发）。
+  virtual void OnAudioConfig(const AudioConfigSnapshot& config) {}
+  // 周期性音频统计（set_audio_stats on 后按 interval 推送）。
+  virtual void OnAudioStats(const AudioStats& stats) {}
+  // 收到远端音频轨 / 远端停止发音频。
+  virtual void OnRemoteAudioStarted() {}
+  virtual void OnRemoteAudioStopped() {}
 };
 
 #endif  // APPS_PEERCONNECTION_WEBRTC_CLIENT_ENGINE_OBSERVER_H_

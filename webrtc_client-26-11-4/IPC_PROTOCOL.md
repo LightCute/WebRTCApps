@@ -91,6 +91,22 @@
 | `video_stats` | `width`,`height`,`fps`,`target_bitrate`,`bytes_sent`,`packets_sent`,`packets_lost`,`jitter_ms`,`rtt_ms`,`available_outgoing_bitrate`,`quality_limitation`,`frames_encoded`,`key_frames_encoded`,`pli_count`,`nack_count` | **周期性视频统计**（`set_video_stats on` 后按 interval 推送；仅通话中且视频开启时） |
 | `keyframe_requested` | `result` | `request_keyframe` 的结果（视频未开启/无发送者时 `failed`） |
 
+### 2.8 音频（开关 / 设备 / 处理）
+
+| 事件 | 字段 | 说明 |
+|---|---|---|
+| `audio.state` | `enabled`（bool） | 本端音频期望状态（`audio_on`/`audio_off` 受理即发） |
+| `audio_switched` | `enabled`,`result` | 音频开关完成/失败：空闲时立即 success；通话中为 AddTrack/RemoveTrack 重协商完成 |
+| `audio_status` | `enabled`,`device_id`,`device_name`,`in_call`,`aec`,`ns`,`agc`,`has_device_module` | 完整音频状态回显（`get_audio_status`）。`device_id` 为空 = 系统默认设备；`has_device_module=false` 表示平台 ADM 不可用、已回退 dummy（无真实采集） |
+| `audio_devices` | `current`,`devices[]` | 录音设备列表：`devices[].index`/`id`（稳定 Pulse source name，如 `alsa_input.usb-...`；默认别名=`default`）/`name`（描述，可能重名；ADM 已过滤 monitor 伪设备）+ `available`（`yes`/`no`/`unknown`，端口是否真的可用）+ `hardware_sample_rate`/`hardware_channels`（libpulse 查询，0=未知）。`current` 为选中设备的稳定 id，空 = 系统默认 |
+| `audio_device` | `id`,`name`,`result` | 录音设备选择结果（空闲记住；通话中立即切换，失败保留原设备） |
+| `audio_processing` | `aec`,`ns`,`agc` | AEC/降噪/AGC 运行时开关回显（`set_audio_processing`，不重协商；旧接口） |
+| `audio_config` | `processing`（全量 APM 配置树）、`source`（AudioOptions）、`pending_source[]`、`device` | 完整音频配置（`get_audio_config` / `set_audio_config`）。`device` 含 `device_id/device_name/in_call/has_device_module/mic_muted/speaker_volume(_available)/speaker_muted(_available)/recording_sample_rate/playout_sample_rate/stereo_recording/stereo_playout` |
+| `audio_devices_changed` | `devices[]`,`current`,`reason` | **热插拔**：`reason`=`device_added`/`device_removed`。仅通知，不自动切换 |
+| `audio_device_lost` | `id` | **当前录音设备被拔出**；若通话中音频开启，引擎已自动关闭音频通道（随后 `audio_switched`=`enabled:false`，对端收 `remote_audio.stopped`） |
+| `audio_stats` | `enabled`,`in_call`,`recv`,`send`,`remote`,`apm` | **周期性音频统计**（`set_audio_stats on`）。`recv`：`codec/packets_received/bytes_received/packets_lost/jitter_ms/audio_level`；`send`：`codec/packets_sent/bytes_sent/target_bitrate`；`remote`：`rtt_ms/fraction_lost`；`apm`：`residual_echo_likelihood/echo_return_loss/delay_median_ms` |
+| `remote_audio.started` / `remote_audio.stopped` | —— | 对端开始 / 停止发音频轨 |
+
 ## 3. 错误码词汇表
 
 ### 3.1 `ipc.error` —— 受理拒绝
@@ -156,6 +172,14 @@
 | `set_video_profile <w> <h> <fps>` | `usage` / `unsupported_profile` | `video_profile`（空闲记住 / 通话中立即切换，不重协商） | `video_profile`=failed（保留原档位） |
 | `set_video_stats <on\|off> [interval_ms]` | `usage` | `video_stats`（周期推送，interval 默认 2000，clamp [500,10000]） | 无 |
 | `request_keyframe` | `not_in_call` | `keyframe_requested`（success/failed） | `keyframe_requested`=failed |
+| `get_audio_devices` | 无（纯查询） | `audio_devices` | 无（总返回；Pulse 不可用时为空列表） |
+| `set_audio_device <id\|name>` | `usage` / `device_not_found` | `audio_device`（空闲记住；通话中立即切换，短暂采集中断、不重协商）。优先按稳定 id 匹配，兼容按描述名匹配 | `audio_device`=failed（保留原设备） |
+| `audio_on` / `audio_off` | 无 | `audio.state` → `audio_switched`（空闲立即 success；通话中重协商后） | `audio_switched`=failed |
+| `get_audio_status` | 无（纯查询） | `audio_status` | 无（总返回） |
+| `set_audio_processing <aec\|ns\|agc> <on\|off>` | `usage` | `audio_processing`（旧接口，等价 `set_audio_config`，立即生效） | 无 |
+| `get_audio_config` | 无（纯查询） | `audio_config` | 无（总返回） |
+| `set_audio_config <key> <value>` | `usage`（未知 key/非法值） | `audio_config`（APM key 立即生效；`source.*` 进入 `pending_source`，下次建音轨生效；`mic_muted`/`speaker_volume`/`speaker_muted` 立即生效） | 无 |
+| `set_audio_stats <on\|off> [interval_ms]` | `usage` | `audio_stats`（周期推送，interval 默认 2000，clamp [500,10000]） | 无 |
 | `quit` | 无（总执行） | 无事件（unix socket 关闭即退出） | 无（总执行） |
 
 ## 5. 说明
@@ -164,3 +188,11 @@
 2. **异步命令完成看事件**：`register` / `call` / `get_roster` / `get_stats` / `leave` / `signal_disconnect` 的「完成」以成功事件为准；受理通过只表示命令合法、已进入异步流程。
 3. **错误码 vs WebRTC 状态**：错误码是「本次命令为什么失败」的判决（应用层定义，现场由 WebRTC 状态推导）；WebRTC 自身状态（`PeerConnectionState` / `DataState` 等）通过 `peer_connection.state` / `data_channel.state` 事件与 `get_stats` 暴露，二者不冲突。
 4. **`signal_client.disconnected` 时机**：连接建立后任何时刻都可能出现（服务器崩溃、`signal_disconnect`、网络掉线），与 `register` 无关地作为「已掉线」信号；`register` 阶段连接失败则走 `signal_client.error` code=`connect`。
+5. **音频能力（第二期）**：
+   - `audio_on/off`：空闲记住 + 通话中实时切换；`set_audio_device` 空闲记住、通话中立即切换（短暂采集中断，不重协商；失败回滚原设备）。
+   - `set_audio_config` 的 key 与 `webrtc::AudioProcessing::Config` 点号路径一致（如 `noise_suppression.level`、`gain_controller1.mode`、`gain_controller2.fixed_digital.gain_db`、`pre_amplifier.fixed_gain_factor`、`high_pass_filter.enabled`、`transient_suppression.enabled`、`capture_level_adjustment.*`）；**pipeline 字段不暴露**。别名：`aec`/`ns`/`ns_level`/`agc`/`agc_mode`/`hpf`/`transient`/`agc2`。冲突自动裁决：开 AGC2 自动关 AGC1；开 `capture_level_adjustment` 自动关 `pre_amplifier`；AEC 强制 HPF。
+   - `source.*`（`stereo_swapping`、`jitter_max_packets`、`jitter_fast_accelerate`、`jitter_min_delay_ms`、`init_recording_on_send`）存 pending，下次建音轨（`audio_on` / 下次 call）生效，`pending_source` 回显。
+   - `mic_muted` 是**软件静音**（采集帧清零，RTP 继续发静音包，只影响本进程）；`speaker_volume`/`speaker_muted` 走 ADM，是 **Pulse sink 级（系统范围）**，会影响同一 sink 的其他应用。
+   - 热插拔策略 A：当前录音设备被拔出 → 关音频轨 + 重协商 + `audio_device_lost`；插回只发 `audio_devices_changed`，不自动切回。
+   - 设备名可含空格（Pulse source 描述），`set_audio_device` 取整行剩余内容。
+   - 依赖 WebRTC 补丁 `patches/webrtc-1c7365e-pulse-adm-quit-reset.patch`：否则音频开启时 `switch_ice`/PC 重建后音频无法恢复。

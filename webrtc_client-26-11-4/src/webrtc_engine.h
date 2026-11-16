@@ -3,6 +3,9 @@
 
 #include <memory>
 #include <optional>
+#include <atomic>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -28,6 +31,7 @@
 #include "engine_observer.h"
 #include "ice_config.h"
 #include "media/audio_device.h"
+#include "media/audio_device_monitor.h"
 #include "media/audio_processing.h"
 #include "rtc_base/thread.h"
 #include "signaling/ws_signaling_client.h"
@@ -102,8 +106,14 @@ class webrtc_engine : public SignalingClientObserver,
   void AudioOff();
   // 回读音频状态（设备 / 开关 / AEC-NS-AGC）。
   void GetAudioStatus();
-  // 运行时切换音频处理开关（flag = aec / ns / agc），不重协商。
+  // 运行时切换音频处理开关（flag = aec / ns / agc），不重协商（旧接口）。
   bool SetAudioProcessing(const std::string& flag, bool on);
+  // 读取 / 修改完整音频配置（dotted key，见 media/audio_processing.h）。
+  void GetAudioConfig();
+  bool SetAudioConfig(const std::string& key, const std::string& value,
+                      std::string* error);
+  // 周期性音频统计上报开关（interval_ms 默认 2000，clamp 到 [500,10000]）。
+  void SetAudioStats(bool enabled, int interval_ms);
   // 强制请求一个关键帧（I 帧）；false = 当前没有视频发送者。
   bool RequestKeyFrame();
   bool video_enabled() const { return video_enabled_; }
@@ -232,6 +242,18 @@ class webrtc_engine : public SignalingClientObserver,
     webrtc_engine* engine_;
   };
 
+  // 周期性音频统计回调：只挑音频 RTP + APM 回声诊断字段。
+  class AudioStatsCollector : public webrtc::RTCStatsCollectorCallback {
+   public:
+    explicit AudioStatsCollector(webrtc_engine* engine) : engine_(engine) {}
+    void OnStatsDelivered(
+        const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+        override;
+
+   private:
+    webrtc_engine* engine_;
+  };
+
   // GetStats 回调：携带已采集的 DataChannel 快照，收到 RTCStatsReport 后补齐
   // transport/candidate-pair/pc 信息并上抛。
   class StatsCollector : public webrtc::RTCStatsCollectorCallback {
@@ -302,11 +324,24 @@ class webrtc_engine : public SignalingClientObserver,
   void AudioOffImpl();
   void GetAudioStatusImpl();
   bool SetAudioProcessingImpl(const std::string& flag, bool on);
+  void GetAudioConfigImpl();
+  bool SetAudioConfigImpl(const std::string& key, const std::string& value,
+                          std::string* error);
+  AudioConfigSnapshot BuildAudioConfigSnapshot() const;
+  void SetAudioStatsImpl(bool enabled, int interval_ms);
+  void CollectAudioStats();
+  void ScheduleAudioStats();
+  void MaybeRunPendingSwitch();  // 当前重协商结束后执行延迟的 switch_ice
   void CreateAudioTrack();          // 用当前 AudioOptions 建 source + track
   bool AddAudioTrackToPc();         // 应用录音设备 + AddTrack
   bool RemoveAudioTrackFromPc();
   void ApplySelectedAudioDevice();  // worker 线程按名字设置录音设备
-  void ReapplyAudioProcessing();    // worker 线程重新应用 AEC/NS/AGC（音轨重建后）
+  void ReapplyAudioProcessing();    // worker 线程重新应用 APM 配置（音轨重建后）
+  void HandleAudioDevicesChanged();  // signaling 线程：热插拔后重新枚举
+  void RefreshSpeakerState();       // worker 线程读取扬声器音量/静音
+  void RefreshDeviceState();        // worker 线程读取采样率/声道
+  void SetSpeakerVolumePercent(int percent);  // worker 线程设置 0..100
+  void SetSpeakerMuted(bool muted);           // worker 线程设置静音
 
   std::unique_ptr<webrtc::Thread> signaling_thread_;
   std::unique_ptr<webrtc::Thread> worker_thread_;
@@ -362,8 +397,31 @@ class webrtc_engine : public SignalingClientObserver,
   webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source_;
   webrtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track_;
   webrtc::scoped_refptr<webrtc::RtpSenderInterface> audio_sender_;
-  std::string audio_device_name_;                     // 选中的录音设备名（空=系统默认）
-  webrtc_media::AudioProcessingState audio_processing_;  // 当前 AEC/NS/AGC 开关
+  std::string audio_device_id_;                       // 选中的稳定 id（Pulse source name / "default"）
+  std::string audio_device_name_;                     // 选中的录音设备描述（空=系统默认）
+  // 完整 APM 配置（含 AGC1/AGC2/前置增益/HPF/瞬态，pipeline 除外）。
+  webrtc::AudioProcessing::Config audio_processing_config_;
+  // 音频源参数（下次建音轨生效）与尚未生效的 key。
+  webrtc_media::AudioSourceOptions audio_source_options_;
+  std::vector<std::string> pending_source_options_;
+  // 软件静音（AudioFrameProcessor）与扬声器状态缓存。
+  bool mic_muted_ = false;
+  std::shared_ptr<std::atomic<bool>> mic_muted_flag_;
+  bool speaker_volume_available_ = false;
+  int speaker_volume_ = 0;
+  bool speaker_mute_available_ = false;
+  bool speaker_muted_ = false;
+  int recording_sample_rate_ = 0;
+  int playout_sample_rate_ = 0;
+  bool stereo_recording_ = false;
+  bool stereo_playout_ = false;
+  // 音频设备热插拔。
+  std::unique_ptr<webrtc_media::AudioDeviceMonitor> audio_device_monitor_;
+  std::set<std::string> known_audio_device_ids_;
+  bool audio_devices_baseline_initialized_ = false;
+  // 周期性音频统计。
+  bool audio_stats_enabled_ = false;
+  int audio_stats_interval_ms_ = 2000;
 
   bool signed_in_ = false;
   int my_id_ = -1;
@@ -378,6 +436,9 @@ class webrtc_engine : public SignalingClientObserver,
   bool ice_switch_in_progress_ = false;  // 正在切换 ICE 模式（重建中）
   bool reconnect_in_progress_ = false;   // 正在 ICE 重连（复用旧候选）
   bool renegotiating_ = false;            // 本轮 CreateOffer 是重建 reoffer 而非首次 call
+  // 重协商进行中收到的 switch_ice：等当前协商完成后再执行，避免重建 PC
+  // 与在途 offer/answer 冲突。
+  std::optional<std::string> pending_switch_mode_;
   std::string last_received_message_;
 };
 

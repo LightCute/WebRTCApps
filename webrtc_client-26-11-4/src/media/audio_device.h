@@ -13,7 +13,11 @@ namespace webrtc_media {
 // 一个录音设备（PulseAudio source）。
 struct AudioDeviceInfo {
   int index = 0;      // ADM 内部索引（热插拔后可能变化）
-  std::string name;   // 设备名，作为对前端的稳定 id
+  std::string id;     // 稳定 id：Pulse source name（如 alsa_input.usb-...）；默认别名="default"
+  std::string name;   // 设备描述（ADM RecordingDeviceName，可能重名）
+  std::string available = "unknown";  // 端口可用性：yes / no / unknown
+  int hardware_sample_rate = 0;       // 硬件采样率（0 = 未知）
+  int hardware_channels = 0;          // 硬件声道数（0 = 未知）
 };
 
 // 创建平台 ADM（PulseAudio 后端）并 Init；必须在 worker 线程调用。

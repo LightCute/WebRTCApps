@@ -26,7 +26,8 @@ import time
 # ===================== 配置 =====================
 
 LOCAL_BIN = "/home/light/webrtc/checkout/src/out/webrtc_client_x64/webrtc_engine_main"
-CLOUD_BIN = "/root/stun_test/webrtc_engine_main"
+CLOUD_BIN = os.environ.get("CLOUD_BIN",
+                           "/root/stun_test/webrtc_engine_main")
 CLOUD_HOST = "120.79.210.6"
 CLOUD_USER = "root"
 SIGNAL_SERVER = "120.79.210.6"
@@ -61,6 +62,7 @@ class Daemon:
         self.env_file = LOCAL_ENV if location == "local" else CLOUD_ENV
         self.pid = None
         self.proc = None
+        self.stderr_file = None
         self.rfile = None
         self.wfile = None
         self.q = queue.Queue()
@@ -76,9 +78,12 @@ class Daemon:
                 os.unlink(self.sock)
             except OSError:
                 pass
+            # 保留 stderr：崩溃时能看到 WebRTC CHECK/栈。
+            self.stderr_file = open(
+                f"/tmp/wc_stress_local_stderr_{self.role}.log", "w")
             self.proc = subprocess.Popen(
                 [LOCAL_BIN] + args,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=subprocess.DEVNULL, stderr=self.stderr_file)
             self.pid = self.proc.pid
         else:
             cmd = (f"rm -f {self.sock}; nohup {CLOUD_BIN} " +
@@ -237,6 +242,24 @@ def wait_connected(o, a, timeout=CONNECT_TIMEOUT):
     return False
 
 
+def call_with_retry(offerer, answerer, aid, timeout=CONNECT_TIMEOUT,
+                    attempts=3):
+    """call 可能被本地 roster 缓存误判 peer_busy/peer_offline（leave 后竞态），
+    收到 ipc.error 就稍后重试。"""
+    for _ in range(attempts):
+        offerer.drain("peer_connection.state")
+        answerer.drain("peer_connection.state")
+        offerer.send(f"call {aid}")
+        err = offerer.wait_event("ipc.error", timeout=2.0)
+        if err is not None:
+            time.sleep(1.0)
+            continue
+        if wait_connected(offerer, answerer, timeout=timeout):
+            return True
+        time.sleep(1.0)
+    return False
+
+
 def wait_ice_switched(*ds, timeout=SWITCH_TIMEOUT):
     deadline = time.time() + timeout
     ok = {d: False for d in ds}
@@ -359,6 +382,12 @@ def interface_coverage(offerer, answerer, spare=None):
     c.expect_error(offerer, "set_video_stats bogus", "usage")
     c.expect_error(offerer, "set_video_device", "usage")
     c.expect_error(offerer, "get_video_device_capabilities", "usage")
+    c.expect_error(offerer, "set_audio_config", "usage")
+    c.expect_error(offerer, "set_audio_config no.such.key 1", "usage")
+    c.expect_error(offerer, "set_audio_config noise_suppression.level bogus",
+                   "usage")
+    c.expect_error(offerer, "set_audio_stats bogus", "usage")
+    c.expect_error(offerer, "set_audio_device", "usage")
 
     # ---- 设备错误（空闲） ----
     print("-- 设备错误 --", flush=True)
@@ -368,6 +397,7 @@ def interface_coverage(offerer, answerer, spare=None):
     # 合成设备只支持自身档位（640x480@30），1000fps 必然不支持
     c.expect_error(offerer, "set_video_profile 640 480 1000",
                    "unsupported_profile")
+    c.expect_error(offerer, "set_audio_device nonsense", "device_not_found")
 
     # ---- 视频类命令在空闲/未通话时的错误 ----
     print("-- 视频命令 not_in_call --", flush=True)
@@ -413,6 +443,72 @@ def interface_coverage(offerer, answerer, spare=None):
     ev = offerer.wait_event("ice_config", timeout=5)
     c.check("get_ice_config", ev is not None and ev.get("mode") in
             ("host", "srflx", "relay", "auto"))
+
+    # ---- 音频（空闲 happy） ----
+    print("-- 音频（空闲 happy） --", flush=True)
+    offerer.send("get_audio_devices")
+    ev = offerer.wait_event("audio_devices", timeout=10)
+    adevs = ev.get("devices", []) if ev else []
+    c.check("get_audio_devices", ev is not None and len(adevs) > 0,
+            f"devices={adevs}")
+    if adevs:
+        ad_ids = [d["id"] for d in adevs]
+        c.check("音频设备 id 唯一", len(set(ad_ids)) == len(ad_ids), f"ids={ad_ids}")
+        c.check("音频设备 available",
+                all(d.get("available") in ("yes", "no", "unknown")
+                    for d in adevs))
+        ad_real = [d for d in adevs if not d["name"].startswith("default:")]
+        c.check("音频硬件采样率",
+                any(d.get("hardware_sample_rate", 0) > 0 for d in ad_real))
+    offerer.send("get_audio_config")
+    ev = offerer.wait_event("audio_config", timeout=10)
+    c.check("get_audio_config",
+            ev is not None and
+            ev.get("processing", {}).get("noise_suppression", {}).get(
+                "enabled") is True, str(ev)[:160])
+    offerer.send("set_audio_config noise_suppression.level moderate")
+    ev = offerer.wait_event("audio_config", timeout=5)
+    c.check("set_audio_config ns_level",
+            ev is not None and
+            ev.get("processing", {}).get("noise_suppression", {}).get(
+                "level") == "moderate")
+    offerer.send("set_audio_config mic_muted on")
+    ev = offerer.wait_event("audio_config", timeout=5)
+    c.check("set_audio_config mic_muted",
+            ev is not None and
+            ev.get("device", {}).get("mic_muted") is True)
+    offerer.send("set_audio_config mic_muted off")
+    offerer.wait_event("audio_config", timeout=5)
+    offerer.send("set_audio_config speaker_volume 50")
+    ev = offerer.wait_event("audio_config", timeout=5)
+    c.check("set_audio_config speaker_volume",
+            ev is not None and
+            ev.get("device", {}).get("speaker_volume_available") in (True, False))
+    offerer.send("set_audio_config speaker_volume 100")
+    offerer.wait_event("audio_config", timeout=5)
+    target_adev = None
+    if adevs:
+        target_adev = next(
+            (d for d in adevs if not d["name"].startswith("default:")),
+            adevs[0])
+        offerer.send(f"set_audio_device {target_adev['id']}")
+        ev = offerer.wait_event("audio_device", timeout=10)
+        c.check("set_audio_device (idle)",
+                ev is not None and ev.get("result") == "success")
+        offerer.send("get_audio_status")
+        ev = offerer.wait_event("audio_status", timeout=5)
+        c.check("get_audio_status device_id",
+                ev is not None and ev.get("device_id") == target_adev["id"])
+    for d, label in ((offerer, "offerer"), (answerer, "answerer")):
+        d.send("audio_on")
+        ev = d.wait_event("audio_switched", timeout=5)
+        c.check(f"{label} audio_on (idle)",
+                ev is not None and ev.get("result") == "success" and
+                ev.get("enabled") is True)
+    offerer.send("get_audio_status")
+    ev = offerer.wait_event("audio_status", timeout=5)
+    c.check("get_audio_status enabled",
+            ev is not None and ev.get("enabled") is True)
 
     # ---- 视频设备 / 档位 / 开关（空闲 happy） ----
     print("-- 视频设备（空闲 happy） --", flush=True)
@@ -473,6 +569,55 @@ def interface_coverage(offerer, answerer, spare=None):
         c.check("call connected", False, "not connected")
         return c
     c.check("call connected", True)
+
+    # ---- 音频（通话中 happy） ----
+    print("-- 音频（通话中 happy） --", flush=True)
+    time.sleep(1.5)
+    # 云端无音频设备（回退 dummy）：只能收、不能发；本地负责发送。
+    offerer.send("get_stats")
+    st = offerer.wait_event("stats", timeout=5)
+    out_audio = [s for s in (st or {}).get("outbound_rtp", [])
+                 if s.get("kind") == "audio"]
+    c.check("offerer outbound audio",
+            bool(out_audio) and out_audio[0].get("packets_sent", 0) > 0,
+            str(out_audio)[:160])
+    # 云端 dummy ADM 上 GetStats 可能卡住，改用「收到远端音轨」事件证明到达。
+    c.check("answerer(cloud) remote_audio.started",
+            answerer.wait_event("remote_audio.started", timeout=10) is not None)
+    offerer.send("set_audio_stats on 1000")
+    a1 = offerer.wait_event("audio_stats", timeout=12)
+    a2 = offerer.wait_event("audio_stats", timeout=12)
+    c.check("audio_stats 周期推送",
+            a1 is not None and a2 is not None and
+            a2.get("send", {}).get("packets_sent", 0) >
+            a1.get("send", {}).get("packets_sent", 0),
+            f"{a1 and a1.get('send')} -> {a2 and a2.get('send')}")
+    c.check("audio_stats send codec=opus",
+            bool(a1) and a1.get("send", {}).get("codec", "").endswith("opus"))
+    c.check("audio_stats apm 字段",
+            bool(a1) and "residual_echo_likelihood" in a1.get("apm", {}))
+    offerer.send("set_audio_config gain_controller1.mode fixed_digital")
+    ev = offerer.wait_event("audio_config", timeout=5)
+    c.check("in-call set_audio_config agc_mode",
+            ev is not None and
+            ev.get("processing", {}).get("gain_controller1", {}).get(
+                "mode") == "fixed_digital")
+    offerer.send("set_audio_config mic_muted on")
+    ev = offerer.wait_event("audio_config", timeout=5)
+    c.check("in-call mic_muted on",
+            ev is not None and ev.get("device", {}).get("mic_muted") is True)
+    offerer.send("set_audio_config mic_muted off")
+    offerer.wait_event("audio_config", timeout=5)
+    if adevs and target_adev is not None:
+        alt = next((d for d in adevs
+                    if not d["name"].startswith("default:")
+                    and d["id"] != target_adev["id"]), None)
+        if alt is not None:
+            offerer.send(f"set_audio_device {alt['id']}")
+            ev = offerer.wait_event("audio_device", timeout=20)
+            c.check("in-call set_audio_device",
+                    ev is not None and ev.get("result") == "success")
+    offerer.send("set_audio_stats off")
 
     # ---- 通话中错误 ----
     print("-- 通话中错误 --", flush=True)
@@ -606,6 +751,19 @@ def interface_coverage(offerer, answerer, spare=None):
     c.check("answerer remote_video.stopped",
             answerer.wait_event("remote_video.stopped", timeout=15) is not None)
 
+    # ---- 音频开关（通话中，重协商） ----
+    print("-- 音频开关（通话中） --", flush=True)
+    offerer.send("audio_off")
+    ev = offerer.wait_event("audio_switched", timeout=20)
+    c.check("audio_off (in call)",
+            ev is not None and ev.get("result") == "success" and
+            ev.get("enabled") is False, str(ev))
+    offerer.send("audio_on")
+    ev = offerer.wait_event("audio_switched", timeout=20)
+    c.check("audio_on (in call)",
+            ev is not None and ev.get("result") == "success" and
+            ev.get("enabled") is True, str(ev))
+
     # ---- switch_ice happy（offerer relay -> srflx） ----
     print("-- switch_ice happy --", flush=True)
     offerer.send("switch_ice srflx")
@@ -617,12 +775,28 @@ def interface_coverage(offerer, answerer, spare=None):
         c.check("offerer selected=srflx/prflx", False, f"selected={selected_type(offerer)}")
     else:
         c.check("offerer selected=srflx/prflx", True)
+    time.sleep(1.5)
+    offerer.send("get_stats")
+    st = offerer.wait_event("stats", timeout=5)
+    audios = [s for s in (st or {}).get("outbound_rtp", [])
+              if s.get("kind") == "audio"]
+    c.check("switch_ice 后 offerer outbound audio",
+            bool(audios) and audios[0].get("packets_sent", 0) > 0,
+            str(audios)[:160])
 
     # ---- reconnect happy（复用旧候选，不重建） ----
     print("-- reconnect happy --", flush=True)
     offerer.send("reconnect")
     c.check("reconnect 完成", wait_reconnected(offerer))
     c.check("reconnect 后 mode 不变=srflx", ice_mode(offerer) == "srflx")
+    time.sleep(1.5)
+    offerer.send("get_stats")
+    st = offerer.wait_event("stats", timeout=5)
+    audios = [s for s in (st or {}).get("outbound_rtp", [])
+              if s.get("kind") == "audio"]
+    c.check("reconnect 后 offerer outbound audio",
+            bool(audios) and audios[0].get("packets_sent", 0) > 0,
+            str(audios)[:160])
 
     # ---- leave happy ----
     print("-- leave happy --", flush=True)
@@ -645,18 +819,29 @@ def stress_call_leave(offerer, answerer, cycles):
     print(f"  -- call/leave × {cycles} --", flush=True)
     c = Checker("call/leave")
     clear_stale(offerer, answerer)
+    for d in (offerer, answerer):
+        d.send("audio_on")
+        d.wait_event("audio_switched", timeout=5)
     aid = peer_id_of(offerer, "answerer")
     if aid <= 0:
         c.check("answerer in roster", False, "not found")
         return c
     for i in range(cycles):
-        offerer.drain("peer_connection.state")
-        answerer.drain("peer_connection.state")
-        offerer.send(f"call {aid}")
-        if not wait_connected(offerer, answerer):
+        if not call_with_retry(offerer, answerer, aid):
             c.check(f"cycle{i} connected", False, "not connected")
             break
         c.check(f"cycle{i} connected", True)
+        if i == 0:
+            time.sleep(1.0)
+            local = offerer if offerer.location == "local" else answerer
+            local.send("get_stats")
+            st = local.wait_event("stats", timeout=5)
+            audios = [s for s in (st or {}).get("outbound_rtp", [])
+                      if s.get("kind") == "audio"]
+            c.check("cycle0 local outbound audio",
+                    bool(audios) and
+                    audios[0].get("packets_sent", 0) > 0,
+                    str(audios)[:160])
         offerer.send("leave")
         if (offerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT) and
                 answerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)):
@@ -664,6 +849,8 @@ def stress_call_leave(offerer, answerer, cycles):
         else:
             c.check(f"cycle{i} leave", False, "call_ended 缺失")
             break
+        # 等信令服务器把对端状态刷成 idle，避免下一次 call 撞本地 roster 缓存。
+        time.sleep(1.0)
     return c
 
 
@@ -671,13 +858,15 @@ def stress_switch(offerer, answerer, cycles):
     print(f"  -- switch_ice × {cycles}（answerer=auto，offerer relay↔srflx） --", flush=True)
     c = Checker("switch_ice")
     clear_stale(offerer, answerer)
+    for d in (offerer, answerer):
+        d.send("audio_on")
+        d.wait_event("audio_switched", timeout=5)
     answerer.send("set_ice_transports auto")
     answerer.wait_event("ice_config", timeout=5)
     offerer.send("set_ice_transports relay")
     offerer.wait_event("ice_config", timeout=5)
     aid = peer_id_of(offerer, "answerer")
-    offerer.send(f"call {aid}")
-    if not wait_connected(offerer, answerer):
+    if not call_with_retry(offerer, answerer, aid):
         c.check("initial connected", False, "not connected")
         return c
     modes = ["srflx", "relay"] * ((cycles + 1) // 2)
@@ -693,6 +882,17 @@ def stress_switch(offerer, answerer, cycles):
         # 被 WebRTC 上报为 prflx，故 selected 只要不是 host（私网连不通）即算切换成功。
         if not wait_selected_any(offerer, ("relay", "srflx", "prflx")):
             c.check(f"switch{i} selected={m}", False, f"selected={selected_type(offerer)}")
+        if i == 0:
+            time.sleep(1.0)
+            local = offerer if offerer.location == "local" else answerer
+            local.send("get_stats")
+            st = local.wait_event("stats", timeout=5)
+            audios = [s for s in (st or {}).get("outbound_rtp", [])
+                      if s.get("kind") == "audio"]
+            c.check("switch0 后 local outbound audio",
+                    bool(audios) and
+                    audios[0].get("packets_sent", 0) > 0,
+                    str(audios)[:160])
     offerer.send("leave")
     offerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
     answerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
@@ -703,13 +903,15 @@ def stress_reconnect(offerer, answerer, cycles):
     print(f"  -- reconnect × {cycles}（relay） --", flush=True)
     c = Checker("reconnect")
     clear_stale(offerer, answerer)
+    for d in (offerer, answerer):
+        d.send("audio_on")
+        d.wait_event("audio_switched", timeout=5)
     offerer.send("set_ice_transports relay")
     offerer.wait_event("ice_config", timeout=5)
     answerer.send("set_ice_transports auto")
     answerer.wait_event("ice_config", timeout=5)
     aid = peer_id_of(offerer, "answerer")
-    offerer.send(f"call {aid}")
-    if not wait_connected(offerer, answerer):
+    if not call_with_retry(offerer, answerer, aid):
         c.check("initial connected", False, "not connected")
         return c
     for i in range(cycles):
@@ -719,6 +921,57 @@ def stress_reconnect(offerer, answerer, cycles):
         c.check(f"reconnect{i}", ok)
         if not ok:
             break
+        if i == 0:
+            time.sleep(1.0)
+            local = offerer if offerer.location == "local" else answerer
+            local.send("get_stats")
+            st = local.wait_event("stats", timeout=5)
+            audios = [s for s in (st or {}).get("outbound_rtp", [])
+                      if s.get("kind") == "audio"]
+            c.check("reconnect0 后 local outbound audio",
+                    bool(audios) and
+                    audios[0].get("packets_sent", 0) > 0,
+                    str(audios)[:160])
+    offerer.send("leave")
+    offerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
+    answerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
+    return c
+
+
+def stress_audio(offerer, answerer, cycles):
+    print(f"  -- audio on/off + mute × {cycles} --", flush=True)
+    c = Checker("audio")
+    clear_stale(offerer, answerer)
+    for d in (offerer, answerer):
+        d.send("audio_on")
+        d.wait_event("audio_switched", timeout=5)
+    aid = peer_id_of(offerer, "answerer")
+    if aid <= 0:
+        c.check("answerer in roster", False, "not found")
+        return c
+    if not call_with_retry(offerer, answerer, aid):
+        c.check("initial connected", False, "not connected")
+        return c
+    for i in range(cycles):
+        offerer.send("audio_off")
+        ev = offerer.wait_event(
+            "audio_switched",
+            lambda e: e.get("result") == "success" and
+            e.get("enabled") is False, timeout=25)
+        c.check(f"audio_off{i}", ev is not None)
+        offerer.send("audio_on")
+        ev = offerer.wait_event(
+            "audio_switched",
+            lambda e: e.get("result") == "success" and
+            e.get("enabled") is True, timeout=25)
+        c.check(f"audio_on{i}", ev is not None)
+        offerer.send("set_audio_config mic_muted on")
+        ev = offerer.wait_event(
+            "audio_config",
+            lambda e: e.get("device", {}).get("mic_muted") is True, timeout=5)
+        c.check(f"mute{i}", ev is not None)
+        offerer.send("set_audio_config mic_muted off")
+        offerer.wait_event("audio_config", timeout=5)
     offerer.send("leave")
     offerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
     answerer.wait_event("signal_client.call_ended", timeout=CALL_END_TIMEOUT)
@@ -802,7 +1055,8 @@ def main():
 
                 for c in (stress_call_leave(o, a, args.cycles),
                           stress_switch(o, a, args.cycles),
-                          stress_reconnect(o, a, args.cycles)):
+                          stress_reconnect(o, a, args.cycles),
+                          stress_audio(o, a, min(args.cycles, 3))):
                     all_fails += [f"方向{d}/{c.label}/{f}" for f in c.fails]
 
                 # 进程存活 + 状态复位检查

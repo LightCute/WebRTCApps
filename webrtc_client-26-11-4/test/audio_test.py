@@ -186,8 +186,8 @@ def main():
         for dev in devices:
             if dev.get("id", "").endswith(".monitor"):
                 fail(f"枚举出 monitor 伪设备: {dev}")
-            if dev.get("id") != dev.get("name"):
-                fail(f"id/name 不一致: {dev}")
+            if not dev.get("id"):
+                fail(f"设备缺少稳定 id: {dev}")
         print(f"A5 枚举到 {len(devices)} 个录音设备: "
               f"{[d['name'] for d in devices]}")
 
@@ -259,10 +259,22 @@ def main():
         print(f"A1 双向音频流流动: offerer ssrc={o['ssrc']} / "
               f"answerer ssrc={a['ssrc']} (audio/opus)")
 
-        # A7: 通话中切设备 → unsupported_in_call
-        offerer.send(f"set_audio_device {preferred['id']}")
-        expect_error(offerer, "unsupported_in_call")
-        print("A7 通话中切设备 → unsupported_in_call")
+        # A7: 通话中切设备（第二期支持，不重协商；允许短暂采集中断）
+        other = next((d for d in devices
+                      if d["name"] != preferred["name"]
+                      and not d["name"].startswith("default:")), None)
+        if other is not None:
+            offerer.send(f"set_audio_device {other['name']}")
+            ev = offerer.wait("audio_device", timeout=15)
+            if ev is None or ev.get("result") != "success":
+                fail(f"A7 通话中切设备失败: {ev}")
+            if wait_audio_growing(answerer, 15) is None:
+                fail("A7 切设备后对端收流未恢复")
+            print(f"A7 通话中切设备 OK: {other['name']}")
+        else:
+            offerer.send("set_audio_device no.such.device")
+            expect_error(offerer, "device_not_found")
+            print("A7 只有单个设备，验证非法设备路径")
 
         # A2: audio_off（offerer 停止发送）
         offerer.send("audio_off")
